@@ -53,6 +53,22 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
         };
     }
 
+    if (req.method == .GET and std.mem.eql(u8, path, "/.well-known/webfinger")) {
+        return webfinger(app_state, allocator, req);
+    }
+
+    if (req.method == .GET and std.mem.eql(u8, path, "/.well-known/nodeinfo")) {
+        return nodeinfoDiscovery(app_state, allocator);
+    }
+
+    if (req.method == .GET and std.mem.eql(u8, path, "/nodeinfo/2.0")) {
+        return nodeinfoDocument(app_state, allocator);
+    }
+
+    if (req.method == .GET and std.mem.startsWith(u8, path, "/users/")) {
+        return actorGet(app_state, allocator, path);
+    }
+
     if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/instance")) {
         const payload = .{
             .uri = app_state.cfg.domain,
@@ -255,6 +271,174 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
     }
 
     return .{ .status = .not_found, .body = "not found\n" };
+}
+
+fn baseUrlAlloc(app_state: *app.App, allocator: std.mem.Allocator) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{s}://{s}", .{
+        @tagName(app_state.cfg.scheme),
+        app_state.cfg.domain,
+    });
+}
+
+fn webfinger(app_state: *app.App, allocator: std.mem.Allocator, req: Request) Response {
+    const q = queryString(req.target);
+    const resource = parseQueryParam(allocator, q, "resource") catch
+        return .{ .status = .bad_request, .body = "invalid query\n" };
+    if (resource == null) return .{ .status = .bad_request, .body = "missing resource\n" };
+
+    const prefix = "acct:";
+    if (!std.mem.startsWith(u8, resource.?, prefix)) return .{ .status = .not_found, .body = "not found\n" };
+
+    const acct = resource.?[prefix.len..];
+    const at = std.mem.indexOfScalar(u8, acct, '@') orelse return .{ .status = .not_found, .body = "not found\n" };
+    const username = acct[0..at];
+    const domain = acct[at + 1 ..];
+    if (!std.mem.eql(u8, domain, app_state.cfg.domain)) return .{ .status = .not_found, .body = "not found\n" };
+
+    const user = users.lookupUserByUsername(&app_state.conn, allocator, username) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (user == null) return .{ .status = .not_found, .body = "not found\n" };
+
+    const base = baseUrlAlloc(app_state, allocator) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    const href = std.fmt.allocPrint(allocator, "{s}/users/{s}", .{ base, username }) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    const Link = struct {
+        rel: []const u8,
+        type: []const u8,
+        href: []const u8,
+    };
+
+    const payload = .{
+        .subject = resource.?,
+        .links = [_]Link{
+            .{ .rel = "self", .type = "application/activity+json", .href = href },
+        },
+    };
+
+    const body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    return .{
+        .content_type = "application/jrd+json; charset=utf-8",
+        .body = body,
+    };
+}
+
+fn nodeinfoDiscovery(app_state: *app.App, allocator: std.mem.Allocator) Response {
+    const base = baseUrlAlloc(app_state, allocator) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    const href = std.fmt.allocPrint(allocator, "{s}/nodeinfo/2.0", .{base}) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    const payload = .{
+        .links = [_]struct { rel: []const u8, href: []const u8 }{
+            .{
+                .rel = "http://nodeinfo.diaspora.software/ns/schema/2.0",
+                .href = href,
+            },
+        },
+    };
+
+    const body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    return .{
+        .content_type = "application/json; charset=utf-8",
+        .body = body,
+    };
+}
+
+fn nodeinfoDocument(app_state: *app.App, allocator: std.mem.Allocator) Response {
+    const user_count = users.count(&app_state.conn) catch 0;
+    const open_registrations = (user_count == 0);
+
+    const payload = .{
+        .version = "2.0",
+        .software = .{
+            .name = "feddyspice",
+            .version = version.version,
+        },
+        .protocols = [_][]const u8{"activitypub"},
+        .services = .{
+            .inbound = [_][]const u8{},
+            .outbound = [_][]const u8{},
+        },
+        .openRegistrations = open_registrations,
+        .usage = .{
+            .users = .{
+                .total = user_count,
+            },
+            .localPosts = @as(i64, 0),
+        },
+        .metadata = .{},
+    };
+
+    const body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    return .{
+        .content_type = "application/json; charset=utf-8",
+        .body = body,
+    };
+}
+
+fn actorGet(app_state: *app.App, allocator: std.mem.Allocator, path: []const u8) Response {
+    const username = path["/users/".len..];
+    if (username.len == 0) return .{ .status = .not_found, .body = "not found\n" };
+    if (std.mem.indexOfScalar(u8, username, '/') != null) return .{ .status = .not_found, .body = "not found\n" };
+
+    const user = users.lookupUserByUsername(&app_state.conn, allocator, username) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (user == null) return .{ .status = .not_found, .body = "not found\n" };
+
+    const base = baseUrlAlloc(app_state, allocator) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    const actor_id = std.fmt.allocPrint(allocator, "{s}/users/{s}", .{ base, username }) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    const inbox = std.fmt.allocPrint(allocator, "{s}/users/{s}/inbox", .{ base, username }) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    const outbox = std.fmt.allocPrint(allocator, "{s}/users/{s}/outbox", .{ base, username }) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    const followers = std.fmt.allocPrint(allocator, "{s}/users/{s}/followers", .{ base, username }) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    const following = std.fmt.allocPrint(allocator, "{s}/users/{s}/following", .{ base, username }) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    const key_id = std.fmt.allocPrint(allocator, "{s}#main-key", .{actor_id}) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    const payload = .{
+        .@"@context" = [_][]const u8{
+            "https://www.w3.org/ns/activitystreams",
+            "https://w3id.org/security/v1",
+        },
+        .id = actor_id,
+        .type = "Person",
+        .preferredUsername = user.?.username,
+        .inbox = inbox,
+        .outbox = outbox,
+        .followers = followers,
+        .following = following,
+        .publicKey = .{
+            .id = key_id,
+            .owner = actor_id,
+            .publicKeyPem = "",
+        },
+    };
+
+    const body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    return .{
+        .content_type = "application/activity+json; charset=utf-8",
+        .body = body,
+    };
 }
 
 fn createStatus(app_state: *app.App, allocator: std.mem.Allocator, req: Request) Response {
@@ -1192,6 +1376,102 @@ test "statuses: create + get + home timeline" {
 
     try std.testing.expectEqual(@as(usize, 1), tl_json.value.array.items.len);
     try std.testing.expectEqualStrings(id, tl_json.value.array.items[0].object.get("id").?.string);
+}
+
+test "GET /.well-known/webfinger returns actor self link" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    _ = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const resp = handle(&app_state, arena.allocator(), .{
+        .method = .GET,
+        .target = "/.well-known/webfinger?resource=acct:alice@example.test",
+    });
+    try std.testing.expectEqual(std.http.Status.ok, resp.status);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, resp.body, .{});
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("acct:alice@example.test", parsed.value.object.get("subject").?.string);
+
+    const links = parsed.value.object.get("links").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), links.len);
+    try std.testing.expectEqualStrings("self", links[0].object.get("rel").?.string);
+    try std.testing.expectEqualStrings("http://example.test/users/alice", links[0].object.get("href").?.string);
+}
+
+test "GET /.well-known/nodeinfo returns discovery document" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const resp = handle(&app_state, arena.allocator(), .{
+        .method = .GET,
+        .target = "/.well-known/nodeinfo",
+    });
+    try std.testing.expectEqual(std.http.Status.ok, resp.status);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, resp.body, .{});
+    defer parsed.deinit();
+
+    const links = parsed.value.object.get("links").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), links.len);
+    try std.testing.expectEqualStrings(
+        "http://nodeinfo.diaspora.software/ns/schema/2.0",
+        links[0].object.get("rel").?.string,
+    );
+    try std.testing.expectEqualStrings("http://example.test/nodeinfo/2.0", links[0].object.get("href").?.string);
+}
+
+test "GET /nodeinfo/2.0 returns nodeinfo document" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const resp = handle(&app_state, arena.allocator(), .{
+        .method = .GET,
+        .target = "/nodeinfo/2.0",
+    });
+    try std.testing.expectEqual(std.http.Status.ok, resp.status);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, resp.body, .{});
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("2.0", parsed.value.object.get("version").?.string);
+    try std.testing.expectEqualStrings("feddyspice", parsed.value.object.get("software").?.object.get("name").?.string);
+}
+
+test "GET /users/:name returns ActivityPub actor" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    _ = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const resp = handle(&app_state, arena.allocator(), .{
+        .method = .GET,
+        .target = "/users/alice",
+    });
+    try std.testing.expectEqual(std.http.Status.ok, resp.status);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, resp.body, .{});
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("Person", parsed.value.object.get("type").?.string);
+    try std.testing.expectEqualStrings("alice", parsed.value.object.get("preferredUsername").?.string);
+    try std.testing.expectEqualStrings("http://example.test/users/alice", parsed.value.object.get("id").?.string);
 }
 
 fn extractBetween(haystack: []const u8, start: []const u8, end: []const u8) ?[]const u8 {

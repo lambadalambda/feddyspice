@@ -139,6 +139,29 @@ pub fn lookupUserById(
     };
 }
 
+pub fn lookupUserByUsername(
+    conn: *db.Db,
+    allocator: std.mem.Allocator,
+    username: []const u8,
+) (db.Error || std.mem.Allocator.Error)!?User {
+    var stmt = try conn.prepareZ(
+        "SELECT id, username, created_at FROM users WHERE username = ?1 LIMIT 1;\x00",
+    );
+    defer stmt.finalize();
+    try stmt.bindText(1, username);
+
+    switch (try stmt.step()) {
+        .done => return null,
+        .row => {},
+    }
+
+    return .{
+        .id = stmt.columnInt64(0),
+        .username = try allocator.dupe(u8, stmt.columnText(1)),
+        .created_at = try allocator.dupe(u8, stmt.columnText(2)),
+    };
+}
+
 pub fn freeCredentials(allocator: std.mem.Allocator, creds: *Credentials) void {
     allocator.free(creds.username);
     creds.* = undefined;
@@ -207,4 +230,23 @@ test "enforces single-user" {
         error.SingleUserOnly,
         createWithSalt(&conn, std.testing.allocator, "bob", "password", salt, params),
     );
+}
+
+test "lookupUserByUsername" {
+    var conn = try db.Db.openZ(":memory:");
+    defer conn.close();
+
+    try @import("migrations.zig").migrate(&conn);
+
+    const params: password.Params = .{ .t = 1, .m = 8, .p = 1 };
+    const salt: password.Salt = .{0x04} ** password.SaltLen;
+
+    const id = try createWithSalt(&conn, std.testing.allocator, "alice", "password", salt, params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const got = (try lookupUserByUsername(&conn, arena.allocator(), "alice")).?;
+    try std.testing.expectEqual(id, got.id);
+    try std.testing.expectEqualStrings("alice", got.username);
 }
