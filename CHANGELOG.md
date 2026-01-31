@@ -10,3 +10,4 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - Initial repository scaffolding (docs + planning).
 - Fedbox scaffold for federation smoke tests.
+- Zig project skeleton and minimal HTTP server with `/healthz`.
