@@ -6,6 +6,7 @@ pub const config = @import("config.zig");
 pub const crypto_rsa = @import("crypto_rsa.zig");
 pub const db = @import("db.zig");
 pub const http = @import("http.zig");
+pub const http_signatures = @import("http_signatures.zig");
 pub const migrations = @import("migrations.zig");
 pub const password = @import("password.zig");
 pub const oauth = @import("oauth.zig");
