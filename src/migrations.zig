@@ -59,6 +59,11 @@ const migrations = [_]Migration{
         .name = "create_sessions",
         .sql = sessions_v2_sql,
     },
+    .{
+        .version = 3,
+        .name = "create_oauth",
+        .sql = oauth_v3_sql,
+    },
 };
 
 const schema_migrations_sql: [:0]const u8 =
@@ -100,6 +105,43 @@ const sessions_v2_sql: [:0]const u8 =
     \\CREATE INDEX IF NOT EXISTS sessions_user_id ON sessions(user_id);
     ++ "\x00";
 
+const oauth_v3_sql: [:0]const u8 =
+    \\CREATE TABLE IF NOT EXISTS oauth_apps (
+    \\  id INTEGER PRIMARY KEY,
+    \\  name TEXT NOT NULL,
+    \\  client_id TEXT NOT NULL UNIQUE,
+    \\  client_secret TEXT NOT NULL,
+    \\  redirect_uris TEXT NOT NULL,
+    \\  scopes TEXT NOT NULL,
+    \\  website TEXT NOT NULL,
+    \\  created_at TEXT NOT NULL
+    \\);
+    \\
+    \\CREATE TABLE IF NOT EXISTS oauth_auth_codes (
+    \\  code TEXT PRIMARY KEY,
+    \\  app_id INTEGER NOT NULL REFERENCES oauth_apps(id) ON DELETE CASCADE,
+    \\  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    \\  redirect_uri TEXT NOT NULL,
+    \\  scopes TEXT NOT NULL,
+    \\  created_at TEXT NOT NULL,
+    \\  expires_at TEXT NOT NULL
+    \\);
+    \\
+    \\CREATE INDEX IF NOT EXISTS oauth_auth_codes_user_id ON oauth_auth_codes(user_id);
+    \\
+    \\CREATE TABLE IF NOT EXISTS oauth_access_tokens (
+    \\  id INTEGER PRIMARY KEY,
+    \\  token_hash BLOB NOT NULL UNIQUE,
+    \\  app_id INTEGER NOT NULL REFERENCES oauth_apps(id) ON DELETE CASCADE,
+    \\  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    \\  scopes TEXT NOT NULL,
+    \\  created_at TEXT NOT NULL,
+    \\  expires_at TEXT NOT NULL
+    \\);
+    \\
+    \\CREATE INDEX IF NOT EXISTS oauth_access_tokens_user_id ON oauth_access_tokens(user_id);
+    ++ "\x00";
+
 test "migrate: creates users table and records version" {
     var conn = try db.Db.openZ(":memory:");
     defer conn.close();
@@ -120,6 +162,8 @@ test "migrate: creates users table and records version" {
     try std.testing.expectEqual(@as(i64, 1), v_stmt.columnInt64(0));
     try std.testing.expectEqual(db.Stmt.Step.row, try v_stmt.step());
     try std.testing.expectEqual(@as(i64, 2), v_stmt.columnInt64(0));
+    try std.testing.expectEqual(db.Stmt.Step.row, try v_stmt.step());
+    try std.testing.expectEqual(@as(i64, 3), v_stmt.columnInt64(0));
     try std.testing.expectEqual(db.Stmt.Step.done, try v_stmt.step());
 }
 
@@ -134,6 +178,6 @@ test "migrate: is idempotent" {
     defer stmt.finalize();
 
     try std.testing.expectEqual(db.Stmt.Step.row, try stmt.step());
-    try std.testing.expectEqual(@as(i64, 2), stmt.columnInt64(0));
+    try std.testing.expectEqual(@as(i64, 3), stmt.columnInt64(0));
     try std.testing.expectEqual(db.Stmt.Step.done, try stmt.step());
 }

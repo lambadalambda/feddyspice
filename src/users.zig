@@ -16,6 +16,12 @@ pub const Credentials = struct {
     password_hash: password.Hash,
 };
 
+pub const User = struct {
+    id: i64,
+    username: []const u8,
+    created_at: []const u8,
+};
+
 pub fn count(conn: *db.Db) db.Error!i64 {
     var stmt = try conn.prepareZ("SELECT COUNT(*) FROM users;\x00");
     defer stmt.finalize();
@@ -106,6 +112,30 @@ pub fn lookupCredentials(
         .username = username_copy,
         .password_salt = salt,
         .password_hash = pw_hash,
+    };
+}
+
+pub fn lookupUserById(
+    conn: *db.Db,
+    allocator: std.mem.Allocator,
+    id: i64,
+) (db.Error || std.mem.Allocator.Error)!?User {
+    var stmt = try conn.prepareZ(
+        "SELECT id, username, created_at FROM users WHERE id = ?1 LIMIT 1;\x00",
+    );
+    defer stmt.finalize();
+
+    try stmt.bindInt64(1, id);
+
+    switch (try stmt.step()) {
+        .done => return null,
+        .row => {},
+    }
+
+    return .{
+        .id = stmt.columnInt64(0),
+        .username = try allocator.dupe(u8, stmt.columnText(1)),
+        .created_at = try allocator.dupe(u8, stmt.columnText(2)),
     };
 }
 

@@ -15,3 +15,5 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Password hashing (Argon2id) and single-user creation/login helpers.
 - App wiring and basic Mastodon-compatible instance endpoint (`/api/v1/instance`).
 - Minimal HTML signup/login and session cookies.
+- OAuth 2.0 app registration and authorization-code flow (`/api/v1/apps`, `/oauth/authorize`, `/oauth/token`).
+- Bearer-token auth for `/api/v1/accounts/verify_credentials`.
