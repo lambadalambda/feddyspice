@@ -4,22 +4,24 @@ const http = std.http;
 const net = std.net;
 
 const routes = @import("http.zig");
+const app = @import("app.zig");
 
-pub fn serve(listen_address: net.Address) !void {
+pub fn serve(app_state: *app.App, listen_address: net.Address) !void {
     var listener = try listen_address.listen(.{ .reuse_address = true });
     defer listener.deinit();
 
     while (true) {
-        try serveOnce(&listener);
+        try serveOnce(app_state, &listener);
     }
 }
 
-pub fn serveOnce(listener: *net.Server) !void {
+pub fn serveOnce(app_state: *app.App, listener: *net.Server) !void {
     var conn = try listener.accept();
     defer conn.stream.close();
 
     var read_buffer: [16 * 1024]u8 = undefined;
     var write_buffer: [16 * 1024]u8 = undefined;
+    var body_read_buffer: [16 * 1024]u8 = undefined;
 
     var reader = net.Stream.Reader.init(conn.stream, &read_buffer);
     var writer = net.Stream.Writer.init(conn.stream, &write_buffer);
@@ -27,15 +29,65 @@ pub fn serveOnce(listener: *net.Server) !void {
     var server = http.Server.init(reader.interface(), &writer.interface);
     var request = try server.receiveHead();
 
-    const resp = routes.route(request.head.method, request.head.target);
-    const headers: [1]http.Header = .{
-        .{ .name = "content-type", .value = resp.content_type },
-    };
+    const method = request.head.method;
+    const target = request.head.target;
+    const content_type = request.head.content_type;
+
+    var cookie: ?[]const u8 = null;
+    var authorization: ?[]const u8 = null;
+
+    var it = request.iterateHeaders();
+    while (it.next()) |h| {
+        if (std.ascii.eqlIgnoreCase(h.name, "cookie")) cookie = h.value;
+        if (std.ascii.eqlIgnoreCase(h.name, "authorization")) authorization = h.value;
+    }
+
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var body: []const u8 = "";
+    if (request.head.method.requestHasBody()) {
+        const max_len: usize = 1024 * 1024;
+        const content_length: usize = @intCast(request.head.content_length orelse 0);
+        if (content_length > max_len) {
+            const resp: routes.Response = .{
+                .status = .payload_too_large,
+                .body = "payload too large\n",
+            };
+            try writeResponse(&request, resp);
+            return;
+        }
+
+        request.head.expect = null;
+        const body_reader = request.readerExpectNone(&body_read_buffer);
+        body = body_reader.readAlloc(alloc, content_length) catch "";
+    }
+
+    const resp = routes.handle(app_state, alloc, .{
+        .method = method,
+        .target = target,
+        .content_type = content_type,
+        .body = body,
+        .cookie = cookie,
+        .authorization = authorization,
+    });
+
+    try writeResponse(&request, resp);
+}
+
+fn writeResponse(request: *http.Server.Request, resp: routes.Response) !void {
+    const header_count: usize = 1 + resp.headers.len;
+    var headers = try std.heap.page_allocator.alloc(http.Header, header_count);
+    defer std.heap.page_allocator.free(headers);
+
+    headers[0] = .{ .name = "content-type", .value = resp.content_type };
+    for (resp.headers, 0..) |h, i| headers[i + 1] = h;
 
     try request.respond(resp.body, .{
         .status = resp.status,
         .keep_alive = false,
-        .extra_headers = headers[0..],
+        .extra_headers = headers,
     });
 }
 
@@ -84,7 +136,10 @@ test "serveOnce: GET /healthz -> 200" {
 
     var t = try std.Thread.spawn(.{}, Client.run, .{&ctx});
 
-    try serveOnce(&listener);
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    try serveOnce(&app_state, &listener);
     t.join();
 
     try std.testing.expect(ctx.ok);

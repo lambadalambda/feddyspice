@@ -54,6 +54,11 @@ const migrations = [_]Migration{
         .name = "create_users",
         .sql = users_v1_sql,
     },
+    .{
+        .version = 2,
+        .name = "create_sessions",
+        .sql = sessions_v2_sql,
+    },
 };
 
 const schema_migrations_sql: [:0]const u8 =
@@ -84,6 +89,17 @@ const users_v1_sql: [:0]const u8 =
     \\);
     ++ "\x00";
 
+const sessions_v2_sql: [:0]const u8 =
+    \\CREATE TABLE IF NOT EXISTS sessions (
+    \\  id INTEGER PRIMARY KEY,
+    \\  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    \\  token_hash BLOB NOT NULL UNIQUE,
+    \\  created_at TEXT NOT NULL,
+    \\  expires_at TEXT NOT NULL
+    \\);
+    \\CREATE INDEX IF NOT EXISTS sessions_user_id ON sessions(user_id);
+    ++ "\x00";
+
 test "migrate: creates users table and records version" {
     var conn = try db.Db.openZ(":memory:");
     defer conn.close();
@@ -102,6 +118,8 @@ test "migrate: creates users table and records version" {
 
     try std.testing.expectEqual(db.Stmt.Step.row, try v_stmt.step());
     try std.testing.expectEqual(@as(i64, 1), v_stmt.columnInt64(0));
+    try std.testing.expectEqual(db.Stmt.Step.row, try v_stmt.step());
+    try std.testing.expectEqual(@as(i64, 2), v_stmt.columnInt64(0));
     try std.testing.expectEqual(db.Stmt.Step.done, try v_stmt.step());
 }
 
@@ -116,6 +134,6 @@ test "migrate: is idempotent" {
     defer stmt.finalize();
 
     try std.testing.expectEqual(db.Stmt.Step.row, try stmt.step());
-    try std.testing.expectEqual(@as(i64, 1), stmt.columnInt64(0));
+    try std.testing.expectEqual(@as(i64, 2), stmt.columnInt64(0));
     try std.testing.expectEqual(db.Stmt.Step.done, try stmt.step());
 }

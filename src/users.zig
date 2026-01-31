@@ -56,6 +56,18 @@ pub fn createWithSalt(
     return conn.lastInsertRowId();
 }
 
+pub fn create(
+    conn: *db.Db,
+    allocator: std.mem.Allocator,
+    username: []const u8,
+    plaintext_password: []const u8,
+    params: password.Params,
+) Error!i64 {
+    var salt: password.Salt = undefined;
+    std.crypto.random.bytes(&salt);
+    return createWithSalt(conn, allocator, username, plaintext_password, salt, params);
+}
+
 pub fn lookupCredentials(
     conn: *db.Db,
     allocator: std.mem.Allocator,
@@ -109,18 +121,30 @@ pub fn verifyLogin(
     plaintext_password: []const u8,
     params: password.Params,
 ) Error!bool {
+    return (try authenticate(conn, allocator, username, plaintext_password, params)) != null;
+}
+
+pub fn authenticate(
+    conn: *db.Db,
+    allocator: std.mem.Allocator,
+    username: []const u8,
+    plaintext_password: []const u8,
+    params: password.Params,
+) Error!?i64 {
     const creds_opt = try lookupCredentials(conn, allocator, username);
-    if (creds_opt == null) return false;
+    if (creds_opt == null) return null;
     var creds = creds_opt.?;
     defer freeCredentials(allocator, &creds);
 
-    return try password.verifyPassword(
+    const ok = try password.verifyPassword(
         allocator,
         plaintext_password,
         creds.password_salt,
         creds.password_hash,
         params,
     );
+    if (!ok) return null;
+    return creds.id;
 }
 
 test "create single user and verify password" {

@@ -13,3 +13,5 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Zig project skeleton and minimal HTTP server with `/healthz`.
 - SQLite DB wrapper and migrations (including initial `users` table).
 - Password hashing (Argon2id) and single-user creation/login helpers.
+- App wiring and basic Mastodon-compatible instance endpoint (`/api/v1/instance`).
+- Minimal HTML signup/login and session cookies.
