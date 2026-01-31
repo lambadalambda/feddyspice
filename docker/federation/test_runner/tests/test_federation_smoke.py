@@ -1,6 +1,7 @@
 import re
 import os
 import time
+import html
 from dataclasses import dataclass
 
 import requests
@@ -206,10 +207,12 @@ def follow_remote(pleroma_base_url: str, access_token: str, handle: str) -> None
         timeout=10,
     )
 
-    # Mastodon v4.5+ no longer exposes POST /api/v1/follows; keep the fallback
-    # here for future re-use when fedbox grows to include more servers.
     if resp.status_code in (404, 405):
         acct = handle.lstrip("@")
+        account_id = None
+
+        # Some servers support /api/v1/accounts/lookup for remote accounts, some
+        # don't (e.g. the Pleroma build used by fedbox).
         lookup = requests.get(
             f"{pleroma_base_url}/api/v1/accounts/lookup",
             headers={"authorization": f"Bearer {access_token}"},
@@ -217,8 +220,23 @@ def follow_remote(pleroma_base_url: str, access_token: str, handle: str) -> None
             verify=verify_arg(),
             timeout=10,
         )
-        lookup.raise_for_status()
-        account_id = lookup.json()["id"]
+        if lookup.status_code >= 200 and lookup.status_code < 300:
+            account_id = lookup.json()["id"]
+
+        # Fallback: use accounts/search with resolve=true.
+        if account_id is None:
+            search = requests.get(
+                f"{pleroma_base_url}/api/v1/accounts/search",
+                headers={"authorization": f"Bearer {access_token}"},
+                params={"q": acct, "resolve": "true"},
+                verify=verify_arg(),
+                timeout=10,
+            )
+            search.raise_for_status()
+            results = search.json()
+            if not isinstance(results, list) or not results:
+                raise AssertionError(f"accounts/search returned no results for {acct}")
+            account_id = results[0]["id"]
 
         follow = requests.post(
             f"{pleroma_base_url}/api/v1/accounts/{account_id}/follow",
@@ -495,7 +513,10 @@ def test_feddyspice_follow_to_pleroma_receives_post():
     pleroma_post(pleroma_base_url, pleroma_token, marker)
 
     wait_until(
-        lambda: any(marker in item.get("content", "") for item in feddyspice_home_timeline(feddy_base_url, feddy_token)),
+        lambda: any(
+            marker in html.unescape(item.get("content", ""))
+            for item in feddyspice_home_timeline(feddy_base_url, feddy_token)
+        ),
         desc="feddyspice received remote post from pleroma",
         timeout_s=240,
         interval_s=2.0,
@@ -535,7 +556,10 @@ def test_feddyspice_post_reaches_pleroma_follower():
     feddyspice_post(feddy_base_url, feddy_token, marker)
 
     wait_until(
-        lambda: any(marker in item.get("content", "") for item in pleroma_home_timeline(pleroma_base_url, pleroma_token)),
+        lambda: any(
+            marker in html.unescape(item.get("content", ""))
+            for item in pleroma_home_timeline(pleroma_base_url, pleroma_token)
+        ),
         desc="pleroma received remote post from feddyspice",
         timeout_s=240,
         interval_s=2.0,
