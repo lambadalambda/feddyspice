@@ -22,17 +22,28 @@ Tooling is managed via `mise`:
 mise install
 ```
 
-Planned common workflows (will land with the initial Zig skeleton):
+Common workflows:
 
 - `zig build test`
+- `zig build run`
 - `zig fmt .`
+
+## Running locally
+
+```bash
+FEDDYSPICE_DOMAIN=localhost \
+FEDDYSPICE_SCHEME=http \
+FEDDYSPICE_LISTEN=0.0.0.0:8080 \
+FEDDYSPICE_DB_PATH=./feddyspice.sqlite3 \
+zig build run
+```
 
 ## Federation-in-a-box (E2E)
 
-This repo will include a Docker Compose “fedbox” that runs:
+This repo includes a Docker Compose “fedbox” that runs:
 
 - `feddyspice` (this project)
-- at least two reference servers (e.g. Pleroma + Mastodon)
+- two reference servers (Pleroma + Mastodon)
 - a small test runner that verifies real federation flows
 
 See `docker/federation/README.md`.
