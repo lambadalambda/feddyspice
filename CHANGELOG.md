@@ -27,3 +27,4 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Home timeline + status lookup can return remote posts (negative `id`s in `GET /api/v1/timelines/home` and `GET /api/v1/statuses/:id`).
 - Followers table + helpers for tracking inbound follows (remote accounts following this user).
 - Inbox handling for ActivityPub `Follow`: store inbound follower + send signed `Accept`; expose `GET /users/:name/followers` and `GET /users/:name/following` collections.
+- ActivityPub outbox + object endpoints (`GET /users/:name/outbox`, `GET /users/:name/statuses/:id`).

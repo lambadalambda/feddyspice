@@ -2,6 +2,7 @@ const std = @import("std");
 
 const app = @import("app.zig");
 const actor_keys = @import("actor_keys.zig");
+const db = @import("db.zig");
 const federation = @import("federation.zig");
 const form = @import("form.zig");
 const follows = @import("follows.zig");
@@ -79,6 +80,8 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
         if (req.method == .GET) {
             if (std.mem.endsWith(u8, path, "/followers")) return followersGet(app_state, allocator, path);
             if (std.mem.endsWith(u8, path, "/following")) return followingGet(app_state, allocator, path);
+            if (std.mem.endsWith(u8, path, "/outbox")) return outboxGet(app_state, allocator, req, path);
+            if (std.mem.indexOf(u8, path, "/statuses/") != null) return userStatusGet(app_state, allocator, path);
             return actorGet(app_state, allocator, path);
         }
     }
@@ -535,6 +538,201 @@ fn followingGet(app_state: *app.App, allocator: std.mem.Allocator, path: []const
         .type = "OrderedCollection",
         .totalItems = total,
         .orderedItems = items,
+    };
+
+    const body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    return .{
+        .content_type = "application/activity+json; charset=utf-8",
+        .body = body,
+    };
+}
+
+fn outboxGet(app_state: *app.App, allocator: std.mem.Allocator, req: Request, path: []const u8) Response {
+    const prefix = "/users/";
+    const suffix = "/outbox";
+    if (!std.mem.startsWith(u8, path, prefix)) return .{ .status = .not_found, .body = "not found\n" };
+    if (!std.mem.endsWith(u8, path, suffix)) return .{ .status = .not_found, .body = "not found\n" };
+
+    const username = path[prefix.len .. path.len - suffix.len];
+    if (username.len == 0) return .{ .status = .not_found, .body = "not found\n" };
+    if (std.mem.indexOfScalar(u8, username, '/') != null) return .{ .status = .not_found, .body = "not found\n" };
+
+    const user = users.lookupUserByUsername(&app_state.conn, allocator, username) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (user == null) return .{ .status = .not_found, .body = "not found\n" };
+
+    const base = baseUrlAlloc(app_state, allocator) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    const outbox_id = std.fmt.allocPrint(allocator, "{s}/users/{s}/outbox", .{ base, username }) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    const q = queryString(req.target);
+    var params = form.parse(allocator, q) catch form.Form{ .map = .empty };
+    const is_page = params.get("page") != null;
+
+    if (!is_page) {
+        var count_stmt = app_state.conn.prepareZ("SELECT COUNT(*) FROM statuses WHERE user_id = ?1;\x00") catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        defer count_stmt.finalize();
+        count_stmt.bindInt64(1, user.?.id) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+        const total: i64 = switch (count_stmt.step() catch db.Stmt.Step.done) {
+            .row => count_stmt.columnInt64(0),
+            .done => 0,
+        };
+
+        const first = std.fmt.allocPrint(allocator, "{s}?page=true", .{outbox_id}) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+        const payload = .{
+            .@"@context" = "https://www.w3.org/ns/activitystreams",
+            .id = outbox_id,
+            .type = "OrderedCollection",
+            .totalItems = total,
+            .first = first,
+        };
+
+        const body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+        return .{
+            .content_type = "application/activity+json; charset=utf-8",
+            .body = body,
+        };
+    }
+
+    const limit: usize = 20;
+    const list = statuses.listByUser(&app_state.conn, allocator, user.?.id, limit, null) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    const actor_id = std.fmt.allocPrint(allocator, "{s}/users/{s}", .{ base, username }) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    const followers_url = std.fmt.allocPrint(allocator, "{s}/users/{s}/followers", .{ base, username }) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    const ApNote = struct {
+        id: []const u8,
+        type: []const u8 = "Note",
+        attributedTo: []const u8,
+        content: []const u8,
+        published: []const u8,
+        to: []const []const u8,
+        cc: []const []const u8,
+    };
+
+    const ApCreate = struct {
+        id: []const u8,
+        type: []const u8 = "Create",
+        actor: []const u8,
+        published: []const u8,
+        to: []const []const u8,
+        cc: []const []const u8,
+        object: ApNote,
+    };
+
+    var items = std.ArrayListUnmanaged(ApCreate).empty;
+    defer items.deinit(allocator);
+
+    for (list) |st| {
+        const status_id_str = std.fmt.allocPrint(allocator, "{d}", .{st.id}) catch "0";
+        const status_url = std.fmt.allocPrint(allocator, "{s}/users/{s}/statuses/{s}", .{ base, username, status_id_str }) catch "";
+        const activity_id = std.fmt.allocPrint(allocator, "{s}#create", .{status_url}) catch "";
+
+        const html_content = textToHtmlAlloc(allocator, st.text) catch st.text;
+
+        const to = [_][]const u8{"https://www.w3.org/ns/activitystreams#Public"};
+        const cc = [_][]const u8{followers_url};
+
+        items.append(allocator, .{
+            .id = activity_id,
+            .actor = actor_id,
+            .published = st.created_at,
+            .to = to[0..],
+            .cc = cc[0..],
+            .object = .{
+                .id = status_url,
+                .attributedTo = actor_id,
+                .content = html_content,
+                .published = st.created_at,
+                .to = to[0..],
+                .cc = cc[0..],
+            },
+        }) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    }
+
+    const page_id = std.fmt.allocPrint(allocator, "{s}?page=true", .{outbox_id}) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    const payload = .{
+        .@"@context" = "https://www.w3.org/ns/activitystreams",
+        .id = page_id,
+        .type = "OrderedCollectionPage",
+        .partOf = outbox_id,
+        .orderedItems = items.items,
+    };
+
+    const body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    return .{
+        .content_type = "application/activity+json; charset=utf-8",
+        .body = body,
+    };
+}
+
+fn userStatusGet(app_state: *app.App, allocator: std.mem.Allocator, path: []const u8) Response {
+    const prefix = "/users/";
+    const sep = "/statuses/";
+    if (!std.mem.startsWith(u8, path, prefix)) return .{ .status = .not_found, .body = "not found\n" };
+
+    const sep_i = std.mem.indexOf(u8, path, sep) orelse return .{ .status = .not_found, .body = "not found\n" };
+    const username = path[prefix.len..sep_i];
+    if (username.len == 0) return .{ .status = .not_found, .body = "not found\n" };
+    if (std.mem.indexOfScalar(u8, username, '/') != null) return .{ .status = .not_found, .body = "not found\n" };
+
+    const id_str = path[sep_i + sep.len ..];
+    if (id_str.len == 0) return .{ .status = .not_found, .body = "not found\n" };
+    if (std.mem.indexOfScalar(u8, id_str, '/') != null) return .{ .status = .not_found, .body = "not found\n" };
+    const id = std.fmt.parseInt(i64, id_str, 10) catch return .{ .status = .not_found, .body = "not found\n" };
+
+    const user = users.lookupUserByUsername(&app_state.conn, allocator, username) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (user == null) return .{ .status = .not_found, .body = "not found\n" };
+
+    const st = statuses.lookup(&app_state.conn, allocator, id) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (st == null) return .{ .status = .not_found, .body = "not found\n" };
+    if (st.?.user_id != user.?.id) return .{ .status = .not_found, .body = "not found\n" };
+
+    const base = baseUrlAlloc(app_state, allocator) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    const actor_id = std.fmt.allocPrint(allocator, "{s}/users/{s}", .{ base, username }) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    const followers_url = std.fmt.allocPrint(allocator, "{s}/users/{s}/followers", .{ base, username }) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    const note_id = std.fmt.allocPrint(allocator, "{s}/users/{s}/statuses/{d}", .{ base, username, st.?.id }) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    const to = [_][]const u8{"https://www.w3.org/ns/activitystreams#Public"};
+    const cc = [_][]const u8{followers_url};
+
+    const html_content = textToHtmlAlloc(allocator, st.?.text) catch st.?.text;
+
+    const payload = .{
+        .@"@context" = "https://www.w3.org/ns/activitystreams",
+        .id = note_id,
+        .type = "Note",
+        .attributedTo = actor_id,
+        .content = html_content,
+        .published = st.?.created_at,
+        .to = to[0..],
+        .cc = cc[0..],
     };
 
     const body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch
@@ -2190,6 +2388,69 @@ test "POST /users/:name/inbox Follow stores follower and sends Accept" {
     const items = followers_json.value.object.get("orderedItems").?.array.items;
     try std.testing.expectEqual(@as(usize, 1), items.len);
     try std.testing.expectEqualStrings(remote_actor_id, items[0].string);
+}
+
+test "GET /users/:name/outbox and /users/:name/statuses/:id return ActivityPub objects" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const s1 = try statuses.create(&app_state.conn, a, user_id, "hello", "public");
+    const s2 = try statuses.create(&app_state.conn, a, user_id, "world", "public");
+
+    const outbox_resp = handle(&app_state, a, .{
+        .method = .GET,
+        .target = "/users/alice/outbox",
+    });
+    try std.testing.expectEqual(std.http.Status.ok, outbox_resp.status);
+
+    var outbox_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, outbox_resp.body, .{});
+    defer outbox_json.deinit();
+    try std.testing.expectEqualStrings("OrderedCollection", outbox_json.value.object.get("type").?.string);
+    try std.testing.expect(outbox_json.value.object.get("first") != null);
+
+    const page_resp = handle(&app_state, a, .{
+        .method = .GET,
+        .target = "/users/alice/outbox?page=true",
+    });
+    try std.testing.expectEqual(std.http.Status.ok, page_resp.status);
+
+    var page_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, page_resp.body, .{});
+    defer page_json.deinit();
+    try std.testing.expectEqualStrings("OrderedCollectionPage", page_json.value.object.get("type").?.string);
+
+    const items = page_json.value.object.get("orderedItems").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), items.len);
+    try std.testing.expectEqualStrings("Create", items[0].object.get("type").?.string);
+    try std.testing.expectEqualStrings("Note", items[0].object.get("object").?.object.get("type").?.string);
+
+    const note_id_str = std.fmt.allocPrint(a, "/users/alice/statuses/{d}", .{s1.id}) catch
+        return error.OutOfMemory;
+
+    const note_resp = handle(&app_state, a, .{
+        .method = .GET,
+        .target = note_id_str,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, note_resp.status);
+
+    var note_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, note_resp.body, .{});
+    defer note_json.deinit();
+    try std.testing.expectEqualStrings("Note", note_json.value.object.get("type").?.string);
+
+    const expected_note_id = std.fmt.allocPrint(a, "http://example.test/users/alice/statuses/{d}", .{s1.id}) catch
+        return error.OutOfMemory;
+    try std.testing.expectEqualStrings(expected_note_id, note_json.value.object.get("id").?.string);
+    try std.testing.expectEqualStrings("<p>hello</p>", note_json.value.object.get("content").?.string);
+
+    const expected_note2_id = std.fmt.allocPrint(a, "http://example.test/users/alice/statuses/{d}", .{s2.id}) catch
+        return error.OutOfMemory;
+    try std.testing.expectEqualStrings(expected_note2_id, items[0].object.get("object").?.object.get("id").?.string);
 }
 
 test "POST /users/:name/inbox Accept marks follow accepted" {
