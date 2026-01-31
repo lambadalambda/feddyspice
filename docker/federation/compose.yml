@@ -371,6 +371,7 @@ services:
       FEDTEST_SCHEME: https
       FEDTEST_PLEROMA_HANDLE: "@bob@pleroma.test"
       FEDTEST_MASTODON_HANDLE: "@carol@mastodon.test"
+      FEDTEST_FEDDYSPICE_HANDLE: "@alice@feddyspice.test"
       FEDTEST_PASSWORD: "password"
       FEDTEST_CACERTFILE: /caddy/pki/authorities/local/root.crt
     networks:

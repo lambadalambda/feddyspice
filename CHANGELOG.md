@@ -30,3 +30,4 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - ActivityPub outbox + object endpoints (`GET /users/:name/outbox`, `GET /users/:name/statuses/:id`).
 - Local posts are federated to accepted followers via signed ActivityPub `Create(Note)` deliveries.
 - Docker image for feddyspice + fedbox compose integration (`docker/federation/compose.yml`).
+- Fedbox E2E tests cover feddyspice federation (follow + post delivery).
