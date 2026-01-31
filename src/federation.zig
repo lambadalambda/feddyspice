@@ -26,6 +26,7 @@ pub const Error =
         WebfingerNoSelfLink,
         ActorDocMissingFields,
         FollowSendFailed,
+        RemoteActorMissing,
     };
 
 pub const FollowResult = struct {
@@ -259,7 +260,7 @@ fn textToHtmlAlloc(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
     return std.fmt.allocPrint(allocator, "<p>{s}</p>", .{escaped});
 }
 
-pub fn followHandle(app_state: *app.App, allocator: std.mem.Allocator, user_id: i64, handle: []const u8) Error!FollowResult {
+pub fn resolveRemoteActorByHandle(app_state: *app.App, allocator: std.mem.Allocator, handle: []const u8) Error!remote_actors.RemoteActor {
     const remote = try parseHandle(handle);
 
     var client = try initHttpClient(allocator, app_state.cfg.ca_cert_file);
@@ -307,6 +308,18 @@ pub fn followHandle(app_state: *app.App, allocator: std.mem.Allocator, user_id: 
 
     const actor = try parseActorDoc(allocator, actor_body, remote.host);
     try remote_actors.upsert(&app_state.conn, actor);
+    return actor;
+}
+
+pub fn sendFollowActivity(
+    app_state: *app.App,
+    allocator: std.mem.Allocator,
+    user_id: i64,
+    remote_actor_id: []const u8,
+    follow_activity_id: []const u8,
+) Error!void {
+    const actor = (try remote_actors.lookupById(&app_state.conn, allocator, remote_actor_id)) orelse
+        return error.RemoteActorMissing;
 
     const local_user = (try users.lookupUserById(&app_state.conn, allocator, user_id)) orelse
         return error.InvalidHandle;
@@ -314,13 +327,6 @@ pub fn followHandle(app_state: *app.App, allocator: std.mem.Allocator, user_id: 
     const base = try baseUrlAlloc(app_state, allocator);
     const local_actor_id = try std.fmt.allocPrint(allocator, "{s}/users/{s}", .{ base, local_user.username });
     const key_id = try std.fmt.allocPrint(allocator, "{s}#main-key", .{local_actor_id});
-
-    var id_bytes: [16]u8 = undefined;
-    std.crypto.random.bytes(&id_bytes);
-    const id_hex = std.fmt.bytesToHex(id_bytes, .lower);
-    const follow_activity_id = try std.fmt.allocPrint(allocator, "{s}/follows/{s}", .{ base, id_hex[0..] });
-
-    _ = try follows.createPending(&app_state.conn, user_id, actor.id, follow_activity_id);
 
     const payload = .{
         .@"@context" = "https://www.w3.org/ns/activitystreams",
@@ -351,6 +357,9 @@ pub fn followHandle(app_state: *app.App, allocator: std.mem.Allocator, user_id: 
         std.time.timestamp(),
     );
 
+    var client = try initHttpClient(allocator, app_state.cfg.ca_cert_file);
+    defer client.deinit();
+
     _ = try fetchBodyAlloc(
         &client,
         allocator,
@@ -370,6 +379,20 @@ pub fn followHandle(app_state: *app.App, allocator: std.mem.Allocator, user_id: 
         },
         follow_body,
     );
+}
+
+pub fn followHandle(app_state: *app.App, allocator: std.mem.Allocator, user_id: i64, handle: []const u8) Error!FollowResult {
+    const actor = try resolveRemoteActorByHandle(app_state, allocator, handle);
+
+    const base = try baseUrlAlloc(app_state, allocator);
+
+    var id_bytes: [16]u8 = undefined;
+    std.crypto.random.bytes(&id_bytes);
+    const id_hex = std.fmt.bytesToHex(id_bytes, .lower);
+    const follow_activity_id = try std.fmt.allocPrint(allocator, "{s}/follows/{s}", .{ base, id_hex[0..] });
+
+    _ = try follows.createPending(&app_state.conn, user_id, actor.id, follow_activity_id);
+    try sendFollowActivity(app_state, allocator, user_id, actor.id, follow_activity_id);
 
     return .{
         .remote_actor_id = actor.id,
@@ -506,7 +529,7 @@ pub fn deliverStatusToFollowers(app_state: *app.App, allocator: std.mem.Allocato
         const actor = remote_actors.lookupById(&app_state.conn, allocator, remote_actor_id) catch continue;
         if (actor == null) continue;
 
-        const inbox_url = actor.?.shared_inbox orelse actor.?.inbox;
+        const inbox_url = actor.?.inbox;
         const inbox_uri = std.Uri.parse(inbox_url) catch continue;
         const inbox_target = requestTargetAlloc(allocator, inbox_uri) catch continue;
 

@@ -4,6 +4,7 @@ const app = @import("app.zig");
 const actor_keys = @import("actor_keys.zig");
 const db = @import("db.zig");
 const federation = @import("federation.zig");
+const background = @import("background.zig");
 const form = @import("form.zig");
 const follows = @import("follows.zig");
 const followers = @import("followers.zig");
@@ -820,15 +821,39 @@ fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: Request, pa
             break :blk p.string;
         };
 
-        const remote_actor = remote_actors.lookupById(&app_state.conn, allocator, actor_val.string) catch
-            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        const remote_actor = blk: {
+            if (remote_actors.lookupById(&app_state.conn, allocator, actor_val.string) catch
+                return .{ .status = .internal_server_error, .body = "internal server error\n" }) |found|
+            {
+                break :blk found;
+            }
+
+            const trimmed = trimTrailingSlash(actor_val.string);
+            if (!std.mem.eql(u8, trimmed, actor_val.string)) {
+                if (remote_actors.lookupById(&app_state.conn, allocator, trimmed) catch
+                    return .{ .status = .internal_server_error, .body = "internal server error\n" }) |found|
+                {
+                    break :blk found;
+                }
+            } else {
+                const with_slash = std.fmt.allocPrint(allocator, "{s}/", .{actor_val.string}) catch
+                    break :blk null;
+                if (remote_actors.lookupById(&app_state.conn, allocator, with_slash) catch
+                    return .{ .status = .internal_server_error, .body = "internal server error\n" }) |found|
+                {
+                    break :blk found;
+                }
+            }
+
+            break :blk null;
+        };
         if (remote_actor == null) return .{ .status = .accepted, .body = "ignored\n" };
 
         _ = remote_statuses.createIfNotExists(
             &app_state.conn,
             allocator,
             note_id_val.string,
-            actor_val.string,
+            remote_actor.?.id,
             content_val.string,
             "public",
             created_at,
@@ -877,14 +902,7 @@ fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: Request, pa
             return .{ .status = .accepted, .body = "ignored\n" };
         }
 
-        federation.acceptInboundFollow(
-            app_state,
-            allocator,
-            user.?.id,
-            username,
-            actor_val.string,
-            id_val.string,
-        ) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        background.acceptInboundFollow(app_state, allocator, user.?.id, username, actor_val.string, id_val.string);
 
         return .{ .status = .accepted, .body = "ok\n" };
     }
@@ -935,7 +953,7 @@ fn createStatus(app_state: *app.App, allocator: std.mem.Allocator, req: Request)
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
     if (user == null) return unauthorized(allocator);
 
-    federation.deliverStatusToFollowers(app_state, allocator, user.?, st) catch {};
+    background.deliverStatusToFollowers(app_state, allocator, info.?.user_id, st.id);
 
     return statusResponse(app_state, allocator, user.?, st);
 }
@@ -1241,7 +1259,7 @@ fn apiFollow(app_state: *app.App, allocator: std.mem.Allocator, req: Request) Re
 
     const uri = parsed.get("uri") orelse return .{ .status = .bad_request, .body = "missing uri\n" };
 
-    const result = federation.followHandle(app_state, allocator, info.?.user_id, uri) catch |err| switch (err) {
+    const actor = federation.resolveRemoteActorByHandle(app_state, allocator, uri) catch |err| switch (err) {
         error.InvalidHandle, error.WebfingerNoSelfLink, error.ActorDocMissingFields => return .{
             .status = .bad_request,
             .body = "invalid uri\n",
@@ -1249,19 +1267,29 @@ fn apiFollow(app_state: *app.App, allocator: std.mem.Allocator, req: Request) Re
         else => return .{ .status = .internal_server_error, .body = "internal server error\n" },
     };
 
-    const actor = remote_actors.lookupById(&app_state.conn, allocator, result.remote_actor_id) catch
+    const base = baseUrlAlloc(app_state, allocator) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
-    if (actor == null) return .{ .status = .internal_server_error, .body = "internal server error\n" };
 
-    const acct = std.fmt.allocPrint(allocator, "{s}@{s}", .{ actor.?.preferred_username, actor.?.domain }) catch "";
+    var id_bytes: [16]u8 = undefined;
+    std.crypto.random.bytes(&id_bytes);
+    const id_hex = std.fmt.bytesToHex(id_bytes, .lower);
+    const follow_activity_id = std.fmt.allocPrint(allocator, "{s}/follows/{s}", .{ base, id_hex[0..] }) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    _ = follows.createPending(&app_state.conn, info.?.user_id, actor.id, follow_activity_id) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    background.sendFollow(app_state, allocator, info.?.user_id, actor.id, follow_activity_id);
+
+    const acct = std.fmt.allocPrint(allocator, "{s}@{s}", .{ actor.preferred_username, actor.domain }) catch "";
 
     const payload = .{
-        .id = actor.?.id,
-        .username = actor.?.preferred_username,
+        .id = actor.id,
+        .username = actor.preferred_username,
         .acct = acct,
         .display_name = "",
         .note = "",
-        .url = actor.?.id,
+        .url = actor.id,
         .locked = false,
         .bot = false,
         .group = false,
@@ -1529,6 +1557,12 @@ fn isUnreserved(c: u8) bool {
         'A'...'Z', 'a'...'z', '0'...'9', '-', '.', '_', '~' => true,
         else => false,
     };
+}
+
+fn trimTrailingSlash(s: []const u8) []const u8 {
+    if (s.len == 0) return s;
+    if (s[s.len - 1] == '/') return s[0 .. s.len - 1];
+    return s;
 }
 
 fn htmlEscapeAlloc(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {
