@@ -137,4 +137,3 @@ test "create + list + lookup" {
     try std.testing.expectEqualStrings("world", list[0].text);
     try std.testing.expectEqualStrings("hello", list[1].text);
 }
-

@@ -77,12 +77,21 @@ pub fn serveOnce(app_state: *app.App, listener: *net.Server) !void {
 }
 
 fn writeResponse(request: *http.Server.Request, resp: routes.Response) !void {
-    const header_count: usize = 1 + resp.headers.len;
+    const cors_headers = [_]http.Header{
+        .{ .name = "access-control-allow-origin", .value = "*" },
+        .{ .name = "access-control-allow-methods", .value = "GET, POST, PUT, PATCH, DELETE, OPTIONS" },
+        .{ .name = "access-control-allow-headers", .value = "authorization, content-type, idempotency-key" },
+        .{ .name = "access-control-expose-headers", .value = "link, location, mastodon-async-refresh" },
+        .{ .name = "access-control-max-age", .value = "86400" },
+    };
+
+    const header_count: usize = 1 + cors_headers.len + resp.headers.len;
     var headers = try std.heap.page_allocator.alloc(http.Header, header_count);
     defer std.heap.page_allocator.free(headers);
 
     headers[0] = .{ .name = "content-type", .value = resp.content_type };
-    for (resp.headers, 0..) |h, i| headers[i + 1] = h;
+    for (cors_headers, 0..) |h, i| headers[i + 1] = h;
+    for (resp.headers, 0..) |h, i| headers[1 + cors_headers.len + i] = h;
 
     try request.respond(resp.body, .{
         .status = resp.status,

@@ -278,4 +278,3 @@ test "create app, auth code, access token" {
     try std.testing.expectEqual(user_id, tok_info.user_id);
     try std.testing.expectEqual(creds.id, tok_info.app_id);
 }
-

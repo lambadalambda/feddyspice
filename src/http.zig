@@ -34,6 +34,10 @@ pub const Response = struct {
 pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) Response {
     const path = targetPath(req.target);
 
+    if (req.method == .OPTIONS) {
+        return .{ .status = .no_content, .body = "" };
+    }
+
     if (req.method == .GET and std.mem.eql(u8, path, "/healthz")) {
         return .{ .body = "ok\n" };
     }
@@ -104,12 +108,37 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
         };
     }
 
-    if (req.method == .POST and std.mem.eql(u8, path, "/api/v1/apps")) {
-        if (!isForm(req.content_type)) {
-            return .{ .status = .bad_request, .body = "invalid content-type\n" };
-        }
+    if (req.method == .GET and std.mem.eql(u8, path, "/api/v2/instance")) {
+        const payload = .{
+            .domain = app_state.cfg.domain,
+            .title = "feddyspice",
+            .version = version.version,
+            .source_url = "",
+            .description = "single-user server",
+            .registrations = .{
+                .enabled = true,
+                .approval_required = false,
+            },
+            .thumbnail = .{ .url = "" },
+            .languages = [_][]const u8{"en"},
+            .configuration = .{
+                .vapid = .{ .public_key = "" },
+            },
+            .usage = .{ .users = .{ .active_month = 1 } },
+            .rules = [_]struct { id: []const u8, text: []const u8 }{},
+        };
 
-        var parsed = form.parse(allocator, req.body) catch
+        const body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+        return .{
+            .content_type = "application/json; charset=utf-8",
+            .body = body,
+        };
+    }
+
+    if (req.method == .POST and std.mem.eql(u8, path, "/api/v1/apps")) {
+        var parsed = parseBodyParams(allocator, req) catch
             return .{ .status = .bad_request, .body = "invalid form\n" };
 
         const client_name = parsed.get("client_name") orelse
@@ -891,8 +920,7 @@ fn createStatus(app_state: *app.App, allocator: std.mem.Allocator, req: Request)
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
     if (info == null) return unauthorized(allocator);
 
-    if (!isForm(req.content_type)) return .{ .status = .bad_request, .body = "invalid content-type\n" };
-    var parsed = form.parse(allocator, req.body) catch
+    var parsed = parseBodyParams(allocator, req) catch
         return .{ .status = .bad_request, .body = "invalid form\n" };
 
     const text = parsed.get("status") orelse return .{ .status = .bad_request, .body = "missing status\n" };
@@ -1208,8 +1236,7 @@ fn apiFollow(app_state: *app.App, allocator: std.mem.Allocator, req: Request) Re
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
     if (info == null) return unauthorized(allocator);
 
-    if (!isForm(req.content_type)) return .{ .status = .bad_request, .body = "invalid content-type\n" };
-    var parsed = form.parse(allocator, req.body) catch
+    var parsed = parseBodyParams(allocator, req) catch
         return .{ .status = .bad_request, .body = "invalid form\n" };
 
     const uri = parsed.get("uri") orelse return .{ .status = .bad_request, .body = "missing uri\n" };
@@ -1379,11 +1406,7 @@ fn oauthAuthorizePost(app_state: *app.App, allocator: std.mem.Allocator, req: Re
 }
 
 fn oauthToken(app_state: *app.App, allocator: std.mem.Allocator, req: Request) Response {
-    if (!isForm(req.content_type)) {
-        return .{ .status = .bad_request, .body = "invalid content-type\n" };
-    }
-
-    var parsed = form.parse(allocator, req.body) catch
+    var parsed = parseBodyParams(allocator, req) catch
         return .{ .status = .bad_request, .body = "invalid form\n" };
 
     const grant_type = parsed.get("grant_type") orelse "";
@@ -1550,6 +1573,23 @@ fn isForm(content_type: ?[]const u8) bool {
     return std.mem.startsWith(u8, ct, "application/x-www-form-urlencoded");
 }
 
+fn isJson(content_type: ?[]const u8) bool {
+    const ct = content_type orelse return false;
+    return std.mem.startsWith(u8, ct, "application/json");
+}
+
+fn isMultipart(content_type: ?[]const u8) bool {
+    const ct = content_type orelse return false;
+    return std.mem.startsWith(u8, ct, "multipart/form-data");
+}
+
+fn parseBodyParams(allocator: std.mem.Allocator, req: Request) !form.Form {
+    if (isForm(req.content_type)) return try form.parse(allocator, req.body);
+    if (isJson(req.content_type)) return try form.parseJson(allocator, req.body);
+    if (isMultipart(req.content_type)) return try form.parseMultipart(allocator, req.content_type.?, req.body);
+    return error.UnsupportedContentType;
+}
+
 fn htmlPage(allocator: std.mem.Allocator, title: []const u8, inner_html: []const u8) Response {
     const body = std.fmt.allocPrint(
         allocator,
@@ -1648,6 +1688,22 @@ test "GET /api/v1/instance -> 200 with uri" {
     try std.testing.expectEqualStrings("example.test", parsed.value.object.get("uri").?.string);
 }
 
+test "GET /api/v2/instance -> 200 with domain" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const resp = handle(&app_state, arena.allocator(), .{ .method = .GET, .target = "/api/v2/instance" });
+    try std.testing.expectEqual(std.http.Status.ok, resp.status);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, resp.body, .{});
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("example.test", parsed.value.object.get("domain").?.string);
+}
+
 test "POST /signup creates user and session cookie" {
     var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
     defer app_state.deinit();
@@ -1724,6 +1780,25 @@ test "POST /api/v1/apps registers app" {
     try std.testing.expect(obj.get("client_id") != null);
     try std.testing.expect(obj.get("client_secret") != null);
     try std.testing.expectEqualStrings("urn:ietf:wg:oauth:2.0:oob", obj.get("redirect_uri").?.string);
+}
+
+test "POST /api/v1/apps accepts json" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const resp = handle(&app_state, arena.allocator(), .{
+        .method = .POST,
+        .target = "/api/v1/apps",
+        .content_type = "application/json",
+        .body =
+        \\{"client_name":"pl-fe","redirect_uris":"urn:ietf:wg:oauth:2.0:oob","scopes":"read write","website":""}
+        ,
+    });
+
+    try std.testing.expectEqual(std.http.Status.ok, resp.status);
 }
 
 test "oauth: authorization code flow (oob)" {
@@ -1816,6 +1891,184 @@ test "oauth: authorization code flow (oob)" {
 
     try std.testing.expect(token_json.value.object.get("access_token") != null);
     try std.testing.expectEqualStrings("Bearer", token_json.value.object.get("token_type").?.string);
+}
+
+test "oauth: token endpoint accepts json" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const app_resp = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/api/v1/apps",
+        .content_type = "application/x-www-form-urlencoded",
+        .body = "client_name=pl-fe&redirect_uris=urn%3Aietf%3Awg%3Aoauth%3A2.0%3Aoob&scopes=read+write&website=",
+    });
+    try std.testing.expectEqual(std.http.Status.ok, app_resp.status);
+
+    var app_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, app_resp.body, .{});
+    defer app_json.deinit();
+
+    const client_id = app_json.value.object.get("client_id").?.string;
+    const client_secret = app_json.value.object.get("client_secret").?.string;
+
+    const signup_resp = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/signup",
+        .content_type = "application/x-www-form-urlencoded",
+        .body = "username=alice&password=password",
+    });
+    try std.testing.expectEqual(std.http.Status.see_other, signup_resp.status);
+
+    var set_cookie: ?[]const u8 = null;
+    for (signup_resp.headers) |h| {
+        if (std.ascii.eqlIgnoreCase(h.name, "set-cookie")) set_cookie = h.value;
+    }
+    const token = sessions.parseCookie(set_cookie orelse return error.TestUnexpectedResult) orelse
+        return error.TestUnexpectedResult;
+
+    const cookie_header = std.fmt.allocPrint(a, "{s}={s}", .{ sessions.CookieName, token }) catch
+        return error.OutOfMemory;
+
+    const auth_post_body = std.fmt.allocPrint(
+        a,
+        "response_type=code&client_id={s}&redirect_uri=urn%3Aietf%3Awg%3Aoauth%3A2.0%3Aoob&scope=read+write&state=xyz&approve=1",
+        .{client_id},
+    ) catch return error.OutOfMemory;
+
+    const auth_post = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/oauth/authorize",
+        .content_type = "application/x-www-form-urlencoded",
+        .body = auth_post_body,
+        .cookie = cookie_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, auth_post.status);
+
+    const code = extractBetween(auth_post.body, "<pre id=\"code\">", "</pre>") orelse
+        return error.TestUnexpectedResult;
+
+    const token_json_body = std.fmt.allocPrint(
+        a,
+        \\{{"grant_type":"authorization_code","code":"{s}","client_id":"{s}","client_secret":"{s}","redirect_uri":"urn:ietf:wg:oauth:2.0:oob","scope":"read write"}}
+    ,
+        .{ code, client_id, client_secret },
+    ) catch return error.OutOfMemory;
+
+    const token_resp = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/oauth/token",
+        .content_type = "application/json",
+        .body = token_json_body,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, token_resp.status);
+}
+
+test "oauth: token endpoint accepts multipart form-data" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const app_resp = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/api/v1/apps",
+        .content_type = "application/x-www-form-urlencoded",
+        .body = "client_name=pl-fe&redirect_uris=urn%3Aietf%3Awg%3Aoauth%3A2.0%3Aoob&scopes=read+write&website=",
+    });
+    try std.testing.expectEqual(std.http.Status.ok, app_resp.status);
+
+    var app_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, app_resp.body, .{});
+    defer app_json.deinit();
+
+    const client_id = app_json.value.object.get("client_id").?.string;
+    const client_secret = app_json.value.object.get("client_secret").?.string;
+
+    const signup_resp = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/signup",
+        .content_type = "application/x-www-form-urlencoded",
+        .body = "username=alice&password=password",
+    });
+    try std.testing.expectEqual(std.http.Status.see_other, signup_resp.status);
+
+    var set_cookie: ?[]const u8 = null;
+    for (signup_resp.headers) |h| {
+        if (std.ascii.eqlIgnoreCase(h.name, "set-cookie")) set_cookie = h.value;
+    }
+    const token = sessions.parseCookie(set_cookie orelse return error.TestUnexpectedResult) orelse
+        return error.TestUnexpectedResult;
+
+    const cookie_header = std.fmt.allocPrint(a, "{s}={s}", .{ sessions.CookieName, token }) catch
+        return error.OutOfMemory;
+
+    const auth_post_body = std.fmt.allocPrint(
+        a,
+        "response_type=code&client_id={s}&redirect_uri=urn%3Aietf%3Awg%3Aoauth%3A2.0%3Aoob&scope=read+write&state=xyz&approve=1",
+        .{client_id},
+    ) catch return error.OutOfMemory;
+
+    const auth_post = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/oauth/authorize",
+        .content_type = "application/x-www-form-urlencoded",
+        .body = auth_post_body,
+        .cookie = cookie_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, auth_post.status);
+
+    const code = extractBetween(auth_post.body, "<pre id=\"code\">", "</pre>") orelse
+        return error.TestUnexpectedResult;
+
+    const boundary = "----feddyspiceboundary";
+    const token_body = std.fmt.allocPrint(
+        a,
+        "--{s}\r\n" ++
+            "Content-Disposition: form-data; name=\"grant_type\"\r\n" ++
+            "\r\n" ++
+            "authorization_code\r\n" ++
+            "--{s}\r\n" ++
+            "Content-Disposition: form-data; name=\"code\"\r\n" ++
+            "\r\n" ++
+            "{s}\r\n" ++
+            "--{s}\r\n" ++
+            "Content-Disposition: form-data; name=\"client_id\"\r\n" ++
+            "\r\n" ++
+            "{s}\r\n" ++
+            "--{s}\r\n" ++
+            "Content-Disposition: form-data; name=\"client_secret\"\r\n" ++
+            "\r\n" ++
+            "{s}\r\n" ++
+            "--{s}\r\n" ++
+            "Content-Disposition: form-data; name=\"redirect_uri\"\r\n" ++
+            "\r\n" ++
+            "urn:ietf:wg:oauth:2.0:oob\r\n" ++
+            "--{s}--\r\n",
+        .{
+            boundary,
+            boundary,
+            code,
+            boundary,
+            client_id,
+            boundary,
+            client_secret,
+            boundary,
+            boundary,
+        },
+    ) catch return error.OutOfMemory;
+
+    const token_resp = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/oauth/token",
+        .content_type = "multipart/form-data; boundary=----feddyspiceboundary",
+        .body = token_body,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, token_resp.status);
 }
 
 test "GET /api/v1/accounts/verify_credentials works with bearer token" {
