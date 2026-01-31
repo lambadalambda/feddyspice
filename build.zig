@@ -9,6 +9,8 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    mod.linkSystemLibrary("c", .{});
+    mod.linkSystemLibrary("sqlite3", .{});
 
     const exe = b.addExecutable(.{
         .name = "feddyspice",
@@ -21,6 +23,8 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    exe.root_module.linkSystemLibrary("c", .{});
+    exe.root_module.linkSystemLibrary("sqlite3", .{});
 
     b.installArtifact(exe);
 
