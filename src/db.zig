@@ -48,6 +48,10 @@ pub const Db = struct {
         if (rc != c.SQLITE_OK or stmt_ptr == null) return error.Sqlite;
         return .{ .stmt = stmt_ptr.? };
     }
+
+    pub fn lastInsertRowId(db: *Db) i64 {
+        return c.sqlite3_last_insert_rowid(db.handle);
+    }
 };
 
 pub const Stmt = struct {
@@ -79,6 +83,17 @@ pub const Stmt = struct {
         if (rc != c.SQLITE_OK) return error.Sqlite;
     }
 
+    pub fn bindBlob(s: *Stmt, index: usize, value: []const u8) Error!void {
+        const rc = c.sqlite3_bind_blob(
+            s.stmt,
+            @intCast(index),
+            value.ptr,
+            @intCast(value.len),
+            null,
+        );
+        if (rc != c.SQLITE_OK) return error.Sqlite;
+    }
+
     pub const Step = enum { row, done };
 
     pub fn step(s: *Stmt) Error!Step {
@@ -98,5 +113,11 @@ pub const Stmt = struct {
         const ptr = c.sqlite3_column_text(s.stmt, @intCast(col)) orelse return "";
         const len: usize = @intCast(c.sqlite3_column_bytes(s.stmt, @intCast(col)));
         return ptr[0..len];
+    }
+
+    pub fn columnBlob(s: *Stmt, col: usize) []const u8 {
+        const ptr = c.sqlite3_column_blob(s.stmt, @intCast(col)) orelse return "";
+        const len: usize = @intCast(c.sqlite3_column_bytes(s.stmt, @intCast(col)));
+        return @as([*]const u8, @ptrCast(ptr))[0..len];
     }
 };
