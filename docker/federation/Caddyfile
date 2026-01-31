@@ -1,0 +1,31 @@
+{
+  auto_https disable_redirects
+}
+
+http://feddyspice.test {
+  reverse_proxy feddyspice_web:8080
+}
+
+https://feddyspice.test {
+  tls internal
+  reverse_proxy feddyspice_web:8080
+}
+
+http://pleroma.test {
+  reverse_proxy pleroma_web:4000
+}
+
+https://pleroma.test {
+  tls internal
+  reverse_proxy pleroma_web:4000
+}
+
+http://mastodon.test {
+  reverse_proxy mastodon_web:3000
+}
+
+https://mastodon.test {
+  tls internal
+  reverse_proxy mastodon_web:3000
+}
+

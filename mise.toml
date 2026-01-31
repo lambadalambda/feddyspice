@@ -1,0 +1,41 @@
+[tools]
+zig = "latest"
+
+[tasks."zig:test"]
+description = "Run Zig tests"
+run = "zig build test"
+
+[tasks."zig:fmt"]
+description = "Format Zig code"
+run = "zig fmt ."
+
+[tasks."fed:up"]
+description = "Start federation-in-a-box (Pleroma + Mastodon)"
+run = "docker compose -f docker/federation/compose.yml up -d --build"
+
+[tasks."fed:test"]
+description = "Run federation-in-a-box smoke tests"
+run = '''
+set -eu
+
+compose() {
+  docker compose -f docker/federation/compose.yml "$@"
+}
+
+cleanup() {
+  compose --profile fedtest down -v --remove-orphans || true
+}
+
+trap cleanup EXIT
+
+compose --profile fedtest down -v --remove-orphans || true
+compose --profile fedtest run --rm --build fedtest
+'''
+
+[tasks."fed:logs"]
+description = "Tail federation-in-a-box logs"
+run = "docker compose -f docker/federation/compose.yml logs -f --no-color"
+
+[tasks."fed:down"]
+description = "Stop federation-in-a-box and delete volumes"
+run = "docker compose -f docker/federation/compose.yml --profile fedtest down -v --remove-orphans"
