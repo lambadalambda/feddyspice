@@ -596,18 +596,37 @@ fn homeTimeline(app_state: *app.App, allocator: std.mem.Allocator, req: Request)
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
     if (user == null) return unauthorized(allocator);
 
-    const list = statuses.listByUser(&app_state.conn, allocator, info.?.user_id, limit, max_id) catch
+    const local_list = statuses.listByUser(&app_state.conn, allocator, info.?.user_id, limit, max_id) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
 
     var payloads = std.ArrayListUnmanaged(StatusPayload).empty;
     defer payloads.deinit(allocator);
 
-    for (list) |st| {
-        payloads.append(allocator, makeStatusPayload(app_state, allocator, user.?, st)) catch
-            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    for (local_list) |st| {
+        payloads.append(allocator, makeStatusPayload(app_state, allocator, user.?, st)) catch return .{
+            .status = .internal_server_error,
+            .body = "internal server error\n",
+        };
     }
 
-    const body = std.json.Stringify.valueAlloc(allocator, payloads.items, .{}) catch
+    const remote_list = remote_statuses.listLatest(&app_state.conn, allocator, limit) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    for (remote_list) |st| {
+        const actor = remote_actors.lookupById(&app_state.conn, allocator, st.remote_actor_id) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        if (actor == null) continue;
+
+        payloads.append(allocator, makeRemoteStatusPayload(allocator, actor.?, st)) catch return .{
+            .status = .internal_server_error,
+            .body = "internal server error\n",
+        };
+    }
+
+    std.sort.block(StatusPayload, payloads.items, {}, statusPayloadNewerFirst);
+
+    const slice = payloads.items[0..@min(limit, payloads.items.len)];
+    const body = std.json.Stringify.valueAlloc(allocator, slice, .{}) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
 
     return .{
@@ -624,6 +643,18 @@ fn getStatus(app_state: *app.App, allocator: std.mem.Allocator, req: Request, pa
 
     const id_str = path["/api/v1/statuses/".len..];
     const id = std.fmt.parseInt(i64, id_str, 10) catch return .{ .status = .not_found, .body = "not found\n" };
+
+    if (id < 0) {
+        const st = remote_statuses.lookup(&app_state.conn, allocator, id) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        if (st == null) return .{ .status = .not_found, .body = "not found\n" };
+
+        const actor = remote_actors.lookupById(&app_state.conn, allocator, st.?.remote_actor_id) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        if (actor == null) return .{ .status = .not_found, .body = "not found\n" };
+
+        return remoteStatusResponse(allocator, actor.?, st.?);
+    }
 
     const st = statuses.lookup(&app_state.conn, allocator, id) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
@@ -677,6 +708,14 @@ const StatusPayload = struct {
     account: AccountPayload,
 };
 
+fn statusPayloadNewerFirst(_: void, a: StatusPayload, b: StatusPayload) bool {
+    return switch (std.mem.order(u8, a.created_at, b.created_at)) {
+        .gt => true,
+        .lt => false,
+        .eq => std.mem.order(u8, a.id, b.id) == .gt,
+    };
+}
+
 fn makeStatusPayload(app_state: *app.App, allocator: std.mem.Allocator, user: users.User, st: statuses.Status) StatusPayload {
     const id_str = std.fmt.allocPrint(allocator, "{d}", .{st.id}) catch "0";
     const user_id_str = std.fmt.allocPrint(allocator, "{d}", .{user.id}) catch "0";
@@ -719,6 +758,58 @@ fn makeStatusPayload(app_state: *app.App, allocator: std.mem.Allocator, user: us
         .uri = uri,
         .url = uri,
         .account = acct,
+    };
+}
+
+fn makeRemoteStatusPayload(
+    allocator: std.mem.Allocator,
+    actor: remote_actors.RemoteActor,
+    st: remote_statuses.RemoteStatus,
+) StatusPayload {
+    const id_str = std.fmt.allocPrint(allocator, "{d}", .{st.id}) catch "0";
+
+    const acct_str = std.fmt.allocPrint(allocator, "{s}@{s}", .{ actor.preferred_username, actor.domain }) catch
+        actor.preferred_username;
+
+    const acct: AccountPayload = .{
+        .id = actor.id,
+        .username = actor.preferred_username,
+        .acct = acct_str,
+        .display_name = "",
+        .note = "",
+        .url = actor.id,
+        .locked = false,
+        .bot = false,
+        .group = false,
+        .discoverable = true,
+        .created_at = "1970-01-01T00:00:00.000Z",
+        .followers_count = 0,
+        .following_count = 0,
+        .statuses_count = 0,
+        .avatar = "",
+        .avatar_static = "",
+        .header = "",
+        .header_static = "",
+    };
+
+    return .{
+        .id = id_str,
+        .created_at = st.created_at,
+        .content = st.content_html,
+        .visibility = st.visibility,
+        .uri = st.remote_uri,
+        .url = st.remote_uri,
+        .account = acct,
+    };
+}
+
+fn remoteStatusResponse(allocator: std.mem.Allocator, actor: remote_actors.RemoteActor, st: remote_statuses.RemoteStatus) Response {
+    const payload = makeRemoteStatusPayload(allocator, actor, st);
+    const body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    return .{
+        .content_type = "application/json; charset=utf-8",
+        .body = body,
     };
 }
 
@@ -1540,6 +1631,106 @@ test "statuses: create + get + home timeline" {
 
     try std.testing.expectEqual(@as(usize, 1), tl_json.value.array.items.len);
     try std.testing.expectEqualStrings(id, tl_json.value.array.items[0].object.get("id").?.string);
+}
+
+test "remote statuses: appear in home timeline and can be fetched" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const app_creds = try oauth.createApp(
+        &app_state.conn,
+        a,
+        "pl-fe",
+        "urn:ietf:wg:oauth:2.0:oob",
+        "read write",
+        "",
+    );
+
+    const token = try oauth.createAccessToken(&app_state.conn, a, app_creds.id, user_id, "read write");
+    const auth_header = try std.fmt.allocPrint(a, "Bearer {s}", .{token});
+
+    const local_resp = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/api/v1/statuses",
+        .content_type = "application/x-www-form-urlencoded",
+        .body = "status=local&visibility=public",
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, local_resp.status);
+
+    var local_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, local_resp.body, .{});
+    defer local_json.deinit();
+
+    const local_id = local_json.value.object.get("id").?.string;
+
+    try remote_actors.upsert(&app_state.conn, .{
+        .id = "https://remote.test/users/bob",
+        .inbox = "https://remote.test/users/bob/inbox",
+        .shared_inbox = null,
+        .preferred_username = "bob",
+        .domain = "remote.test",
+        .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
+    });
+
+    const inbox_body =
+        \\{"@context":"https://www.w3.org/ns/activitystreams","type":"Create","actor":"https://remote.test/users/bob","object":{"id":"https://remote.test/notes/1","type":"Note","content":"<p>Remote</p>","published":"2999-01-01T00:00:00.000Z"}}
+    ;
+
+    const inbox_resp = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/users/alice/inbox",
+        .content_type = "application/activity+json",
+        .body = inbox_body,
+    });
+    try std.testing.expectEqual(std.http.Status.accepted, inbox_resp.status);
+
+    const tl_resp = handle(&app_state, a, .{
+        .method = .GET,
+        .target = "/api/v1/timelines/home",
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, tl_resp.status);
+
+    var tl_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, tl_resp.body, .{});
+    defer tl_json.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), tl_json.value.array.items.len);
+
+    const first_id = tl_json.value.array.items[0].object.get("id").?.string;
+    const second_id = tl_json.value.array.items[1].object.get("id").?.string;
+
+    try std.testing.expect(std.mem.startsWith(u8, first_id, "-"));
+    try std.testing.expectEqualStrings(local_id, second_id);
+    try std.testing.expectEqualStrings("<p>Remote</p>", tl_json.value.array.items[0].object.get("content").?.string);
+    try std.testing.expectEqualStrings(
+        "bob",
+        tl_json.value.array.items[0].object.get("account").?.object.get("username").?.string,
+    );
+
+    const get_target = try std.fmt.allocPrint(a, "/api/v1/statuses/{s}", .{first_id});
+    const get_resp = handle(&app_state, a, .{
+        .method = .GET,
+        .target = get_target,
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, get_resp.status);
+
+    var get_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, get_resp.body, .{});
+    defer get_json.deinit();
+
+    try std.testing.expectEqualStrings(first_id, get_json.value.object.get("id").?.string);
+    try std.testing.expectEqualStrings("<p>Remote</p>", get_json.value.object.get("content").?.string);
+    try std.testing.expectEqualStrings(
+        "bob@remote.test",
+        get_json.value.object.get("account").?.object.get("acct").?.string,
+    );
 }
 
 test "POST /api/v1/follows requires bearer token" {
