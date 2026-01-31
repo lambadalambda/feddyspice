@@ -1,5 +1,15 @@
 const std = @import("std");
 
+fn addIncludePathIfExists(module: *std.Build.Module, path: []const u8) void {
+    std.fs.accessAbsolute(path, .{}) catch return;
+    module.addIncludePath(.{ .cwd_relative = path });
+}
+
+fn addLibraryPathIfExists(module: *std.Build.Module, path: []const u8) void {
+    std.fs.accessAbsolute(path, .{}) catch return;
+    module.addLibraryPath(.{ .cwd_relative = path });
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -11,6 +21,15 @@ pub fn build(b: *std.Build) void {
     });
     mod.linkSystemLibrary("c", .{});
     mod.linkSystemLibrary("sqlite3", .{});
+    mod.linkSystemLibrary("crypto", .{});
+    mod.linkSystemLibrary("ssl", .{});
+
+    if (target.result.os.tag == .macos) {
+        addIncludePathIfExists(mod, "/opt/homebrew/include");
+        addLibraryPathIfExists(mod, "/opt/homebrew/lib");
+        addIncludePathIfExists(mod, "/usr/local/include");
+        addLibraryPathIfExists(mod, "/usr/local/lib");
+    }
 
     const exe = b.addExecutable(.{
         .name = "feddyspice",
@@ -25,6 +44,15 @@ pub fn build(b: *std.Build) void {
     });
     exe.root_module.linkSystemLibrary("c", .{});
     exe.root_module.linkSystemLibrary("sqlite3", .{});
+    exe.root_module.linkSystemLibrary("crypto", .{});
+    exe.root_module.linkSystemLibrary("ssl", .{});
+
+    if (target.result.os.tag == .macos) {
+        addIncludePathIfExists(exe.root_module, "/opt/homebrew/include");
+        addLibraryPathIfExists(exe.root_module, "/opt/homebrew/lib");
+        addIncludePathIfExists(exe.root_module, "/usr/local/include");
+        addLibraryPathIfExists(exe.root_module, "/usr/local/lib");
+    }
 
     b.installArtifact(exe);
 

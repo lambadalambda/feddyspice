@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const app = @import("app.zig");
+const actor_keys = @import("actor_keys.zig");
 const form = @import("form.zig");
 const oauth = @import("oauth.zig");
 const sessions = @import("sessions.zig");
@@ -395,6 +396,9 @@ fn actorGet(app_state: *app.App, allocator: std.mem.Allocator, path: []const u8)
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
     if (user == null) return .{ .status = .not_found, .body = "not found\n" };
 
+    const keys = actor_keys.ensureForUser(&app_state.conn, allocator, user.?.id) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
     const base = baseUrlAlloc(app_state, allocator) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
 
@@ -428,7 +432,7 @@ fn actorGet(app_state: *app.App, allocator: std.mem.Allocator, path: []const u8)
         .publicKey = .{
             .id = key_id,
             .owner = actor_id,
-            .publicKeyPem = "",
+            .publicKeyPem = keys.public_key_pem,
         },
     };
 
@@ -1472,6 +1476,9 @@ test "GET /users/:name returns ActivityPub actor" {
     try std.testing.expectEqualStrings("Person", parsed.value.object.get("type").?.string);
     try std.testing.expectEqualStrings("alice", parsed.value.object.get("preferredUsername").?.string);
     try std.testing.expectEqualStrings("http://example.test/users/alice", parsed.value.object.get("id").?.string);
+
+    const pk_pem = parsed.value.object.get("publicKey").?.object.get("publicKeyPem").?.string;
+    try std.testing.expect(std.mem.indexOf(u8, pk_pem, "BEGIN PUBLIC KEY") != null);
 }
 
 fn extractBetween(haystack: []const u8, start: []const u8, end: []const u8) ?[]const u8 {

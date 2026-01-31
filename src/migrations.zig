@@ -69,6 +69,11 @@ const migrations = [_]Migration{
         .name = "create_statuses",
         .sql = statuses_v4_sql,
     },
+    .{
+        .version = 5,
+        .name = "create_actor_keys",
+        .sql = actor_keys_v5_sql,
+    },
 };
 
 const schema_migrations_sql: [:0]const u8 =
@@ -77,7 +82,7 @@ const schema_migrations_sql: [:0]const u8 =
     \\  name TEXT NOT NULL,
     \\  applied_at TEXT NOT NULL
     \\);
-    ++ "\x00";
+++ "\x00";
 
 const migration_exists_sql: [:0]const u8 =
     "SELECT 1 FROM schema_migrations WHERE version = ?1 LIMIT 1;\x00";
@@ -97,7 +102,7 @@ const users_v1_sql: [:0]const u8 =
     \\  password_hash BLOB NOT NULL,
     \\  created_at TEXT NOT NULL
     \\);
-    ++ "\x00";
+++ "\x00";
 
 const sessions_v2_sql: [:0]const u8 =
     \\CREATE TABLE IF NOT EXISTS sessions (
@@ -108,7 +113,7 @@ const sessions_v2_sql: [:0]const u8 =
     \\  expires_at TEXT NOT NULL
     \\);
     \\CREATE INDEX IF NOT EXISTS sessions_user_id ON sessions(user_id);
-    ++ "\x00";
+++ "\x00";
 
 const oauth_v3_sql: [:0]const u8 =
     \\CREATE TABLE IF NOT EXISTS oauth_apps (
@@ -145,7 +150,7 @@ const oauth_v3_sql: [:0]const u8 =
     \\);
     \\
     \\CREATE INDEX IF NOT EXISTS oauth_access_tokens_user_id ON oauth_access_tokens(user_id);
-    ++ "\x00";
+++ "\x00";
 
 const statuses_v4_sql: [:0]const u8 =
     \\CREATE TABLE IF NOT EXISTS statuses (
@@ -156,7 +161,16 @@ const statuses_v4_sql: [:0]const u8 =
     \\  created_at TEXT NOT NULL
     \\);
     \\CREATE INDEX IF NOT EXISTS statuses_user_id_id ON statuses(user_id, id);
-    ++ "\x00";
+++ "\x00";
+
+const actor_keys_v5_sql: [:0]const u8 =
+    \\CREATE TABLE IF NOT EXISTS actor_keys (
+    \\  user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    \\  private_key_pem TEXT NOT NULL,
+    \\  public_key_pem TEXT NOT NULL,
+    \\  created_at TEXT NOT NULL
+    \\);
+++ "\x00";
 
 test "migrate: creates users table and records version" {
     var conn = try db.Db.openZ(":memory:");
@@ -182,6 +196,8 @@ test "migrate: creates users table and records version" {
     try std.testing.expectEqual(@as(i64, 3), v_stmt.columnInt64(0));
     try std.testing.expectEqual(db.Stmt.Step.row, try v_stmt.step());
     try std.testing.expectEqual(@as(i64, 4), v_stmt.columnInt64(0));
+    try std.testing.expectEqual(db.Stmt.Step.row, try v_stmt.step());
+    try std.testing.expectEqual(@as(i64, 5), v_stmt.columnInt64(0));
     try std.testing.expectEqual(db.Stmt.Step.done, try v_stmt.step());
 }
 
@@ -196,6 +212,6 @@ test "migrate: is idempotent" {
     defer stmt.finalize();
 
     try std.testing.expectEqual(db.Stmt.Step.row, try stmt.step());
-    try std.testing.expectEqual(@as(i64, 4), stmt.columnInt64(0));
+    try std.testing.expectEqual(@as(i64, 5), stmt.columnInt64(0));
     try std.testing.expectEqual(db.Stmt.Step.done, try stmt.step());
 }
