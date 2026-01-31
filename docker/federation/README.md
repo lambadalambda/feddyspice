@@ -25,3 +25,4 @@ docker compose -f docker/federation/compose.yml down -v --remove-orphans
 - Pleroma is built from `${PLEROMA_CONTEXT}` (defaults to `../../../pleroma`).
 - Mastodon uses `${MASTODON_IMAGE}` (defaults to `ghcr.io/mastodon/mastodon:v4.5.3`).
 - `feddyspice_web` is included under the `fedtest` profile and served via the `gateway` Caddy container at `https://feddyspice.test`.
+- If Docker fails to create the `federation` network due to exhausted address pools, set `FEDBOX_SUBNET` (e.g. `FEDBOX_SUBNET=10.88.0.0/16`) and retry.
