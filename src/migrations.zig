@@ -64,6 +64,11 @@ const migrations = [_]Migration{
         .name = "create_oauth",
         .sql = oauth_v3_sql,
     },
+    .{
+        .version = 4,
+        .name = "create_statuses",
+        .sql = statuses_v4_sql,
+    },
 };
 
 const schema_migrations_sql: [:0]const u8 =
@@ -142,6 +147,17 @@ const oauth_v3_sql: [:0]const u8 =
     \\CREATE INDEX IF NOT EXISTS oauth_access_tokens_user_id ON oauth_access_tokens(user_id);
     ++ "\x00";
 
+const statuses_v4_sql: [:0]const u8 =
+    \\CREATE TABLE IF NOT EXISTS statuses (
+    \\  id INTEGER PRIMARY KEY,
+    \\  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    \\  text TEXT NOT NULL,
+    \\  visibility TEXT NOT NULL,
+    \\  created_at TEXT NOT NULL
+    \\);
+    \\CREATE INDEX IF NOT EXISTS statuses_user_id_id ON statuses(user_id, id);
+    ++ "\x00";
+
 test "migrate: creates users table and records version" {
     var conn = try db.Db.openZ(":memory:");
     defer conn.close();
@@ -164,6 +180,8 @@ test "migrate: creates users table and records version" {
     try std.testing.expectEqual(@as(i64, 2), v_stmt.columnInt64(0));
     try std.testing.expectEqual(db.Stmt.Step.row, try v_stmt.step());
     try std.testing.expectEqual(@as(i64, 3), v_stmt.columnInt64(0));
+    try std.testing.expectEqual(db.Stmt.Step.row, try v_stmt.step());
+    try std.testing.expectEqual(@as(i64, 4), v_stmt.columnInt64(0));
     try std.testing.expectEqual(db.Stmt.Step.done, try v_stmt.step());
 }
 
@@ -178,6 +196,6 @@ test "migrate: is idempotent" {
     defer stmt.finalize();
 
     try std.testing.expectEqual(db.Stmt.Step.row, try stmt.step());
-    try std.testing.expectEqual(@as(i64, 3), stmt.columnInt64(0));
+    try std.testing.expectEqual(@as(i64, 4), stmt.columnInt64(0));
     try std.testing.expectEqual(db.Stmt.Step.done, try stmt.step());
 }

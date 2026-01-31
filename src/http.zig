@@ -4,6 +4,7 @@ const app = @import("app.zig");
 const form = @import("form.zig");
 const oauth = @import("oauth.zig");
 const sessions = @import("sessions.zig");
+const statuses = @import("statuses.zig");
 const users = @import("users.zig");
 const version = @import("version.zig");
 
@@ -241,7 +242,198 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
         return verifyCredentials(app_state, allocator, req);
     }
 
+    if (req.method == .POST and std.mem.eql(u8, path, "/api/v1/statuses")) {
+        return createStatus(app_state, allocator, req);
+    }
+
+    if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/timelines/home")) {
+        return homeTimeline(app_state, allocator, req);
+    }
+
+    if (req.method == .GET and std.mem.startsWith(u8, path, "/api/v1/statuses/")) {
+        return getStatus(app_state, allocator, req, path);
+    }
+
     return .{ .status = .not_found, .body = "not found\n" };
+}
+
+fn createStatus(app_state: *app.App, allocator: std.mem.Allocator, req: Request) Response {
+    const token = bearerToken(req.authorization) orelse return unauthorized(allocator);
+    const info = oauth.verifyAccessToken(&app_state.conn, allocator, token) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (info == null) return unauthorized(allocator);
+
+    if (!isForm(req.content_type)) return .{ .status = .bad_request, .body = "invalid content-type\n" };
+    var parsed = form.parse(allocator, req.body) catch
+        return .{ .status = .bad_request, .body = "invalid form\n" };
+
+    const text = parsed.get("status") orelse return .{ .status = .bad_request, .body = "missing status\n" };
+    const visibility = parsed.get("visibility") orelse "public";
+
+    const st = statuses.create(&app_state.conn, allocator, info.?.user_id, text, visibility) catch |err| switch (err) {
+        error.InvalidText => return .{ .status = .unprocessable_entity, .body = "invalid status\n" },
+        else => return .{ .status = .internal_server_error, .body = "internal server error\n" },
+    };
+
+    const user = users.lookupUserById(&app_state.conn, allocator, info.?.user_id) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (user == null) return unauthorized(allocator);
+
+    return statusResponse(app_state, allocator, user.?, st);
+}
+
+fn homeTimeline(app_state: *app.App, allocator: std.mem.Allocator, req: Request) Response {
+    const token = bearerToken(req.authorization) orelse return unauthorized(allocator);
+    const info = oauth.verifyAccessToken(&app_state.conn, allocator, token) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (info == null) return unauthorized(allocator);
+
+    const q = queryString(req.target);
+    var params = form.parse(allocator, q) catch form.Form{ .map = .empty };
+
+    const limit: usize = blk: {
+        const lim_str = params.get("limit") orelse break :blk 20;
+        break :blk std.fmt.parseInt(usize, lim_str, 10) catch 20;
+    };
+
+    const max_id: ?i64 = blk: {
+        const s = params.get("max_id") orelse break :blk null;
+        break :blk std.fmt.parseInt(i64, s, 10) catch null;
+    };
+
+    const user = users.lookupUserById(&app_state.conn, allocator, info.?.user_id) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (user == null) return unauthorized(allocator);
+
+    const list = statuses.listByUser(&app_state.conn, allocator, info.?.user_id, limit, max_id) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    var payloads = std.ArrayListUnmanaged(StatusPayload).empty;
+    defer payloads.deinit(allocator);
+
+    for (list) |st| {
+        payloads.append(allocator, makeStatusPayload(app_state, allocator, user.?, st)) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    }
+
+    const body = std.json.Stringify.valueAlloc(allocator, payloads.items, .{}) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    return .{
+        .content_type = "application/json; charset=utf-8",
+        .body = body,
+    };
+}
+
+fn getStatus(app_state: *app.App, allocator: std.mem.Allocator, req: Request, path: []const u8) Response {
+    const token = bearerToken(req.authorization) orelse return unauthorized(allocator);
+    const info = oauth.verifyAccessToken(&app_state.conn, allocator, token) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (info == null) return unauthorized(allocator);
+
+    const id_str = path["/api/v1/statuses/".len..];
+    const id = std.fmt.parseInt(i64, id_str, 10) catch return .{ .status = .not_found, .body = "not found\n" };
+
+    const st = statuses.lookup(&app_state.conn, allocator, id) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (st == null) return .{ .status = .not_found, .body = "not found\n" };
+
+    const user = users.lookupUserById(&app_state.conn, allocator, info.?.user_id) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (user == null) return unauthorized(allocator);
+
+    return statusResponse(app_state, allocator, user.?, st.?);
+}
+
+fn statusResponse(app_state: *app.App, allocator: std.mem.Allocator, user: users.User, st: statuses.Status) Response {
+    const payload = makeStatusPayload(app_state, allocator, user, st);
+    const body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    return .{
+        .content_type = "application/json; charset=utf-8",
+        .body = body,
+    };
+}
+
+const AccountPayload = struct {
+    id: []const u8,
+    username: []const u8,
+    acct: []const u8,
+    display_name: []const u8,
+    note: []const u8,
+    url: []const u8,
+    locked: bool,
+    bot: bool,
+    group: bool,
+    discoverable: bool,
+    created_at: []const u8,
+    followers_count: i64,
+    following_count: i64,
+    statuses_count: i64,
+    avatar: []const u8,
+    avatar_static: []const u8,
+    header: []const u8,
+    header_static: []const u8,
+};
+
+const StatusPayload = struct {
+    id: []const u8,
+    created_at: []const u8,
+    content: []const u8,
+    visibility: []const u8,
+    uri: []const u8,
+    url: []const u8,
+    account: AccountPayload,
+};
+
+fn makeStatusPayload(app_state: *app.App, allocator: std.mem.Allocator, user: users.User, st: statuses.Status) StatusPayload {
+    const id_str = std.fmt.allocPrint(allocator, "{d}", .{st.id}) catch "0";
+    const user_id_str = std.fmt.allocPrint(allocator, "{d}", .{user.id}) catch "0";
+
+    const html_content = textToHtmlAlloc(allocator, st.text) catch st.text;
+
+    const acct: AccountPayload = .{
+        .id = user_id_str,
+        .username = user.username,
+        .acct = user.username,
+        .display_name = "",
+        .note = "",
+        .url = "",
+        .locked = false,
+        .bot = false,
+        .group = false,
+        .discoverable = true,
+        .created_at = user.created_at,
+        .followers_count = 0,
+        .following_count = 0,
+        .statuses_count = 0,
+        .avatar = "",
+        .avatar_static = "",
+        .header = "",
+        .header_static = "",
+    };
+
+    const base = std.fmt.allocPrint(allocator, "{s}://{s}", .{
+        @tagName(app_state.cfg.scheme),
+        app_state.cfg.domain,
+    }) catch "";
+
+    const uri = std.fmt.allocPrint(allocator, "{s}/api/v1/statuses/{s}", .{ base, id_str }) catch "";
+
+    return .{
+        .id = id_str,
+        .created_at = st.created_at,
+        .content = html_content,
+        .visibility = st.visibility,
+        .uri = uri,
+        .url = uri,
+        .account = acct,
+    };
+}
+
+fn textToHtmlAlloc(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
+    const escaped = try htmlEscapeAlloc(allocator, text);
+    return std.fmt.allocPrint(allocator, "<p>{s}</p>", .{escaped});
 }
 
 fn verifyCredentials(app_state: *app.App, allocator: std.mem.Allocator, req: Request) Response {
@@ -932,6 +1124,74 @@ test "GET /api/v1/accounts/verify_credentials works with bearer token" {
     defer parsed.deinit();
 
     try std.testing.expectEqualStrings("alice", parsed.value.object.get("username").?.string);
+}
+
+test "statuses: create + get + home timeline" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const app_creds = try oauth.createApp(
+        &app_state.conn,
+        a,
+        "pl-fe",
+        "urn:ietf:wg:oauth:2.0:oob",
+        "read write",
+        "",
+    );
+
+    const token = try oauth.createAccessToken(&app_state.conn, a, app_creds.id, user_id, "read write");
+    const auth_header = try std.fmt.allocPrint(a, "Bearer {s}", .{token});
+
+    const create_resp = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/api/v1/statuses",
+        .content_type = "application/x-www-form-urlencoded",
+        .body = "status=hello&visibility=public",
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, create_resp.status);
+
+    var create_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, create_resp.body, .{});
+    defer create_json.deinit();
+
+    const id = create_json.value.object.get("id").?.string;
+    try std.testing.expectEqualStrings("<p>hello</p>", create_json.value.object.get("content").?.string);
+    try std.testing.expectEqualStrings("alice", create_json.value.object.get("account").?.object.get("username").?.string);
+
+    const expected_uri = try std.fmt.allocPrint(a, "http://example.test/api/v1/statuses/{s}", .{id});
+    try std.testing.expectEqualStrings(expected_uri, create_json.value.object.get("uri").?.string);
+
+    const get_target = try std.fmt.allocPrint(a, "/api/v1/statuses/{s}", .{id});
+    const get_resp = handle(&app_state, a, .{
+        .method = .GET,
+        .target = get_target,
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, get_resp.status);
+
+    var get_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, get_resp.body, .{});
+    defer get_json.deinit();
+    try std.testing.expectEqualStrings(id, get_json.value.object.get("id").?.string);
+
+    const tl_resp = handle(&app_state, a, .{
+        .method = .GET,
+        .target = "/api/v1/timelines/home",
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, tl_resp.status);
+
+    var tl_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, tl_resp.body, .{});
+    defer tl_json.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), tl_json.value.array.items.len);
+    try std.testing.expectEqualStrings(id, tl_json.value.array.items[0].object.get("id").?.string);
 }
 
 fn extractBetween(haystack: []const u8, start: []const u8, end: []const u8) ?[]const u8 {

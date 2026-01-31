@@ -9,6 +9,7 @@ pub const password = @import("password.zig");
 pub const oauth = @import("oauth.zig");
 pub const sessions = @import("sessions.zig");
 pub const server = @import("server.zig");
+pub const statuses = @import("statuses.zig");
 pub const users = @import("users.zig");
 pub const version = @import("version.zig");
 
