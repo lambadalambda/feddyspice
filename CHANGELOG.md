@@ -18,6 +18,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - OAuth 2.0 app registration and authorization-code flow (`/api/v1/apps`, `/oauth/authorize`, `/oauth/token`).
 - Bearer-token auth for `/api/v1/accounts/verify_credentials`.
 - Status posting and timelines (SQLite `statuses` table; `POST /api/v1/statuses`, `GET /api/v1/timelines/home`, `GET /api/v1/statuses/:id`).
+- Mastodon v2 instance endpoint (`GET /api/v2/instance`) for client compatibility.
 - Initial ActivityPub discovery endpoints: WebFinger, NodeInfo, and actor document (`/.well-known/webfinger`, `/.well-known/nodeinfo`, `/nodeinfo/2.0`, `/users/:name`).
 - Per-actor RSA keypairs (stored in SQLite) and `publicKeyPem` in the ActivityPub actor document.
 - HTTP Signatures helper for signing outbound ActivityPub requests (`Digest`, `Date`, `Signature`).
@@ -29,9 +30,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Inbox handling for ActivityPub `Follow`: store inbound follower + send signed `Accept`; expose `GET /users/:name/followers` and `GET /users/:name/following` collections.
 - ActivityPub outbox + object endpoints (`GET /users/:name/outbox`, `GET /users/:name/statuses/:id`).
 - Local posts are federated to accepted followers via signed ActivityPub `Create(Note)` deliveries.
+- Outbound federation work is offloaded to background jobs to avoid blocking request handling.
 - Docker image for feddyspice + fedbox compose integration (`docker/federation/compose.yml`).
 - Fedbox E2E tests cover feddyspice federation (follow + post delivery).
 
 ### Fixed
 
 - `Dockerfile` Zig download works on both amd64/arm64 Docker builders.
+- Mastodon-ish API endpoints accept client JSON + multipart form-data bodies (pl-fe/Elk compatibility) and send permissive CORS headers.
+- Fedbox Docker network creation is more reliable via a configurable subnet (`FEDBOX_SUBNET`).
+- Fedbox smoke tests handle API differences between servers (follow fallback + HTML content entity decoding).

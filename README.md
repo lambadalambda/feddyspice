@@ -38,6 +38,28 @@ FEDDYSPICE_DB_PATH=./feddyspice.sqlite3 \
 zig build run
 ```
 
+## Running behind ngrok (practical)
+
+If you're exposing a local instance to the internet via ngrok, make sure the **external** domain is what feddyspice uses when generating ActivityPub URLs.
+
+Example (ngrok terminates TLS and forwards to local HTTP):
+
+```bash
+# Replace with your ngrok hostname, e.g. "abc123.ngrok-free.app"
+export FEDDYSPICE_DOMAIN="YOUR_NGROK_HOSTNAME"
+export FEDDYSPICE_SCHEME=https
+export FEDDYSPICE_LISTEN=127.0.0.1:8080
+export FEDDYSPICE_DB_PATH=./feddyspice.sqlite3
+
+zig build run
+```
+
+Then in another terminal:
+
+```bash
+ngrok http 8080
+```
+
 ## Federation-in-a-box (E2E)
 
 This repo includes a Docker Compose “fedbox” that runs:

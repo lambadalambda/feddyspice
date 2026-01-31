@@ -3,7 +3,7 @@ zig = "latest"
 
 [tasks."zig:test"]
 description = "Run Zig tests"
-run = "zig build test"
+run = "zig build test --global-cache-dir .zig-global-cache"
 
 [tasks."zig:fmt"]
 description = "Format Zig code"
