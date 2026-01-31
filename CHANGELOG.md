@@ -21,3 +21,4 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Initial ActivityPub discovery endpoints: WebFinger, NodeInfo, and actor document (`/.well-known/webfinger`, `/.well-known/nodeinfo`, `/nodeinfo/2.0`, `/users/:name`).
 - Per-actor RSA keypairs (stored in SQLite) and `publicKeyPem` in the ActivityPub actor document.
 - HTTP Signatures helper for signing outbound ActivityPub requests (`Digest`, `Date`, `Signature`).
+- Remote actor discovery storage + follow tracking tables, plus inbox handling for `Accept` to mark follows as accepted.

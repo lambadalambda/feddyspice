@@ -3,7 +3,9 @@ const std = @import("std");
 const app = @import("app.zig");
 const actor_keys = @import("actor_keys.zig");
 const form = @import("form.zig");
+const follows = @import("follows.zig");
 const oauth = @import("oauth.zig");
+const remote_actors = @import("remote_actors.zig");
 const sessions = @import("sessions.zig");
 const statuses = @import("statuses.zig");
 const users = @import("users.zig");
@@ -66,8 +68,14 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
         return nodeinfoDocument(app_state, allocator);
     }
 
-    if (req.method == .GET and std.mem.startsWith(u8, path, "/users/")) {
-        return actorGet(app_state, allocator, path);
+    if (std.mem.startsWith(u8, path, "/users/")) {
+        if (req.method == .POST and std.mem.endsWith(u8, path, "/inbox")) {
+            return inboxPost(app_state, allocator, req, path);
+        }
+
+        if (req.method == .GET) {
+            return actorGet(app_state, allocator, path);
+        }
     }
 
     if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/instance")) {
@@ -443,6 +451,55 @@ fn actorGet(app_state: *app.App, allocator: std.mem.Allocator, path: []const u8)
         .content_type = "application/activity+json; charset=utf-8",
         .body = body,
     };
+}
+
+fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: Request, path: []const u8) Response {
+    const prefix = "/users/";
+    const suffix = "/inbox";
+    if (!std.mem.startsWith(u8, path, prefix)) return .{ .status = .not_found, .body = "not found\n" };
+    if (!std.mem.endsWith(u8, path, suffix)) return .{ .status = .not_found, .body = "not found\n" };
+
+    const username = path[prefix.len .. path.len - suffix.len];
+    if (username.len == 0) return .{ .status = .not_found, .body = "not found\n" };
+    if (std.mem.indexOfScalar(u8, username, '/') != null) return .{ .status = .not_found, .body = "not found\n" };
+
+    const user = users.lookupUserByUsername(&app_state.conn, allocator, username) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (user == null) return .{ .status = .not_found, .body = "not found\n" };
+
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, req.body, .{}) catch
+        return .{ .status = .bad_request, .body = "invalid json\n" };
+    defer parsed.deinit();
+
+    if (parsed.value != .object) return .{ .status = .bad_request, .body = "invalid json\n" };
+
+    const typ = parsed.value.object.get("type") orelse
+        return .{ .status = .bad_request, .body = "missing type\n" };
+    if (typ != .string) return .{ .status = .bad_request, .body = "invalid type\n" };
+
+    if (std.mem.eql(u8, typ.string, "Accept")) {
+        const obj = parsed.value.object.get("object") orelse
+            return .{ .status = .bad_request, .body = "missing object\n" };
+
+        var follow_activity_id: []const u8 = undefined;
+        switch (obj) {
+            .string => |s| follow_activity_id = s,
+            .object => |o| {
+                const id_val = o.get("id") orelse
+                    return .{ .status = .bad_request, .body = "missing id\n" };
+                if (id_val != .string) return .{ .status = .bad_request, .body = "invalid id\n" };
+                follow_activity_id = id_val.string;
+            },
+            else => return .{ .status = .bad_request, .body = "invalid object\n" },
+        }
+
+        _ = follows.markAcceptedByActivityId(&app_state.conn, follow_activity_id) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+        return .{ .status = .accepted, .body = "ok\n" };
+    }
+
+    return .{ .status = .accepted, .body = "ignored\n" };
 }
 
 fn createStatus(app_state: *app.App, allocator: std.mem.Allocator, req: Request) Response {
@@ -1479,6 +1536,51 @@ test "GET /users/:name returns ActivityPub actor" {
 
     const pk_pem = parsed.value.object.get("publicKey").?.object.get("publicKeyPem").?.string;
     try std.testing.expect(std.mem.indexOf(u8, pk_pem, "BEGIN PUBLIC KEY") != null);
+}
+
+test "POST /users/:name/inbox Accept marks follow accepted" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    try remote_actors.upsert(&app_state.conn, .{
+        .id = "https://remote.test/users/bob",
+        .inbox = "https://remote.test/users/bob/inbox",
+        .shared_inbox = null,
+        .preferred_username = "bob",
+        .domain = "remote.test",
+        .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
+    });
+
+    _ = try follows.createPending(
+        &app_state.conn,
+        user_id,
+        "https://remote.test/users/bob",
+        "http://example.test/follows/1",
+    );
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const body = try std.fmt.allocPrint(
+        a,
+        "{{\"@context\":\"https://www.w3.org/ns/activitystreams\",\"type\":\"Accept\",\"actor\":\"https://remote.test/users/bob\",\"object\":\"http://example.test/follows/1\"}}",
+        .{},
+    );
+
+    const resp = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/users/alice/inbox",
+        .content_type = "application/activity+json",
+        .body = body,
+    });
+    try std.testing.expectEqual(std.http.Status.accepted, resp.status);
+
+    const follow = (try follows.lookupByActivityId(&app_state.conn, a, "http://example.test/follows/1")).?;
+    try std.testing.expectEqual(follows.FollowState.accepted, follow.state);
 }
 
 fn extractBetween(haystack: []const u8, start: []const u8, end: []const u8) ?[]const u8 {

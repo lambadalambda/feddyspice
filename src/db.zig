@@ -52,6 +52,10 @@ pub const Db = struct {
     pub fn lastInsertRowId(db: *Db) i64 {
         return c.sqlite3_last_insert_rowid(db.handle);
     }
+
+    pub fn changes(db: *Db) i64 {
+        return c.sqlite3_changes(db.handle);
+    }
 };
 
 pub const Stmt = struct {
@@ -94,6 +98,11 @@ pub const Stmt = struct {
         if (rc != c.SQLITE_OK) return error.Sqlite;
     }
 
+    pub fn bindNull(s: *Stmt, index: usize) Error!void {
+        const rc = c.sqlite3_bind_null(s.stmt, @intCast(index));
+        if (rc != c.SQLITE_OK) return error.Sqlite;
+    }
+
     pub const Step = enum { row, done };
 
     pub fn step(s: *Stmt) Error!Step {
@@ -119,5 +128,17 @@ pub const Stmt = struct {
         const ptr = c.sqlite3_column_blob(s.stmt, @intCast(col)) orelse return "";
         const len: usize = @intCast(c.sqlite3_column_bytes(s.stmt, @intCast(col)));
         return @as([*]const u8, @ptrCast(ptr))[0..len];
+    }
+
+    pub const ColumnType = enum { integer, float, text, blob, null };
+
+    pub fn columnType(s: *Stmt, col: usize) ColumnType {
+        return switch (c.sqlite3_column_type(s.stmt, @intCast(col))) {
+            c.SQLITE_INTEGER => .integer,
+            c.SQLITE_FLOAT => .float,
+            c.SQLITE_TEXT => .text,
+            c.SQLITE_BLOB => .blob,
+            else => .null,
+        };
     }
 };
