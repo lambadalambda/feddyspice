@@ -7,6 +7,7 @@ const form = @import("form.zig");
 const follows = @import("follows.zig");
 const oauth = @import("oauth.zig");
 const remote_actors = @import("remote_actors.zig");
+const remote_statuses = @import("remote_statuses.zig");
 const sessions = @import("sessions.zig");
 const statuses = @import("statuses.zig");
 const users = @import("users.zig");
@@ -481,6 +482,46 @@ fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: Request, pa
     const typ = parsed.value.object.get("type") orelse
         return .{ .status = .bad_request, .body = "missing type\n" };
     if (typ != .string) return .{ .status = .bad_request, .body = "invalid type\n" };
+
+    if (std.mem.eql(u8, typ.string, "Create")) {
+        const actor_val = parsed.value.object.get("actor") orelse
+            return .{ .status = .bad_request, .body = "missing actor\n" };
+        if (actor_val != .string) return .{ .status = .bad_request, .body = "invalid actor\n" };
+
+        const obj = parsed.value.object.get("object") orelse
+            return .{ .status = .bad_request, .body = "missing object\n" };
+        if (obj != .object) return .{ .status = .bad_request, .body = "invalid object\n" };
+
+        const note_id_val = obj.object.get("id") orelse return .{ .status = .bad_request, .body = "missing id\n" };
+        const content_val = obj.object.get("content") orelse
+            return .{ .status = .bad_request, .body = "missing content\n" };
+
+        if (note_id_val != .string) return .{ .status = .bad_request, .body = "invalid id\n" };
+        if (content_val != .string) return .{ .status = .bad_request, .body = "invalid content\n" };
+
+        const created_at = blk: {
+            const p = obj.object.get("published") orelse break :blk "1970-01-01T00:00:00.000Z";
+            if (p != .string) break :blk "1970-01-01T00:00:00.000Z";
+            if (p.string.len == 0) break :blk "1970-01-01T00:00:00.000Z";
+            break :blk p.string;
+        };
+
+        const remote_actor = remote_actors.lookupById(&app_state.conn, allocator, actor_val.string) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        if (remote_actor == null) return .{ .status = .accepted, .body = "ignored\n" };
+
+        _ = remote_statuses.createIfNotExists(
+            &app_state.conn,
+            allocator,
+            note_id_val.string,
+            actor_val.string,
+            content_val.string,
+            "public",
+            created_at,
+        ) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+        return .{ .status = .accepted, .body = "ok\n" };
+    }
 
     if (std.mem.eql(u8, typ.string, "Accept")) {
         const obj = parsed.value.object.get("object") orelse
@@ -1659,6 +1700,43 @@ test "POST /users/:name/inbox Accept marks follow accepted" {
 
     const follow = (try follows.lookupByActivityId(&app_state.conn, a, "http://example.test/follows/1")).?;
     try std.testing.expectEqual(follows.FollowState.accepted, follow.state);
+}
+
+test "POST /users/:name/inbox Create stores remote status" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    _ = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    try remote_actors.upsert(&app_state.conn, .{
+        .id = "https://remote.test/users/bob",
+        .inbox = "https://remote.test/users/bob/inbox",
+        .shared_inbox = null,
+        .preferred_username = "bob",
+        .domain = "remote.test",
+        .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
+    });
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const body =
+        \\{"@context":"https://www.w3.org/ns/activitystreams","type":"Create","actor":"https://remote.test/users/bob","object":{"id":"https://remote.test/notes/1","type":"Note","content":"<p>Hello</p>","published":"2020-01-01T00:00:00.000Z"}}
+    ;
+
+    const resp = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/users/alice/inbox",
+        .content_type = "application/activity+json",
+        .body = body,
+    });
+    try std.testing.expectEqual(std.http.Status.accepted, resp.status);
+
+    const st = (try remote_statuses.lookupByUri(&app_state.conn, a, "https://remote.test/notes/1")).?;
+    try std.testing.expect(st.id < 0);
+    try std.testing.expectEqualStrings("<p>Hello</p>", st.content_html);
 }
 
 fn extractBetween(haystack: []const u8, start: []const u8, end: []const u8) ?[]const u8 {

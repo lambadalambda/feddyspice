@@ -1,0 +1,182 @@
+const std = @import("std");
+
+const db = @import("db.zig");
+
+pub const Error = db.Error || std.mem.Allocator.Error;
+
+pub const RemoteStatus = struct {
+    id: i64,
+    remote_uri: []const u8,
+    remote_actor_id: []const u8,
+    content_html: []const u8,
+    visibility: []const u8,
+    created_at: []const u8,
+};
+
+fn nextNegativeId(conn: *db.Db) db.Error!i64 {
+    var stmt = try conn.prepareZ("SELECT MIN(id) FROM remote_statuses;\x00");
+    defer stmt.finalize();
+
+    switch (try stmt.step()) {
+        .done => return -1,
+        .row => {},
+    }
+
+    if (stmt.columnType(0) == .null) return -1;
+    const min_id = stmt.columnInt64(0);
+    return min_id - 1;
+}
+
+pub fn lookup(conn: *db.Db, allocator: std.mem.Allocator, id: i64) Error!?RemoteStatus {
+    var stmt = try conn.prepareZ(
+        "SELECT id, remote_uri, remote_actor_id, content_html, visibility, created_at FROM remote_statuses WHERE id = ?1 LIMIT 1;\x00",
+    );
+    defer stmt.finalize();
+    try stmt.bindInt64(1, id);
+
+    switch (try stmt.step()) {
+        .done => return null,
+        .row => {},
+    }
+
+    return .{
+        .id = stmt.columnInt64(0),
+        .remote_uri = try allocator.dupe(u8, stmt.columnText(1)),
+        .remote_actor_id = try allocator.dupe(u8, stmt.columnText(2)),
+        .content_html = try allocator.dupe(u8, stmt.columnText(3)),
+        .visibility = try allocator.dupe(u8, stmt.columnText(4)),
+        .created_at = try allocator.dupe(u8, stmt.columnText(5)),
+    };
+}
+
+pub fn lookupByUri(conn: *db.Db, allocator: std.mem.Allocator, remote_uri: []const u8) Error!?RemoteStatus {
+    var stmt = try conn.prepareZ(
+        "SELECT id, remote_uri, remote_actor_id, content_html, visibility, created_at FROM remote_statuses WHERE remote_uri = ?1 LIMIT 1;\x00",
+    );
+    defer stmt.finalize();
+    try stmt.bindText(1, remote_uri);
+
+    switch (try stmt.step()) {
+        .done => return null,
+        .row => {},
+    }
+
+    return .{
+        .id = stmt.columnInt64(0),
+        .remote_uri = try allocator.dupe(u8, stmt.columnText(1)),
+        .remote_actor_id = try allocator.dupe(u8, stmt.columnText(2)),
+        .content_html = try allocator.dupe(u8, stmt.columnText(3)),
+        .visibility = try allocator.dupe(u8, stmt.columnText(4)),
+        .created_at = try allocator.dupe(u8, stmt.columnText(5)),
+    };
+}
+
+pub fn createIfNotExists(
+    conn: *db.Db,
+    allocator: std.mem.Allocator,
+    remote_uri: []const u8,
+    remote_actor_id: []const u8,
+    content_html: []const u8,
+    visibility: []const u8,
+    created_at: []const u8,
+) Error!RemoteStatus {
+    if (try lookupByUri(conn, allocator, remote_uri)) |existing| return existing;
+
+    const id = try nextNegativeId(conn);
+
+    var stmt = try conn.prepareZ(
+        "INSERT INTO remote_statuses(id, remote_uri, remote_actor_id, content_html, visibility, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6);\x00",
+    );
+    defer stmt.finalize();
+
+    try stmt.bindInt64(1, id);
+    try stmt.bindText(2, remote_uri);
+    try stmt.bindText(3, remote_actor_id);
+    try stmt.bindText(4, content_html);
+    try stmt.bindText(5, visibility);
+    try stmt.bindText(6, created_at);
+
+    switch (try stmt.step()) {
+        .done => {},
+        .row => return error.Sqlite,
+    }
+
+    return (try lookup(conn, allocator, id)).?;
+}
+
+pub fn listLatest(conn: *db.Db, allocator: std.mem.Allocator, limit: usize) Error![]RemoteStatus {
+    const lim: i64 = @intCast(@min(limit, 200));
+
+    var stmt = try conn.prepareZ(
+        "SELECT id, remote_uri, remote_actor_id, content_html, visibility, created_at FROM remote_statuses ORDER BY id DESC LIMIT ?1;\x00",
+    );
+    defer stmt.finalize();
+    try stmt.bindInt64(1, lim);
+
+    var out: std.ArrayListUnmanaged(RemoteStatus) = .empty;
+    errdefer out.deinit(allocator);
+
+    while (true) {
+        switch (try stmt.step()) {
+            .done => break,
+            .row => {
+                try out.append(allocator, .{
+                    .id = stmt.columnInt64(0),
+                    .remote_uri = try allocator.dupe(u8, stmt.columnText(1)),
+                    .remote_actor_id = try allocator.dupe(u8, stmt.columnText(2)),
+                    .content_html = try allocator.dupe(u8, stmt.columnText(3)),
+                    .visibility = try allocator.dupe(u8, stmt.columnText(4)),
+                    .created_at = try allocator.dupe(u8, stmt.columnText(5)),
+                });
+            },
+        }
+    }
+
+    return out.toOwnedSlice(allocator);
+}
+
+test "createIfNotExists assigns negative ids" {
+    var conn = try db.Db.openZ(":memory:");
+    defer conn.close();
+
+    try @import("migrations.zig").migrate(&conn);
+
+    const params: @import("password.zig").Params = .{ .t = 1, .m = 8, .p = 1 };
+    const user_id = try @import("users.zig").create(&conn, std.testing.allocator, "alice", "password", params);
+
+    try @import("remote_actors.zig").upsert(&conn, .{
+        .id = "https://remote.test/users/bob",
+        .inbox = "https://remote.test/users/bob/inbox",
+        .shared_inbox = null,
+        .preferred_username = "bob",
+        .domain = "remote.test",
+        .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
+    });
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    _ = user_id;
+    const s1 = try createIfNotExists(
+        &conn,
+        a,
+        "https://remote.test/notes/1",
+        "https://remote.test/users/bob",
+        "<p>one</p>",
+        "public",
+        "2020-01-01T00:00:00.000Z",
+    );
+    const s2 = try createIfNotExists(
+        &conn,
+        a,
+        "https://remote.test/notes/2",
+        "https://remote.test/users/bob",
+        "<p>two</p>",
+        "public",
+        "2020-01-01T00:00:01.000Z",
+    );
+
+    try std.testing.expect(s1.id < 0);
+    try std.testing.expect(s2.id < s1.id);
+}

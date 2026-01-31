@@ -13,6 +13,7 @@ pub const migrations = @import("migrations.zig");
 pub const password = @import("password.zig");
 pub const oauth = @import("oauth.zig");
 pub const remote_actors = @import("remote_actors.zig");
+pub const remote_statuses = @import("remote_statuses.zig");
 pub const sessions = @import("sessions.zig");
 pub const server = @import("server.zig");
 pub const statuses = @import("statuses.zig");

@@ -23,3 +23,4 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - HTTP Signatures helper for signing outbound ActivityPub requests (`Digest`, `Date`, `Signature`).
 - Remote actor discovery storage + follow tracking tables, plus inbox handling for `Accept` to mark follows as accepted.
 - Outbound federation follow (WebFinger → actor → signed Follow to inbox), plus `POST /api/v1/follows` for clients and `FEDDYSPICE_CACERTFILE` for custom TLS CAs (fedbox).
+- Inbox handling for ActivityPub `Create` to store remote posts in SQLite (`remote_statuses` table).
