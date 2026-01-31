@@ -9,9 +9,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   && rm -rf /var/lib/apt/lists/*
 
 ARG ZIG_VERSION=0.15.2
-RUN curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-x86_64-${ZIG_VERSION}.tar.xz" -o /tmp/zig.tar.xz \
+ARG TARGETARCH
+RUN case "${TARGETARCH}" in \
+      amd64) zig_arch=x86_64 ;; \
+      arm64) zig_arch=aarch64 ;; \
+      *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac \
+  && curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-${zig_arch}-linux-${ZIG_VERSION}.tar.xz" -o /tmp/zig.tar.xz \
   && tar -C /opt -xf /tmp/zig.tar.xz \
-  && mv "/opt/zig-linux-x86_64-${ZIG_VERSION}" /opt/zig \
+  && mv "/opt/zig-${zig_arch}-linux-${ZIG_VERSION}" /opt/zig \
   && ln -s /opt/zig/zig /usr/local/bin/zig
 
 WORKDIR /src
