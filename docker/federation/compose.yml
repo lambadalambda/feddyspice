@@ -35,18 +35,68 @@ services:
     networks:
       - federation
 
-  # Placeholder for later: add feddyspice to the fedbox network and test real
-  # federation flows against Pleroma + Mastodon.
   feddyspice_web:
-    profiles: ["feddyspice"]
-    image: alpine:3.20
+    profiles: ["fedtest", "feddyspice"]
+    build:
+      context: ../..
+    image: feddyspice-fedbox
     restart: unless-stopped
+    depends_on:
+      gateway_certs:
+        condition: service_completed_successfully
+    environment:
+      FEDDYSPICE_DOMAIN: feddyspice.test
+      FEDDYSPICE_SCHEME: https
+      FEDDYSPICE_LISTEN: 0.0.0.0:8080
+      FEDDYSPICE_DB_PATH: /data/feddyspice.sqlite3
+      FEDDYSPICE_CACERTFILE: /caddy/pki/authorities/local/root.crt
+    volumes:
+      - feddyspice_fed_data:/data
+      - caddy_fed_data:/caddy:ro
+    networks:
+      - federation
+    expose:
+      - "8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/healthz >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  feddyspice_seed:
+    profiles: ["fedtest", "feddyspice"]
+    image: alpine:3.20
+    restart: "no"
+    depends_on:
+      feddyspice_web:
+        condition: service_healthy
     command:
       - sh
       - -lc
       - |
-        echo "TODO: implement feddyspice server image"
-        sleep infinity
+        set -euo pipefail
+
+        if wget -qO- "http://feddyspice_web:8080/.well-known/webfinger?resource=acct:alice@feddyspice.test" >/dev/null; then
+          echo "[fedbox] feddyspice: alice already exists"
+          exit 0
+        fi
+
+        wget -qO- \
+          --post-data "username=alice&password=password" \
+          "http://feddyspice_web:8080/signup" >/dev/null || true
+
+        tries=0
+        until wget -qO- "http://feddyspice_web:8080/.well-known/webfinger?resource=acct:alice@feddyspice.test" >/dev/null; do
+          tries=$$((tries + 1))
+
+          if [ "$$tries" -ge 30 ]; then
+            echo "[fedbox] feddyspice: timeout waiting for webfinger alice" >&2
+            exit 1
+          fi
+
+          sleep 1
+        done
     networks:
       - federation
 
@@ -307,6 +357,8 @@ services:
     depends_on:
       gateway_certs:
         condition: service_completed_successfully
+      feddyspice_seed:
+        condition: service_completed_successfully
       pleroma_seed:
         condition: service_completed_successfully
       pleroma_web:
@@ -331,9 +383,9 @@ networks:
 
 volumes:
   caddy_fed_data:
+  feddyspice_fed_data:
   pleroma_fed_db:
   pleroma_fed_data:
   mastodon_fed_db:
   mastodon_fed_redis:
   mastodon_fed_system:
-

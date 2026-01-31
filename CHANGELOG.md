@@ -29,3 +29,4 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Inbox handling for ActivityPub `Follow`: store inbound follower + send signed `Accept`; expose `GET /users/:name/followers` and `GET /users/:name/following` collections.
 - ActivityPub outbox + object endpoints (`GET /users/:name/outbox`, `GET /users/:name/statuses/:id`).
 - Local posts are federated to accepted followers via signed ActivityPub `Create(Note)` deliveries.
+- Docker image for feddyspice + fedbox compose integration (`docker/federation/compose.yml`).

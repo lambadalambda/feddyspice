@@ -1,0 +1,11 @@
+.git
+.gitignore
+.DS_Store
+
+zig-out
+zig-cache
+/tmp
+
+docker/federation/**/node_modules
+docker/federation/**/__pycache__
+
