@@ -84,6 +84,11 @@ const migrations = [_]Migration{
         .name = "create_remote_statuses",
         .sql = remote_statuses_v7_sql,
     },
+    .{
+        .version = 8,
+        .name = "create_followers",
+        .sql = followers_v8_sql,
+    },
 };
 
 const schema_migrations_sql: [:0]const u8 =
@@ -218,6 +223,19 @@ const remote_statuses_v7_sql: [:0]const u8 =
     \\CREATE INDEX IF NOT EXISTS remote_statuses_remote_actor_id_id ON remote_statuses(remote_actor_id, id);
 ++ "\x00";
 
+const followers_v8_sql: [:0]const u8 =
+    \\CREATE TABLE IF NOT EXISTS followers (
+    \\  id INTEGER PRIMARY KEY,
+    \\  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    \\  remote_actor_id TEXT NOT NULL REFERENCES remote_actors(id) ON DELETE CASCADE,
+    \\  follow_activity_id TEXT NOT NULL UNIQUE,
+    \\  state TEXT NOT NULL,
+    \\  created_at TEXT NOT NULL,
+    \\  updated_at TEXT NOT NULL
+    \\);
+    \\CREATE UNIQUE INDEX IF NOT EXISTS followers_user_remote_actor_id ON followers(user_id, remote_actor_id);
+++ "\x00";
+
 test "migrate: creates users table and records version" {
     var conn = try db.Db.openZ(":memory:");
     defer conn.close();
@@ -248,6 +266,8 @@ test "migrate: creates users table and records version" {
     try std.testing.expectEqual(@as(i64, 6), v_stmt.columnInt64(0));
     try std.testing.expectEqual(db.Stmt.Step.row, try v_stmt.step());
     try std.testing.expectEqual(@as(i64, 7), v_stmt.columnInt64(0));
+    try std.testing.expectEqual(db.Stmt.Step.row, try v_stmt.step());
+    try std.testing.expectEqual(@as(i64, 8), v_stmt.columnInt64(0));
     try std.testing.expectEqual(db.Stmt.Step.done, try v_stmt.step());
 }
 
@@ -262,6 +282,6 @@ test "migrate: is idempotent" {
     defer stmt.finalize();
 
     try std.testing.expectEqual(db.Stmt.Step.row, try stmt.step());
-    try std.testing.expectEqual(@as(i64, 7), stmt.columnInt64(0));
+    try std.testing.expectEqual(@as(i64, 8), stmt.columnInt64(0));
     try std.testing.expectEqual(db.Stmt.Step.done, try stmt.step());
 }

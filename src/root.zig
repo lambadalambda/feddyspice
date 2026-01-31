@@ -7,6 +7,7 @@ pub const crypto_rsa = @import("crypto_rsa.zig");
 pub const db = @import("db.zig");
 pub const federation = @import("federation.zig");
 pub const follows = @import("follows.zig");
+pub const followers = @import("followers.zig");
 pub const http = @import("http.zig");
 pub const http_signatures = @import("http_signatures.zig");
 pub const migrations = @import("migrations.zig");
