@@ -7,6 +7,7 @@ const follows = @import("follows.zig");
 const followers = @import("followers.zig");
 const http_signatures = @import("http_signatures.zig");
 const remote_actors = @import("remote_actors.zig");
+const statuses = @import("statuses.zig");
 const users = @import("users.zig");
 
 pub const Error =
@@ -216,6 +217,48 @@ fn ensureRemoteActorById(app_state: *app.App, allocator: std.mem.Allocator, acto
     return actor;
 }
 
+fn htmlEscapeAlloc(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {
+    var needed: usize = 0;
+    for (raw) |c| {
+        needed += switch (c) {
+            '&' => 5, // &amp;
+            '<', '>' => 4, // &lt; &gt;
+            '"' => 6, // &quot;
+            '\'' => 5, // &#39;
+            else => 1,
+        };
+    }
+
+    var out = try allocator.alloc(u8, needed);
+    var i: usize = 0;
+
+    for (raw) |c| {
+        const repl = switch (c) {
+            '&' => "&amp;",
+            '<' => "&lt;",
+            '>' => "&gt;",
+            '"' => "&quot;",
+            '\'' => "&#39;",
+            else => null,
+        };
+
+        if (repl) |s| {
+            @memcpy(out[i..][0..s.len], s);
+            i += s.len;
+        } else {
+            out[i] = c;
+            i += 1;
+        }
+    }
+
+    return out;
+}
+
+fn textToHtmlAlloc(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
+    const escaped = try htmlEscapeAlloc(allocator, text);
+    return std.fmt.allocPrint(allocator, "<p>{s}</p>", .{escaped});
+}
+
 pub fn followHandle(app_state: *app.App, allocator: std.mem.Allocator, user_id: i64, handle: []const u8) Error!FollowResult {
     const remote = try parseHandle(handle);
 
@@ -413,6 +456,95 @@ pub fn acceptInboundFollow(
     );
 
     _ = try followers.markAcceptedByRemoteActorId(&app_state.conn, user_id, actor.id);
+}
+
+pub fn deliverStatusToFollowers(app_state: *app.App, allocator: std.mem.Allocator, user: users.User, st: statuses.Status) Error!void {
+    const follower_ids = try followers.listAcceptedRemoteActorIds(&app_state.conn, allocator, user.id, 200);
+    if (follower_ids.len == 0) return;
+
+    const base = try baseUrlAlloc(app_state, allocator);
+    const local_actor_id = try std.fmt.allocPrint(allocator, "{s}/users/{s}", .{ base, user.username });
+    const key_id = try std.fmt.allocPrint(allocator, "{s}#main-key", .{local_actor_id});
+    const followers_url = try std.fmt.allocPrint(allocator, "{s}/users/{s}/followers", .{ base, user.username });
+
+    const status_url = try std.fmt.allocPrint(allocator, "{s}/users/{s}/statuses/{d}", .{ base, user.username, st.id });
+    const create_id = try std.fmt.allocPrint(allocator, "{s}#create", .{status_url});
+
+    const content_html = try textToHtmlAlloc(allocator, st.text);
+
+    const to = [_][]const u8{"https://www.w3.org/ns/activitystreams#Public"};
+    const cc = [_][]const u8{followers_url};
+
+    const payload = .{
+        .@"@context" = "https://www.w3.org/ns/activitystreams",
+        .id = create_id,
+        .type = "Create",
+        .actor = local_actor_id,
+        .published = st.created_at,
+        .to = to[0..],
+        .cc = cc[0..],
+        .object = .{
+            .id = status_url,
+            .type = "Note",
+            .attributedTo = local_actor_id,
+            .content = content_html,
+            .published = st.created_at,
+            .to = to[0..],
+            .cc = cc[0..],
+        },
+    };
+
+    const create_body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch
+        return error.OutOfMemory;
+
+    var client = try initHttpClient(allocator, app_state.cfg.ca_cert_file);
+    defer client.deinit();
+
+    const keys = try actor_keys.ensureForUser(&app_state.conn, allocator, user.id);
+
+    for (follower_ids) |remote_actor_id| {
+        const actor = remote_actors.lookupById(&app_state.conn, allocator, remote_actor_id) catch continue;
+        if (actor == null) continue;
+
+        const inbox_url = actor.?.shared_inbox orelse actor.?.inbox;
+        const inbox_uri = std.Uri.parse(inbox_url) catch continue;
+        const inbox_target = requestTargetAlloc(allocator, inbox_uri) catch continue;
+
+        const inbox_host_part = inbox_uri.host orelse continue;
+        const inbox_host = inbox_host_part.toRawMaybeAlloc(allocator) catch continue;
+        const inbox_host_header = hostHeaderAlloc(allocator, inbox_host, inbox_uri.port, app_state.cfg.scheme) catch continue;
+
+        const signed = http_signatures.signRequest(
+            allocator,
+            keys.private_key_pem,
+            key_id,
+            .POST,
+            inbox_target,
+            inbox_host_header,
+            create_body,
+            std.time.timestamp(),
+        ) catch continue;
+
+        _ = fetchBodyAlloc(
+            &client,
+            allocator,
+            inbox_url,
+            .POST,
+            .{
+                .host = .{ .override = inbox_host_header },
+                .content_type = .{ .override = "application/activity+json" },
+                .accept_encoding = .omit,
+                .user_agent = .{ .override = "feddyspice" },
+            },
+            &.{
+                .{ .name = "accept", .value = "application/activity+json" },
+                .{ .name = "date", .value = signed.date },
+                .{ .name = "digest", .value = signed.digest },
+                .{ .name = "signature", .value = signed.signature },
+            },
+            create_body,
+        ) catch continue;
+    }
 }
 
 test "followHandle sends signed Follow to remote inbox" {

@@ -907,6 +907,8 @@ fn createStatus(app_state: *app.App, allocator: std.mem.Allocator, req: Request)
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
     if (user == null) return unauthorized(allocator);
 
+    federation.deliverStatusToFollowers(app_state, allocator, user.?, st) catch {};
+
     return statusResponse(app_state, allocator, user.?, st);
 }
 
@@ -2451,6 +2453,221 @@ test "GET /users/:name/outbox and /users/:name/statuses/:id return ActivityPub o
     const expected_note2_id = std.fmt.allocPrint(a, "http://example.test/users/alice/statuses/{d}", .{s2.id}) catch
         return error.OutOfMemory;
     try std.testing.expectEqualStrings(expected_note2_id, items[0].object.get("object").?.object.get("id").?.string);
+}
+
+test "POST /api/v1/statuses delivers Create to followers" {
+    const net = std.net;
+    const http = std.http;
+    const posix = std.posix;
+
+    const listen_address = try net.Address.parseIp("127.0.0.1", 0);
+    var listener = try listen_address.listen(.{ .reuse_address = true });
+    defer listener.deinit();
+
+    const addr = listener.listen_address;
+    const port = addr.in.getPort();
+
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const keys = try actor_keys.ensureForUser(&app_state.conn, a, user_id);
+
+    const remote_actor_id = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}/users/bob", .{port});
+    const remote_inbox = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}/users/bob/inbox", .{port});
+
+    try remote_actors.upsert(&app_state.conn, .{
+        .id = remote_actor_id,
+        .inbox = remote_inbox,
+        .shared_inbox = null,
+        .preferred_username = "bob",
+        .domain = "127.0.0.1",
+        .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
+    });
+
+    const follow_id = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}/follows/1", .{port});
+    try followers.upsertPending(&app_state.conn, user_id, remote_actor_id, follow_id);
+    try std.testing.expect(try followers.markAcceptedByRemoteActorId(&app_state.conn, user_id, remote_actor_id));
+
+    const app_creds = try oauth.createApp(
+        &app_state.conn,
+        a,
+        "pl-fe",
+        "urn:ietf:wg:oauth:2.0:oob",
+        "read write",
+        "",
+    );
+
+    const token = try oauth.createAccessToken(&app_state.conn, a, app_creds.id, user_id, "read write");
+    const auth_header = try std.fmt.allocPrint(a, "Bearer {s}", .{token});
+
+    const ServerCtx = struct {
+        listener: *net.Server,
+        local_public_key_pem: []const u8,
+        ok: bool = true,
+
+        fn run(ctx: *@This()) !void {
+            var fds = [_]posix.pollfd{
+                .{ .fd = ctx.listener.stream.handle, .events = posix.POLL.IN, .revents = 0 },
+            };
+            const ready = try posix.poll(&fds, 5000);
+            if (ready == 0) {
+                ctx.ok = false;
+                return;
+            }
+
+            var buf: [16 * 1024]u8 = undefined;
+            var out: [16 * 1024]u8 = undefined;
+            var body_buf: [16 * 1024]u8 = undefined;
+
+            var conn = try ctx.listener.accept();
+            defer conn.stream.close();
+
+            var reader = net.Stream.Reader.init(conn.stream, &buf);
+            var writer = net.Stream.Writer.init(conn.stream, &out);
+
+            var server = http.Server.init(reader.interface(), &writer.interface);
+            var request = try server.receiveHead();
+
+            const method = request.head.method;
+            const target = request.head.target;
+
+            var host: ?[]const u8 = null;
+            var date: ?[]const u8 = null;
+            var digest: ?[]const u8 = null;
+            var signature: ?[]const u8 = null;
+
+            var header_it = request.iterateHeaders();
+            while (header_it.next()) |h| {
+                if (std.ascii.eqlIgnoreCase(h.name, "host")) host = h.value;
+                if (std.ascii.eqlIgnoreCase(h.name, "date")) date = h.value;
+                if (std.ascii.eqlIgnoreCase(h.name, "digest")) digest = h.value;
+                if (std.ascii.eqlIgnoreCase(h.name, "signature")) signature = h.value;
+            }
+
+            var conn_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+            defer conn_arena.deinit();
+            const conn_alloc = conn_arena.allocator();
+
+            var body: []const u8 = "";
+            if (method.requestHasBody()) {
+                const content_length: usize = @intCast(request.head.content_length orelse 0);
+                request.head.expect = null;
+                const br = request.readerExpectNone(&body_buf);
+                body = try br.readAlloc(conn_alloc, content_length);
+            }
+
+            if (method != .POST or !std.mem.eql(u8, target, "/users/bob/inbox")) {
+                ctx.ok = false;
+                try request.respond("not found\n", .{
+                    .status = .not_found,
+                    .keep_alive = false,
+                    .extra_headers = &.{
+                        .{ .name = "content-type", .value = "text/plain" },
+                    },
+                });
+                return;
+            }
+
+            if (host == null or date == null or digest == null or signature == null) {
+                ctx.ok = false;
+            } else {
+                const expected_digest = try @import("http_signatures.zig").digestHeaderValueAlloc(conn_alloc, body);
+                if (!std.mem.eql(u8, expected_digest, digest.?)) ctx.ok = false;
+
+                const signing_string = try @import("http_signatures.zig").signingStringAlloc(
+                    conn_alloc,
+                    .POST,
+                    "/users/bob/inbox",
+                    host.?,
+                    date.?,
+                    digest.?,
+                );
+
+                const sig_prefix = "signature=\"";
+                const sig_b64_i = std.mem.indexOf(u8, signature.?, sig_prefix) orelse {
+                    ctx.ok = false;
+                    return;
+                };
+                const sig_b64_start = sig_b64_i + sig_prefix.len;
+                const sig_b64_end = std.mem.indexOfPos(u8, signature.?, sig_b64_start, "\"") orelse {
+                    ctx.ok = false;
+                    return;
+                };
+
+                const sig_b64 = signature.?[sig_b64_start..sig_b64_end];
+                const sig_len = std.base64.standard.Decoder.calcSizeForSlice(sig_b64) catch {
+                    ctx.ok = false;
+                    return;
+                };
+                const sig_bytes = try conn_alloc.alloc(u8, sig_len);
+                std.base64.standard.Decoder.decode(sig_bytes, sig_b64) catch {
+                    ctx.ok = false;
+                    return;
+                };
+
+                if (!(try @import("crypto_rsa.zig").verifyRsaSha256Pem(
+                    ctx.local_public_key_pem,
+                    signing_string,
+                    sig_bytes,
+                ))) ctx.ok = false;
+
+                var parsed = std.json.parseFromSlice(std.json.Value, conn_alloc, body, .{}) catch {
+                    ctx.ok = false;
+                    return;
+                };
+                defer parsed.deinit();
+
+                if (parsed.value == .object) {
+                    const typ = parsed.value.object.get("type");
+                    if (typ == null or typ.? != .string or !std.mem.eql(u8, typ.?.string, "Create")) ctx.ok = false;
+
+                    const obj = parsed.value.object.get("object");
+                    if (obj == null or obj.? != .object) ctx.ok = false;
+
+                    const content = obj.?.object.get("content");
+                    if (content == null or content.? != .string or !std.mem.eql(u8, content.?.string, "<p>federated</p>")) {
+                        ctx.ok = false;
+                    }
+                } else {
+                    ctx.ok = false;
+                }
+            }
+
+            try request.respond("ok\n", .{
+                .status = .accepted,
+                .keep_alive = false,
+                .extra_headers = &.{
+                    .{ .name = "content-type", .value = "text/plain" },
+                },
+            });
+        }
+    };
+
+    var ctx: ServerCtx = .{
+        .listener = &listener,
+        .local_public_key_pem = keys.public_key_pem,
+    };
+
+    var t = try std.Thread.spawn(.{}, ServerCtx.run, .{&ctx});
+
+    const create_resp = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/api/v1/statuses",
+        .content_type = "application/x-www-form-urlencoded",
+        .body = "status=federated&visibility=public",
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, create_resp.status);
+
+    t.join();
+    try std.testing.expect(ctx.ok);
 }
 
 test "POST /users/:name/inbox Accept marks follow accepted" {
