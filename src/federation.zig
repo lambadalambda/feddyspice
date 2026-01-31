@@ -1,0 +1,502 @@
+const std = @import("std");
+
+const actor_keys = @import("actor_keys.zig");
+const app = @import("app.zig");
+const config = @import("config.zig");
+const follows = @import("follows.zig");
+const http_signatures = @import("http_signatures.zig");
+const remote_actors = @import("remote_actors.zig");
+const users = @import("users.zig");
+
+pub const Error =
+    std.mem.Allocator.Error ||
+    std.http.Client.FetchError ||
+    std.crypto.Certificate.Bundle.AddCertsFromFilePathError ||
+    std.json.ParseError(std.json.Scanner) ||
+    std.Uri.ParseError ||
+    actor_keys.Error ||
+    follows.Error ||
+    remote_actors.Error ||
+    users.Error ||
+    error{
+        InvalidHandle,
+        WebfingerNoSelfLink,
+        ActorDocMissingFields,
+        FollowSendFailed,
+    };
+
+pub const FollowResult = struct {
+    remote_actor_id: []const u8,
+    follow_activity_id: []const u8,
+};
+
+const ParsedHandle = struct {
+    username: []const u8,
+    host: []const u8,
+    port: ?u16,
+};
+
+fn parseHandle(handle: []const u8) Error!ParsedHandle {
+    const trimmed = std.mem.trim(u8, handle, " \t\r\n");
+    const h = if (std.mem.startsWith(u8, trimmed, "@")) trimmed[1..] else trimmed;
+
+    const at = std.mem.indexOfScalar(u8, h, '@') orelse return error.InvalidHandle;
+    const username = h[0..at];
+    const host_port = h[at + 1 ..];
+    if (username.len == 0 or host_port.len == 0) return error.InvalidHandle;
+
+    if (std.mem.lastIndexOfScalar(u8, host_port, ':')) |colon| {
+        const host = host_port[0..colon];
+        const port_str = host_port[colon + 1 ..];
+        if (host.len == 0 or port_str.len == 0) return error.InvalidHandle;
+        const port = std.fmt.parseInt(u16, port_str, 10) catch return error.InvalidHandle;
+        return .{ .username = username, .host = host, .port = port };
+    }
+
+    return .{ .username = username, .host = host_port, .port = null };
+}
+
+fn schemeString(s: config.Scheme) []const u8 {
+    return @tagName(s);
+}
+
+fn hostHeaderAlloc(allocator: std.mem.Allocator, host: []const u8, port: ?u16, scheme: config.Scheme) ![]u8 {
+    const default_port: u16 = switch (scheme) {
+        .http => 80,
+        .https => 443,
+    };
+    if (port == null or port.? == default_port) return allocator.dupe(u8, host);
+    return std.fmt.allocPrint(allocator, "{s}:{d}", .{ host, port.? });
+}
+
+fn baseUrlAlloc(app_state: *app.App, allocator: std.mem.Allocator) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{s}://{s}", .{ schemeString(app_state.cfg.scheme), app_state.cfg.domain });
+}
+
+fn requestTargetAlloc(allocator: std.mem.Allocator, uri: std.Uri) ![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+
+    if (uri.path.isEmpty()) {
+        try aw.writer.writeAll("/");
+    } else {
+        try aw.writer.print("{f}", .{std.fmt.alt(uri.path, .formatPath)});
+    }
+
+    if (uri.query) |q| {
+        try aw.writer.writeByte('?');
+        try aw.writer.print("{f}", .{std.fmt.alt(q, .formatQuery)});
+    }
+
+    const out = try aw.toOwnedSlice();
+    aw.deinit();
+    return out;
+}
+
+fn initHttpClient(allocator: std.mem.Allocator, ca_cert_file: ?[]const u8) !std.http.Client {
+    var client: std.http.Client = .{ .allocator = allocator };
+    errdefer client.deinit();
+
+    if (ca_cert_file) |p| {
+        client.next_https_rescan_certs = false;
+        try client.ca_bundle.addCertsFromFilePathAbsolute(allocator, p);
+    }
+
+    return client;
+}
+
+fn fetchBodyAlloc(
+    client: *std.http.Client,
+    allocator: std.mem.Allocator,
+    url: []const u8,
+    method: std.http.Method,
+    headers: std.http.Client.Request.Headers,
+    extra_headers: []const std.http.Header,
+    payload: ?[]const u8,
+) Error![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+
+    const res = try client.fetch(.{
+        .location = .{ .url = url },
+        .method = method,
+        .payload = payload,
+        .headers = headers,
+        .extra_headers = extra_headers,
+        .response_writer = &aw.writer,
+        .redirect_behavior = .unhandled,
+        .keep_alive = false,
+    });
+    if (res.status.class() != .success) return error.FollowSendFailed;
+
+    const out = try aw.toOwnedSlice();
+    aw.deinit();
+    return out;
+}
+
+fn extractWebfingerSelfHref(allocator: std.mem.Allocator, body: []const u8) Error![]u8 {
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
+    defer parsed.deinit();
+
+    if (parsed.value != .object) return error.WebfingerNoSelfLink;
+
+    const links_val = parsed.value.object.get("links") orelse return error.WebfingerNoSelfLink;
+    if (links_val != .array) return error.WebfingerNoSelfLink;
+
+    for (links_val.array.items) |link| {
+        if (link != .object) continue;
+        const rel = link.object.get("rel") orelse continue;
+        const href = link.object.get("href") orelse continue;
+        if (rel == .string and std.mem.eql(u8, rel.string, "self") and href == .string and href.string.len > 0) {
+            return allocator.dupe(u8, href.string);
+        }
+    }
+
+    return error.WebfingerNoSelfLink;
+}
+
+fn parseActorDoc(allocator: std.mem.Allocator, body: []const u8, expected_domain: []const u8) Error!remote_actors.RemoteActor {
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
+    defer parsed.deinit();
+
+    if (parsed.value != .object) return error.ActorDocMissingFields;
+
+    const id_val = parsed.value.object.get("id") orelse return error.ActorDocMissingFields;
+    const inbox_val = parsed.value.object.get("inbox") orelse return error.ActorDocMissingFields;
+    const user_val = parsed.value.object.get("preferredUsername") orelse return error.ActorDocMissingFields;
+    if (id_val != .string or inbox_val != .string or user_val != .string) return error.ActorDocMissingFields;
+
+    const pk_val = parsed.value.object.get("publicKey") orelse return error.ActorDocMissingFields;
+    if (pk_val != .object) return error.ActorDocMissingFields;
+    const pem_val = pk_val.object.get("publicKeyPem") orelse return error.ActorDocMissingFields;
+    if (pem_val != .string) return error.ActorDocMissingFields;
+
+    const shared_inbox: ?[]u8 = blk: {
+        const endpoints = parsed.value.object.get("endpoints") orelse break :blk null;
+        if (endpoints != .object) break :blk null;
+        const si = endpoints.object.get("sharedInbox") orelse break :blk null;
+        if (si != .string) break :blk null;
+        break :blk try allocator.dupe(u8, si.string);
+    };
+
+    return .{
+        .id = try allocator.dupe(u8, id_val.string),
+        .inbox = try allocator.dupe(u8, inbox_val.string),
+        .shared_inbox = shared_inbox,
+        .preferred_username = try allocator.dupe(u8, user_val.string),
+        .domain = try allocator.dupe(u8, expected_domain),
+        .public_key_pem = try allocator.dupe(u8, pem_val.string),
+    };
+}
+
+pub fn followHandle(app_state: *app.App, allocator: std.mem.Allocator, user_id: i64, handle: []const u8) Error!FollowResult {
+    const remote = try parseHandle(handle);
+
+    var client = try initHttpClient(allocator, app_state.cfg.ca_cert_file);
+    defer client.deinit();
+
+    const host_header = try hostHeaderAlloc(allocator, remote.host, remote.port, app_state.cfg.scheme);
+
+    const webfinger_url = std.fmt.allocPrint(
+        allocator,
+        "{s}://{s}{s}/.well-known/webfinger?resource=acct:{s}@{s}",
+        .{
+            schemeString(app_state.cfg.scheme),
+            remote.host,
+            if (remote.port) |p| try std.fmt.allocPrint(allocator, ":{d}", .{p}) else "",
+            remote.username,
+            remote.host,
+        },
+    ) catch return error.OutOfMemory;
+
+    const webfinger_body = try fetchBodyAlloc(
+        &client,
+        allocator,
+        webfinger_url,
+        .GET,
+        .{ .host = .{ .override = host_header }, .accept_encoding = .omit },
+        &.{.{ .name = "accept", .value = "application/jrd+json" }},
+        null,
+    );
+
+    const actor_id = try extractWebfingerSelfHref(allocator, webfinger_body);
+
+    const actor_uri = try std.Uri.parse(actor_id);
+    const actor_host = try actor_uri.host.?.toRawMaybeAlloc(allocator);
+    const actor_host_header = try hostHeaderAlloc(allocator, actor_host, actor_uri.port, app_state.cfg.scheme);
+
+    const actor_body = try fetchBodyAlloc(
+        &client,
+        allocator,
+        actor_id,
+        .GET,
+        .{ .host = .{ .override = actor_host_header }, .accept_encoding = .omit },
+        &.{.{ .name = "accept", .value = "application/activity+json" }},
+        null,
+    );
+
+    const actor = try parseActorDoc(allocator, actor_body, remote.host);
+    try remote_actors.upsert(&app_state.conn, actor);
+
+    const local_user = (try users.lookupUserById(&app_state.conn, allocator, user_id)) orelse
+        return error.InvalidHandle;
+
+    const base = try baseUrlAlloc(app_state, allocator);
+    const local_actor_id = try std.fmt.allocPrint(allocator, "{s}/users/{s}", .{ base, local_user.username });
+    const key_id = try std.fmt.allocPrint(allocator, "{s}#main-key", .{local_actor_id});
+
+    var id_bytes: [16]u8 = undefined;
+    std.crypto.random.bytes(&id_bytes);
+    const id_hex = std.fmt.bytesToHex(id_bytes, .lower);
+    const follow_activity_id = try std.fmt.allocPrint(allocator, "{s}/follows/{s}", .{ base, id_hex[0..] });
+
+    _ = try follows.createPending(&app_state.conn, user_id, actor.id, follow_activity_id);
+
+    const payload = .{
+        .@"@context" = "https://www.w3.org/ns/activitystreams",
+        .id = follow_activity_id,
+        .type = "Follow",
+        .actor = local_actor_id,
+        .object = actor.id,
+    };
+    const follow_body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch
+        return error.OutOfMemory;
+
+    const inbox_uri = try std.Uri.parse(actor.inbox);
+    const inbox_target = try requestTargetAlloc(allocator, inbox_uri);
+
+    const inbox_host = try inbox_uri.host.?.toRawMaybeAlloc(allocator);
+    const inbox_host_header = try hostHeaderAlloc(allocator, inbox_host, inbox_uri.port, app_state.cfg.scheme);
+
+    const keys = try actor_keys.ensureForUser(&app_state.conn, allocator, user_id);
+
+    const signed = try http_signatures.signRequest(
+        allocator,
+        keys.private_key_pem,
+        key_id,
+        .POST,
+        inbox_target,
+        inbox_host_header,
+        follow_body,
+        std.time.timestamp(),
+    );
+
+    _ = try fetchBodyAlloc(
+        &client,
+        allocator,
+        actor.inbox,
+        .POST,
+        .{
+            .host = .{ .override = inbox_host_header },
+            .content_type = .{ .override = "application/activity+json" },
+            .accept_encoding = .omit,
+            .user_agent = .{ .override = "feddyspice" },
+        },
+        &.{
+            .{ .name = "accept", .value = "application/activity+json" },
+            .{ .name = "date", .value = signed.date },
+            .{ .name = "digest", .value = signed.digest },
+            .{ .name = "signature", .value = signed.signature },
+        },
+        follow_body,
+    );
+
+    return .{
+        .remote_actor_id = actor.id,
+        .follow_activity_id = follow_activity_id,
+    };
+}
+
+test "followHandle sends signed Follow to remote inbox" {
+    const net = std.net;
+    const http = std.http;
+
+    const listen_address = try net.Address.parseIp("127.0.0.1", 0);
+    var listener = try listen_address.listen(.{ .reuse_address = true });
+    defer listener.deinit();
+
+    const addr = listener.listen_address;
+    const port = addr.in.getPort();
+
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+    var test_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer test_arena.deinit();
+    const a = test_arena.allocator();
+
+    const keys = try actor_keys.ensureForUser(&app_state.conn, a, user_id);
+
+    const ServerCtx = struct {
+        listener: *net.Server,
+        port: u16,
+        local_public_key_pem: []const u8,
+        ok: bool = true,
+
+        fn run(ctx: *@This()) !void {
+            var buf: [16 * 1024]u8 = undefined;
+            var out: [16 * 1024]u8 = undefined;
+            var body_buf: [16 * 1024]u8 = undefined;
+
+            var seen_webfinger = false;
+            var seen_actor = false;
+            var seen_inbox = false;
+
+            while (!(seen_webfinger and seen_actor and seen_inbox)) {
+                var conn = try ctx.listener.accept();
+                defer conn.stream.close();
+
+                var reader = net.Stream.Reader.init(conn.stream, &buf);
+                var writer = net.Stream.Writer.init(conn.stream, &out);
+
+                var server = http.Server.init(reader.interface(), &writer.interface);
+                var request = try server.receiveHead();
+
+                const method = request.head.method;
+                const target = request.head.target;
+
+                var host: ?[]const u8 = null;
+                var date: ?[]const u8 = null;
+                var digest: ?[]const u8 = null;
+                var signature: ?[]const u8 = null;
+
+                var header_it = request.iterateHeaders();
+                while (header_it.next()) |h| {
+                    if (std.ascii.eqlIgnoreCase(h.name, "host")) host = h.value;
+                    if (std.ascii.eqlIgnoreCase(h.name, "date")) date = h.value;
+                    if (std.ascii.eqlIgnoreCase(h.name, "digest")) digest = h.value;
+                    if (std.ascii.eqlIgnoreCase(h.name, "signature")) signature = h.value;
+                }
+
+                var conn_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+                defer conn_arena.deinit();
+                const conn_alloc = conn_arena.allocator();
+
+                var body: []const u8 = "";
+                if (method.requestHasBody()) {
+                    const content_length: usize = @intCast(request.head.content_length orelse 0);
+                    request.head.expect = null;
+                    const br = request.readerExpectNone(&body_buf);
+                    body = try br.readAlloc(conn_alloc, content_length);
+                }
+
+                if (method == .GET and std.mem.startsWith(u8, target, "/.well-known/webfinger")) {
+                    seen_webfinger = true;
+                    const resp_body = try std.fmt.allocPrint(
+                        conn_alloc,
+                        "{{\"subject\":\"acct:bob@127.0.0.1\",\"links\":[{{\"rel\":\"self\",\"type\":\"application/activity+json\",\"href\":\"http://127.0.0.1:{d}/users/bob\"}}]}}",
+                        .{ctx.port},
+                    );
+                    try request.respond(resp_body, .{
+                        .status = .ok,
+                        .keep_alive = false,
+                        .extra_headers = &.{
+                            .{ .name = "content-type", .value = "application/jrd+json" },
+                        },
+                    });
+                    continue;
+                }
+
+                if (method == .GET and std.mem.eql(u8, target, "/users/bob")) {
+                    seen_actor = true;
+                    const resp_body = try std.fmt.allocPrint(
+                        conn_alloc,
+                        "{{\"@context\":\"https://www.w3.org/ns/activitystreams\",\"id\":\"http://127.0.0.1:{d}/users/bob\",\"type\":\"Person\",\"preferredUsername\":\"bob\",\"inbox\":\"http://127.0.0.1:{d}/users/bob/inbox\",\"publicKey\":{{\"id\":\"http://127.0.0.1:{d}/users/bob#main-key\",\"owner\":\"http://127.0.0.1:{d}/users/bob\",\"publicKeyPem\":\"-----BEGIN PUBLIC KEY-----\\\\n...\\\\n-----END PUBLIC KEY-----\\\\n\"}}}}",
+                        .{ ctx.port, ctx.port, ctx.port, ctx.port },
+                    );
+                    try request.respond(resp_body, .{
+                        .status = .ok,
+                        .keep_alive = false,
+                        .extra_headers = &.{
+                            .{ .name = "content-type", .value = "application/activity+json" },
+                        },
+                    });
+                    continue;
+                }
+
+                if (method == .POST and std.mem.eql(u8, target, "/users/bob/inbox")) {
+                    seen_inbox = true;
+
+                    if (host == null or date == null or digest == null or signature == null) {
+                        ctx.ok = false;
+                    } else {
+                        const expected_digest = try http_signatures.digestHeaderValueAlloc(conn_alloc, body);
+                        if (!std.mem.eql(u8, expected_digest, digest.?)) ctx.ok = false;
+
+                        const signing_string = try http_signatures.signingStringAlloc(
+                            conn_alloc,
+                            .POST,
+                            "/users/bob/inbox",
+                            host.?,
+                            date.?,
+                            digest.?,
+                        );
+
+                        const sig_prefix = "signature=\"";
+                        const sig_b64_i = std.mem.indexOf(u8, signature.?, sig_prefix) orelse {
+                            ctx.ok = false;
+                            break;
+                        };
+                        const sig_b64_start = sig_b64_i + sig_prefix.len;
+                        const sig_b64_end = std.mem.indexOfPos(u8, signature.?, sig_b64_start, "\"") orelse {
+                            ctx.ok = false;
+                            break;
+                        };
+
+                        const sig_b64 = signature.?[sig_b64_start..sig_b64_end];
+                        const sig_len = std.base64.standard.Decoder.calcSizeForSlice(sig_b64) catch {
+                            ctx.ok = false;
+                            break;
+                        };
+                        const sig_bytes = try conn_alloc.alloc(u8, sig_len);
+                        std.base64.standard.Decoder.decode(sig_bytes, sig_b64) catch {
+                            ctx.ok = false;
+                            break;
+                        };
+
+                        if (!(try @import("crypto_rsa.zig").verifyRsaSha256Pem(
+                            ctx.local_public_key_pem,
+                            signing_string,
+                            sig_bytes,
+                        ))) ctx.ok = false;
+                    }
+
+                    try request.respond("ok\n", .{
+                        .status = .accepted,
+                        .keep_alive = false,
+                        .extra_headers = &.{
+                            .{ .name = "content-type", .value = "text/plain" },
+                        },
+                    });
+                    continue;
+                }
+
+                ctx.ok = false;
+                try request.respond("not found\n", .{
+                    .status = .not_found,
+                    .keep_alive = false,
+                    .extra_headers = &.{
+                        .{ .name = "content-type", .value = "text/plain" },
+                    },
+                });
+            }
+        }
+    };
+
+    var ctx: ServerCtx = .{
+        .listener = &listener,
+        .port = port,
+        .local_public_key_pem = keys.public_key_pem,
+    };
+
+    var t = try std.Thread.spawn(.{}, ServerCtx.run, .{&ctx});
+
+    const handle = try std.fmt.allocPrint(a, "bob@127.0.0.1:{d}", .{port});
+
+    _ = try followHandle(&app_state, a, user_id, handle);
+    t.join();
+
+    try std.testing.expect(ctx.ok);
+}

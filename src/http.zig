@@ -2,6 +2,7 @@ const std = @import("std");
 
 const app = @import("app.zig");
 const actor_keys = @import("actor_keys.zig");
+const federation = @import("federation.zig");
 const form = @import("form.zig");
 const follows = @import("follows.zig");
 const oauth = @import("oauth.zig");
@@ -265,6 +266,10 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
 
     if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/accounts/verify_credentials")) {
         return verifyCredentials(app_state, allocator, req);
+    }
+
+    if (req.method == .POST and std.mem.eql(u8, path, "/api/v1/follows")) {
+        return apiFollow(app_state, allocator, req);
     }
 
     if (req.method == .POST and std.mem.eql(u8, path, "/api/v1/statuses")) {
@@ -707,6 +712,63 @@ fn verifyCredentials(app_state: *app.App, allocator: std.mem.Allocator, req: Req
         .group = false,
         .discoverable = true,
         .created_at = user.?.created_at,
+        .followers_count = 0,
+        .following_count = 0,
+        .statuses_count = 0,
+        .avatar = "",
+        .avatar_static = "",
+        .header = "",
+        .header_static = "",
+    };
+
+    const body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    return .{
+        .content_type = "application/json; charset=utf-8",
+        .body = body,
+    };
+}
+
+fn apiFollow(app_state: *app.App, allocator: std.mem.Allocator, req: Request) Response {
+    const token = bearerToken(req.authorization) orelse return unauthorized(allocator);
+
+    const info = oauth.verifyAccessToken(&app_state.conn, allocator, token) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (info == null) return unauthorized(allocator);
+
+    if (!isForm(req.content_type)) return .{ .status = .bad_request, .body = "invalid content-type\n" };
+    var parsed = form.parse(allocator, req.body) catch
+        return .{ .status = .bad_request, .body = "invalid form\n" };
+
+    const uri = parsed.get("uri") orelse return .{ .status = .bad_request, .body = "missing uri\n" };
+
+    const result = federation.followHandle(app_state, allocator, info.?.user_id, uri) catch |err| switch (err) {
+        error.InvalidHandle, error.WebfingerNoSelfLink, error.ActorDocMissingFields => return .{
+            .status = .bad_request,
+            .body = "invalid uri\n",
+        },
+        else => return .{ .status = .internal_server_error, .body = "internal server error\n" },
+    };
+
+    const actor = remote_actors.lookupById(&app_state.conn, allocator, result.remote_actor_id) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (actor == null) return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    const acct = std.fmt.allocPrint(allocator, "{s}@{s}", .{ actor.?.preferred_username, actor.?.domain }) catch "";
+
+    const payload = .{
+        .id = actor.?.id,
+        .username = actor.?.preferred_username,
+        .acct = acct,
+        .display_name = "",
+        .note = "",
+        .url = actor.?.id,
+        .locked = false,
+        .bot = false,
+        .group = false,
+        .discoverable = true,
+        .created_at = "1970-01-01T00:00:00.000Z",
         .followers_count = 0,
         .following_count = 0,
         .statuses_count = 0,
@@ -1437,6 +1499,22 @@ test "statuses: create + get + home timeline" {
 
     try std.testing.expectEqual(@as(usize, 1), tl_json.value.array.items.len);
     try std.testing.expectEqualStrings(id, tl_json.value.array.items[0].object.get("id").?.string);
+}
+
+test "POST /api/v1/follows requires bearer token" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const resp = handle(&app_state, arena.allocator(), .{
+        .method = .POST,
+        .target = "/api/v1/follows",
+        .content_type = "application/x-www-form-urlencoded",
+        .body = "uri=@bob@remote.test",
+    });
+    try std.testing.expectEqual(std.http.Status.unauthorized, resp.status);
 }
 
 test "GET /.well-known/webfinger returns actor self link" {

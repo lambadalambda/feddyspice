@@ -29,6 +29,7 @@ pub const App = struct {
             .scheme = .http,
             .listen_address = try std.net.Address.parseIp("127.0.0.1", 0),
             .db_path = try allocator.dupe(u8, ":memory:"),
+            .ca_cert_file = null,
             .password_params = password.Params{ .t = 1, .m = 8, .p = 1 },
         };
 
@@ -49,4 +50,3 @@ pub const App = struct {
         app.* = undefined;
     }
 };
-
