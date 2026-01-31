@@ -5,6 +5,7 @@ const actor_keys = @import("actor_keys.zig");
 const federation = @import("federation.zig");
 const form = @import("form.zig");
 const follows = @import("follows.zig");
+const followers = @import("followers.zig");
 const oauth = @import("oauth.zig");
 const remote_actors = @import("remote_actors.zig");
 const remote_statuses = @import("remote_statuses.zig");
@@ -76,6 +77,8 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
         }
 
         if (req.method == .GET) {
+            if (std.mem.endsWith(u8, path, "/followers")) return followersGet(app_state, allocator, path);
+            if (std.mem.endsWith(u8, path, "/following")) return followingGet(app_state, allocator, path);
             return actorGet(app_state, allocator, path);
         }
     }
@@ -423,7 +426,7 @@ fn actorGet(app_state: *app.App, allocator: std.mem.Allocator, path: []const u8)
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
     const outbox = std.fmt.allocPrint(allocator, "{s}/users/{s}/outbox", .{ base, username }) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
-    const followers = std.fmt.allocPrint(allocator, "{s}/users/{s}/followers", .{ base, username }) catch
+    const followers_url = std.fmt.allocPrint(allocator, "{s}/users/{s}/followers", .{ base, username }) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
     const following = std.fmt.allocPrint(allocator, "{s}/users/{s}/following", .{ base, username }) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
@@ -441,13 +444,97 @@ fn actorGet(app_state: *app.App, allocator: std.mem.Allocator, path: []const u8)
         .preferredUsername = user.?.username,
         .inbox = inbox,
         .outbox = outbox,
-        .followers = followers,
+        .followers = followers_url,
         .following = following,
         .publicKey = .{
             .id = key_id,
             .owner = actor_id,
             .publicKeyPem = keys.public_key_pem,
         },
+    };
+
+    const body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    return .{
+        .content_type = "application/activity+json; charset=utf-8",
+        .body = body,
+    };
+}
+
+fn followersGet(app_state: *app.App, allocator: std.mem.Allocator, path: []const u8) Response {
+    const prefix = "/users/";
+    const suffix = "/followers";
+    if (!std.mem.startsWith(u8, path, prefix)) return .{ .status = .not_found, .body = "not found\n" };
+    if (!std.mem.endsWith(u8, path, suffix)) return .{ .status = .not_found, .body = "not found\n" };
+
+    const username = path[prefix.len .. path.len - suffix.len];
+    if (username.len == 0) return .{ .status = .not_found, .body = "not found\n" };
+    if (std.mem.indexOfScalar(u8, username, '/') != null) return .{ .status = .not_found, .body = "not found\n" };
+
+    const user = users.lookupUserByUsername(&app_state.conn, allocator, username) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (user == null) return .{ .status = .not_found, .body = "not found\n" };
+
+    const base = baseUrlAlloc(app_state, allocator) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    const id = std.fmt.allocPrint(allocator, "{s}/users/{s}/followers", .{ base, username }) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    const total = followers.countAccepted(&app_state.conn, user.?.id) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    const items = followers.listAcceptedRemoteActorIds(&app_state.conn, allocator, user.?.id, 200) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    const payload = .{
+        .@"@context" = "https://www.w3.org/ns/activitystreams",
+        .id = id,
+        .type = "OrderedCollection",
+        .totalItems = total,
+        .orderedItems = items,
+    };
+
+    const body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    return .{
+        .content_type = "application/activity+json; charset=utf-8",
+        .body = body,
+    };
+}
+
+fn followingGet(app_state: *app.App, allocator: std.mem.Allocator, path: []const u8) Response {
+    const prefix = "/users/";
+    const suffix = "/following";
+    if (!std.mem.startsWith(u8, path, prefix)) return .{ .status = .not_found, .body = "not found\n" };
+    if (!std.mem.endsWith(u8, path, suffix)) return .{ .status = .not_found, .body = "not found\n" };
+
+    const username = path[prefix.len .. path.len - suffix.len];
+    if (username.len == 0) return .{ .status = .not_found, .body = "not found\n" };
+    if (std.mem.indexOfScalar(u8, username, '/') != null) return .{ .status = .not_found, .body = "not found\n" };
+
+    const user = users.lookupUserByUsername(&app_state.conn, allocator, username) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (user == null) return .{ .status = .not_found, .body = "not found\n" };
+
+    const base = baseUrlAlloc(app_state, allocator) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    const id = std.fmt.allocPrint(allocator, "{s}/users/{s}/following", .{ base, username }) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    const total = follows.countAccepted(&app_state.conn, user.?.id) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    const items = follows.listAcceptedRemoteActorIds(&app_state.conn, allocator, user.?.id, 200) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    const payload = .{
+        .@"@context" = "https://www.w3.org/ns/activitystreams",
+        .id = id,
+        .type = "OrderedCollection",
+        .totalItems = total,
+        .orderedItems = items,
     };
 
     const body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch
@@ -518,6 +605,58 @@ fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: Request, pa
             content_val.string,
             "public",
             created_at,
+        ) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+        return .{ .status = .accepted, .body = "ok\n" };
+    }
+
+    if (std.mem.eql(u8, typ.string, "Follow")) {
+        const id_val = parsed.value.object.get("id") orelse
+            return .{ .status = .bad_request, .body = "missing id\n" };
+        if (id_val != .string) return .{ .status = .bad_request, .body = "invalid id\n" };
+
+        const actor_val = parsed.value.object.get("actor") orelse
+            return .{ .status = .bad_request, .body = "missing actor\n" };
+        if (actor_val != .string) return .{ .status = .bad_request, .body = "invalid actor\n" };
+
+        const obj = parsed.value.object.get("object") orelse
+            return .{ .status = .bad_request, .body = "missing object\n" };
+
+        var object_actor_id: []const u8 = undefined;
+        switch (obj) {
+            .string => |s| object_actor_id = s,
+            .object => |o| {
+                const oid = o.get("id") orelse return .{ .status = .bad_request, .body = "missing id\n" };
+                if (oid != .string) return .{ .status = .bad_request, .body = "invalid id\n" };
+                object_actor_id = oid.string;
+            },
+            else => return .{ .status = .bad_request, .body = "invalid object\n" },
+        }
+
+        const base = baseUrlAlloc(app_state, allocator) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        const expected = std.fmt.allocPrint(allocator, "{s}/users/{s}", .{ base, username }) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+        const trimSlash = struct {
+            fn f(s: []const u8) []const u8 {
+                if (s.len == 0) return s;
+                if (s[s.len - 1] == '/') return s[0 .. s.len - 1];
+                return s;
+            }
+        }.f;
+
+        if (!std.mem.eql(u8, trimSlash(object_actor_id), trimSlash(expected))) {
+            return .{ .status = .accepted, .body = "ignored\n" };
+        }
+
+        federation.acceptInboundFollow(
+            app_state,
+            allocator,
+            user.?.id,
+            username,
+            actor_val.string,
+            id_val.string,
         ) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
 
         return .{ .status = .accepted, .body = "ok\n" };
@@ -1846,6 +1985,211 @@ test "GET /users/:name returns ActivityPub actor" {
 
     const pk_pem = parsed.value.object.get("publicKey").?.object.get("publicKeyPem").?.string;
     try std.testing.expect(std.mem.indexOf(u8, pk_pem, "BEGIN PUBLIC KEY") != null);
+}
+
+test "POST /users/:name/inbox Follow stores follower and sends Accept" {
+    const net = std.net;
+    const http = std.http;
+
+    const listen_address = try net.Address.parseIp("127.0.0.1", 0);
+    var listener = try listen_address.listen(.{ .reuse_address = true });
+    defer listener.deinit();
+
+    const addr = listener.listen_address;
+    const port = addr.in.getPort();
+
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var test_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer test_arena.deinit();
+    const a = test_arena.allocator();
+
+    const keys = try actor_keys.ensureForUser(&app_state.conn, a, user_id);
+
+    const ServerCtx = struct {
+        listener: *net.Server,
+        port: u16,
+        local_public_key_pem: []const u8,
+        ok: bool = true,
+
+        fn run(ctx: *@This()) !void {
+            var buf: [16 * 1024]u8 = undefined;
+            var out: [16 * 1024]u8 = undefined;
+            var body_buf: [16 * 1024]u8 = undefined;
+
+            var seen_actor = false;
+            var seen_inbox = false;
+
+            while (!(seen_actor and seen_inbox)) {
+                var conn = try ctx.listener.accept();
+                defer conn.stream.close();
+
+                var reader = net.Stream.Reader.init(conn.stream, &buf);
+                var writer = net.Stream.Writer.init(conn.stream, &out);
+
+                var server = http.Server.init(reader.interface(), &writer.interface);
+                var request = try server.receiveHead();
+
+                const method = request.head.method;
+                const target = request.head.target;
+
+                var host: ?[]const u8 = null;
+                var date: ?[]const u8 = null;
+                var digest: ?[]const u8 = null;
+                var signature: ?[]const u8 = null;
+
+                var header_it = request.iterateHeaders();
+                while (header_it.next()) |h| {
+                    if (std.ascii.eqlIgnoreCase(h.name, "host")) host = h.value;
+                    if (std.ascii.eqlIgnoreCase(h.name, "date")) date = h.value;
+                    if (std.ascii.eqlIgnoreCase(h.name, "digest")) digest = h.value;
+                    if (std.ascii.eqlIgnoreCase(h.name, "signature")) signature = h.value;
+                }
+
+                var conn_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+                defer conn_arena.deinit();
+                const conn_alloc = conn_arena.allocator();
+
+                var body: []const u8 = "";
+                if (method.requestHasBody()) {
+                    const content_length: usize = @intCast(request.head.content_length orelse 0);
+                    request.head.expect = null;
+                    const br = request.readerExpectNone(&body_buf);
+                    body = try br.readAlloc(conn_alloc, content_length);
+                }
+
+                if (method == .GET and std.mem.eql(u8, target, "/users/bob")) {
+                    seen_actor = true;
+                    const resp_body = try std.fmt.allocPrint(
+                        conn_alloc,
+                        "{{\"@context\":\"https://www.w3.org/ns/activitystreams\",\"id\":\"http://127.0.0.1:{d}/users/bob\",\"type\":\"Person\",\"preferredUsername\":\"bob\",\"inbox\":\"http://127.0.0.1:{d}/users/bob/inbox\",\"publicKey\":{{\"id\":\"http://127.0.0.1:{d}/users/bob#main-key\",\"owner\":\"http://127.0.0.1:{d}/users/bob\",\"publicKeyPem\":\"-----BEGIN PUBLIC KEY-----\\\\n...\\\\n-----END PUBLIC KEY-----\\\\n\"}}}}",
+                        .{ ctx.port, ctx.port, ctx.port, ctx.port },
+                    );
+                    try request.respond(resp_body, .{
+                        .status = .ok,
+                        .keep_alive = false,
+                        .extra_headers = &.{
+                            .{ .name = "content-type", .value = "application/activity+json" },
+                        },
+                    });
+                    continue;
+                }
+
+                if (method == .POST and std.mem.eql(u8, target, "/users/bob/inbox")) {
+                    seen_inbox = true;
+
+                    if (host == null or date == null or digest == null or signature == null) {
+                        ctx.ok = false;
+                    } else {
+                        const expected_digest = try @import("http_signatures.zig").digestHeaderValueAlloc(conn_alloc, body);
+                        if (!std.mem.eql(u8, expected_digest, digest.?)) ctx.ok = false;
+
+                        const signing_string = try @import("http_signatures.zig").signingStringAlloc(
+                            conn_alloc,
+                            .POST,
+                            "/users/bob/inbox",
+                            host.?,
+                            date.?,
+                            digest.?,
+                        );
+
+                        const sig_prefix = "signature=\"";
+                        const sig_b64_i = std.mem.indexOf(u8, signature.?, sig_prefix) orelse {
+                            ctx.ok = false;
+                            break;
+                        };
+                        const sig_b64_start = sig_b64_i + sig_prefix.len;
+                        const sig_b64_end = std.mem.indexOfPos(u8, signature.?, sig_b64_start, "\"") orelse {
+                            ctx.ok = false;
+                            break;
+                        };
+
+                        const sig_b64 = signature.?[sig_b64_start..sig_b64_end];
+                        const sig_len = std.base64.standard.Decoder.calcSizeForSlice(sig_b64) catch {
+                            ctx.ok = false;
+                            break;
+                        };
+                        const sig_bytes = try conn_alloc.alloc(u8, sig_len);
+                        std.base64.standard.Decoder.decode(sig_bytes, sig_b64) catch {
+                            ctx.ok = false;
+                            break;
+                        };
+
+                        if (!(try @import("crypto_rsa.zig").verifyRsaSha256Pem(
+                            ctx.local_public_key_pem,
+                            signing_string,
+                            sig_bytes,
+                        ))) ctx.ok = false;
+                    }
+
+                    try request.respond("ok\n", .{
+                        .status = .accepted,
+                        .keep_alive = false,
+                        .extra_headers = &.{
+                            .{ .name = "content-type", .value = "text/plain" },
+                        },
+                    });
+                    continue;
+                }
+
+                ctx.ok = false;
+                try request.respond("not found\n", .{
+                    .status = .not_found,
+                    .keep_alive = false,
+                    .extra_headers = &.{
+                        .{ .name = "content-type", .value = "text/plain" },
+                    },
+                });
+            }
+        }
+    };
+
+    var ctx: ServerCtx = .{
+        .listener = &listener,
+        .port = port,
+        .local_public_key_pem = keys.public_key_pem,
+    };
+
+    var t = try std.Thread.spawn(.{}, ServerCtx.run, .{&ctx});
+
+    const remote_actor_id = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}/users/bob", .{port});
+    const follow_id = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}/follows/1", .{port});
+
+    const follow_body = try std.fmt.allocPrint(
+        a,
+        "{{\"@context\":\"https://www.w3.org/ns/activitystreams\",\"id\":\"{s}\",\"type\":\"Follow\",\"actor\":\"{s}\",\"object\":\"http://example.test/users/alice\"}}",
+        .{ follow_id, remote_actor_id },
+    );
+
+    const resp = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/users/alice/inbox",
+        .content_type = "application/activity+json",
+        .body = follow_body,
+    });
+    try std.testing.expectEqual(std.http.Status.accepted, resp.status);
+    t.join();
+    try std.testing.expect(ctx.ok);
+
+    const follower = (try followers.lookupByRemoteActorId(&app_state.conn, a, user_id, remote_actor_id)).?;
+    try std.testing.expectEqual(followers.FollowerState.accepted, follower.state);
+
+    const followers_resp = handle(&app_state, a, .{
+        .method = .GET,
+        .target = "/users/alice/followers",
+    });
+    try std.testing.expectEqual(std.http.Status.ok, followers_resp.status);
+
+    var followers_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, followers_resp.body, .{});
+    defer followers_json.deinit();
+
+    const items = followers_json.value.object.get("orderedItems").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), items.len);
+    try std.testing.expectEqualStrings(remote_actor_id, items[0].string);
 }
 
 test "POST /users/:name/inbox Accept marks follow accepted" {

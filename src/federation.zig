@@ -4,6 +4,7 @@ const actor_keys = @import("actor_keys.zig");
 const app = @import("app.zig");
 const config = @import("config.zig");
 const follows = @import("follows.zig");
+const followers = @import("followers.zig");
 const http_signatures = @import("http_signatures.zig");
 const remote_actors = @import("remote_actors.zig");
 const users = @import("users.zig");
@@ -16,6 +17,7 @@ pub const Error =
     std.Uri.ParseError ||
     actor_keys.Error ||
     follows.Error ||
+    followers.Error ||
     remote_actors.Error ||
     users.Error ||
     error{
@@ -189,6 +191,31 @@ fn parseActorDoc(allocator: std.mem.Allocator, body: []const u8, expected_domain
     };
 }
 
+fn ensureRemoteActorById(app_state: *app.App, allocator: std.mem.Allocator, actor_id: []const u8) Error!remote_actors.RemoteActor {
+    if (try remote_actors.lookupById(&app_state.conn, allocator, actor_id)) |existing| return existing;
+
+    var client = try initHttpClient(allocator, app_state.cfg.ca_cert_file);
+    defer client.deinit();
+
+    const actor_uri = try std.Uri.parse(actor_id);
+    const host = try actor_uri.host.?.toRawMaybeAlloc(allocator);
+    const host_header = try hostHeaderAlloc(allocator, host, actor_uri.port, app_state.cfg.scheme);
+
+    const actor_body = try fetchBodyAlloc(
+        &client,
+        allocator,
+        actor_id,
+        .GET,
+        .{ .host = .{ .override = host_header }, .accept_encoding = .omit },
+        &.{.{ .name = "accept", .value = "application/activity+json" }},
+        null,
+    );
+
+    const actor = try parseActorDoc(allocator, actor_body, host);
+    try remote_actors.upsert(&app_state.conn, actor);
+    return actor;
+}
+
 pub fn followHandle(app_state: *app.App, allocator: std.mem.Allocator, user_id: i64, handle: []const u8) Error!FollowResult {
     const remote = try parseHandle(handle);
 
@@ -305,6 +332,87 @@ pub fn followHandle(app_state: *app.App, allocator: std.mem.Allocator, user_id: 
         .remote_actor_id = actor.id,
         .follow_activity_id = follow_activity_id,
     };
+}
+
+pub fn acceptInboundFollow(
+    app_state: *app.App,
+    allocator: std.mem.Allocator,
+    user_id: i64,
+    username: []const u8,
+    remote_actor_id: []const u8,
+    remote_follow_activity_id: []const u8,
+) Error!void {
+    const actor = try ensureRemoteActorById(app_state, allocator, remote_actor_id);
+
+    try followers.upsertPending(&app_state.conn, user_id, actor.id, remote_follow_activity_id);
+
+    const base = try baseUrlAlloc(app_state, allocator);
+    const local_actor_id = try std.fmt.allocPrint(allocator, "{s}/users/{s}", .{ base, username });
+    const key_id = try std.fmt.allocPrint(allocator, "{s}#main-key", .{local_actor_id});
+
+    var id_bytes: [16]u8 = undefined;
+    std.crypto.random.bytes(&id_bytes);
+    const id_hex = std.fmt.bytesToHex(id_bytes, .lower);
+    const accept_activity_id = try std.fmt.allocPrint(allocator, "{s}/accepts/{s}", .{ base, id_hex[0..] });
+
+    const payload = .{
+        .@"@context" = "https://www.w3.org/ns/activitystreams",
+        .id = accept_activity_id,
+        .type = "Accept",
+        .actor = local_actor_id,
+        .object = .{
+            .id = remote_follow_activity_id,
+            .type = "Follow",
+            .actor = actor.id,
+            .object = local_actor_id,
+        },
+    };
+    const accept_body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch
+        return error.OutOfMemory;
+
+    const inbox_uri = try std.Uri.parse(actor.inbox);
+    const inbox_target = try requestTargetAlloc(allocator, inbox_uri);
+
+    const inbox_host = try inbox_uri.host.?.toRawMaybeAlloc(allocator);
+    const inbox_host_header = try hostHeaderAlloc(allocator, inbox_host, inbox_uri.port, app_state.cfg.scheme);
+
+    const keys = try actor_keys.ensureForUser(&app_state.conn, allocator, user_id);
+
+    const signed = try http_signatures.signRequest(
+        allocator,
+        keys.private_key_pem,
+        key_id,
+        .POST,
+        inbox_target,
+        inbox_host_header,
+        accept_body,
+        std.time.timestamp(),
+    );
+
+    var client = try initHttpClient(allocator, app_state.cfg.ca_cert_file);
+    defer client.deinit();
+
+    _ = try fetchBodyAlloc(
+        &client,
+        allocator,
+        actor.inbox,
+        .POST,
+        .{
+            .host = .{ .override = inbox_host_header },
+            .content_type = .{ .override = "application/activity+json" },
+            .accept_encoding = .omit,
+            .user_agent = .{ .override = "feddyspice" },
+        },
+        &.{
+            .{ .name = "accept", .value = "application/activity+json" },
+            .{ .name = "date", .value = signed.date },
+            .{ .name = "digest", .value = signed.digest },
+            .{ .name = "signature", .value = signed.signature },
+        },
+        accept_body,
+    );
+
+    _ = try followers.markAcceptedByRemoteActorId(&app_state.conn, user_id, actor.id);
 }
 
 test "followHandle sends signed Follow to remote inbox" {
