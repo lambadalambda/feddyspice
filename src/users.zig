@@ -162,6 +162,22 @@ pub fn lookupUserByUsername(
     };
 }
 
+pub fn lookupFirstUser(conn: *db.Db, allocator: std.mem.Allocator) (db.Error || std.mem.Allocator.Error)!?User {
+    var stmt = try conn.prepareZ("SELECT id, username, created_at FROM users ORDER BY id ASC LIMIT 1;\x00");
+    defer stmt.finalize();
+
+    switch (try stmt.step()) {
+        .done => return null,
+        .row => {},
+    }
+
+    return .{
+        .id = stmt.columnInt64(0),
+        .username = try allocator.dupe(u8, stmt.columnText(1)),
+        .created_at = try allocator.dupe(u8, stmt.columnText(2)),
+    };
+}
+
 pub fn freeCredentials(allocator: std.mem.Allocator, creds: *Credentials) void {
     allocator.free(creds.username);
     creds.* = undefined;

@@ -414,6 +414,10 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
         return createStatus(app_state, allocator, req);
     }
 
+    if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/timelines/public")) {
+        return publicTimeline(app_state, allocator, req);
+    }
+
     if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/timelines/home")) {
         return homeTimeline(app_state, allocator, req);
     }
@@ -1079,6 +1083,79 @@ fn createStatus(app_state: *app.App, allocator: std.mem.Allocator, req: Request)
     background.deliverStatusToFollowers(app_state, allocator, info.?.user_id, st.id);
 
     return statusResponse(app_state, allocator, user.?, st);
+}
+
+fn isPublicVisibility(visibility: []const u8) bool {
+    return std.mem.eql(u8, visibility, "public") or std.mem.eql(u8, visibility, "unlisted");
+}
+
+fn publicTimeline(app_state: *app.App, allocator: std.mem.Allocator, req: Request) Response {
+    const q = queryString(req.target);
+    var params = form.parse(allocator, q) catch form.Form{ .map = .empty };
+
+    const limit: usize = blk: {
+        const lim_str = params.get("limit") orelse break :blk 20;
+        break :blk std.fmt.parseInt(usize, lim_str, 10) catch 20;
+    };
+
+    const max_id: ?i64 = blk: {
+        const s = params.get("max_id") orelse break :blk null;
+        break :blk std.fmt.parseInt(i64, s, 10) catch null;
+    };
+
+    const local_only: bool = blk: {
+        const s = params.get("local") orelse break :blk false;
+        if (std.ascii.eqlIgnoreCase(s, "true")) break :blk true;
+        if (std.mem.eql(u8, s, "1")) break :blk true;
+        break :blk false;
+    };
+
+    const user = users.lookupFirstUser(&app_state.conn, allocator) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    var payloads = std.ArrayListUnmanaged(StatusPayload).empty;
+    defer payloads.deinit(allocator);
+
+    if (user) |u| {
+        const local_list = statuses.listByUser(&app_state.conn, allocator, u.id, limit, max_id) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+        for (local_list) |st| {
+            if (!isPublicVisibility(st.visibility)) continue;
+            payloads.append(allocator, makeStatusPayload(app_state, allocator, u, st)) catch return .{
+                .status = .internal_server_error,
+                .body = "internal server error\n",
+            };
+        }
+    }
+
+    if (!local_only) {
+        const remote_list = remote_statuses.listLatest(&app_state.conn, allocator, limit) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+        for (remote_list) |st| {
+            if (!isPublicVisibility(st.visibility)) continue;
+            const actor = remote_actors.lookupById(&app_state.conn, allocator, st.remote_actor_id) catch
+                return .{ .status = .internal_server_error, .body = "internal server error\n" };
+            if (actor == null) continue;
+
+            payloads.append(allocator, makeRemoteStatusPayload(app_state, allocator, actor.?, st)) catch return .{
+                .status = .internal_server_error,
+                .body = "internal server error\n",
+            };
+        }
+    }
+
+    std.sort.block(StatusPayload, payloads.items, {}, statusPayloadNewerFirst);
+
+    const slice = payloads.items[0..@min(limit, payloads.items.len)];
+    const body = std.json.Stringify.valueAlloc(allocator, slice, .{}) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    return .{
+        .content_type = "application/json; charset=utf-8",
+        .body = body,
+    };
 }
 
 fn homeTimeline(app_state: *app.App, allocator: std.mem.Allocator, req: Request) Response {
@@ -2656,6 +2733,57 @@ test "statuses: create + get + home timeline" {
     var tl_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, tl_resp.body, .{});
     defer tl_json.deinit();
 
+    try std.testing.expectEqual(@as(usize, 1), tl_json.value.array.items.len);
+    try std.testing.expectEqualStrings(id, tl_json.value.array.items[0].object.get("id").?.string);
+}
+
+test "timelines: public timeline returns local statuses" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const app_creds = try oauth.createApp(
+        &app_state.conn,
+        a,
+        "pl-fe",
+        "urn:ietf:wg:oauth:2.0:oob",
+        "read write",
+        "",
+    );
+
+    const token = try oauth.createAccessToken(&app_state.conn, a, app_creds.id, user_id, "read write");
+    const auth_header = try std.fmt.allocPrint(a, "Bearer {s}", .{token});
+
+    const create_resp = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/api/v1/statuses",
+        .content_type = "application/x-www-form-urlencoded",
+        .body = "status=hello&visibility=public",
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, create_resp.status);
+
+    var create_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, create_resp.body, .{});
+    defer create_json.deinit();
+
+    const id = create_json.value.object.get("id").?.string;
+
+    const tl_resp = handle(&app_state, a, .{
+        .method = .GET,
+        .target = "/api/v1/timelines/public?local=true&only_media=false",
+    });
+    try std.testing.expectEqual(std.http.Status.ok, tl_resp.status);
+
+    var tl_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, tl_resp.body, .{});
+    defer tl_json.deinit();
+
+    try std.testing.expect(tl_json.value == .array);
     try std.testing.expectEqual(@as(usize, 1), tl_json.value.array.items.len);
     try std.testing.expectEqualStrings(id, tl_json.value.array.items[0].object.get("id").?.string);
 }
