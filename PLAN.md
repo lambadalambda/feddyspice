@@ -80,7 +80,7 @@ We keep this list in-sync with reality by periodically scanning `feddyspice.log`
 - [x] `GET /api/v1/notifications` (client compat placeholder)
 - [x] `GET /api/v1/preferences` (client compat placeholder)
 - [x] `GET /api/v1/push/subscription` (client compat placeholder)
-- [ ] `GET /api/v1/accounts/relationships?id[]=:id` (seen as `id[]=1`)
+- [x] `GET /api/v1/accounts/relationships?id[]=:id` (seen as `id[]=1`)
 - [ ] `GET /api/v1/accounts/:id/statuses` (seen with `pinned=true`, `only_media=true`, `exclude_replies=true`)
 - [x] `GET /api/v1/scheduled_statuses` (client compat placeholder)
 - [x] `GET /api/v1/timelines/public` (basic)
@@ -100,7 +100,7 @@ This is the “eventually” list. We should keep it scoped to what pl-fe needs,
 - [ ] `GET /api/v1/accounts/:id/followers`
 - [ ] `GET /api/v1/accounts/:id/following`
 - [ ] `POST /api/v1/accounts/:id/follow` + `POST /api/v1/accounts/:id/unfollow` (or document why we only support `POST /api/v1/follows`)
-- [ ] `GET /api/v1/accounts/relationships` (Relationship entity)
+- [x] `GET /api/v1/accounts/relationships` (Relationship entity)
 
 ### Statuses
 

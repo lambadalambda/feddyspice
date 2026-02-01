@@ -411,6 +411,10 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
         return accountLookup(app_state, allocator, req);
     }
 
+    if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/accounts/relationships")) {
+        return accountRelationships(app_state, allocator, req);
+    }
+
     if (req.method == .GET and std.mem.startsWith(u8, path, "/api/v1/accounts/")) {
         const rest = path["/api/v1/accounts/".len..];
         if (std.mem.indexOfScalar(u8, rest, '/') == null) {
@@ -1506,6 +1510,50 @@ fn accountGet(app_state: *app.App, allocator: std.mem.Allocator, path: []const u
     if (user == null) return .{ .status = .not_found, .body = "not found\n" };
 
     return accountByUser(app_state, allocator, user.?);
+}
+
+fn accountRelationships(app_state: *app.App, allocator: std.mem.Allocator, req: Request) Response {
+    const token = bearerToken(req.authorization) orelse return unauthorized(allocator);
+    const info = oauth.verifyAccessToken(&app_state.conn, allocator, token) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (info == null) return unauthorized(allocator);
+
+    const q = queryString(req.target);
+
+    var ids: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer ids.deinit(allocator);
+
+    var it = std.mem.splitScalar(u8, q, '&');
+    while (it.next()) |pair_raw| {
+        if (pair_raw.len == 0) continue;
+        const eq = std.mem.indexOfScalar(u8, pair_raw, '=') orelse continue;
+
+        const key = pair_raw[0..eq];
+        const value = pair_raw[eq + 1 ..];
+        if (value.len == 0) continue;
+
+        if (std.mem.eql(u8, key, "id") or std.mem.eql(u8, key, "id[]") or std.mem.eql(u8, key, "id%5B%5D")) {
+            ids.append(allocator, value) catch
+                return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        }
+    }
+
+    const Rel = struct { id: []const u8 };
+    var rels: std.ArrayListUnmanaged(Rel) = .empty;
+    defer rels.deinit(allocator);
+
+    for (ids.items) |id_str| {
+        rels.append(allocator, .{ .id = id_str }) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    }
+
+    const body = std.json.Stringify.valueAlloc(allocator, rels.items, .{}) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    return .{
+        .content_type = "application/json; charset=utf-8",
+        .body = body,
+    };
 }
 
 fn accountByUser(app_state: *app.App, allocator: std.mem.Allocator, user: users.User) Response {
@@ -2789,6 +2837,48 @@ test "accounts: lookup + get account" {
     try std.testing.expectEqualStrings("alice", get_json.value.object.get("username").?.string);
     try std.testing.expectEqualStrings("alice", get_json.value.object.get("acct").?.string);
     try std.testing.expectEqualStrings("http://example.test/users/alice", get_json.value.object.get("url").?.string);
+}
+
+test "accounts: relationships" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const id_str = try std.fmt.allocPrint(a, "{d}", .{user_id});
+
+    const app_creds = try oauth.createApp(
+        &app_state.conn,
+        a,
+        "pl-fe",
+        "urn:ietf:wg:oauth:2.0:oob",
+        "read",
+        "",
+    );
+    const token = try oauth.createAccessToken(&app_state.conn, a, app_creds.id, user_id, "read");
+    const auth_header = try std.fmt.allocPrint(a, "Bearer {s}", .{token});
+
+    const target = try std.fmt.allocPrint(a, "/api/v1/accounts/relationships?id[]={s}&id[]=999", .{id_str});
+
+    const resp = handle(&app_state, a, .{
+        .method = .GET,
+        .target = target,
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, resp.status);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, resp.body, .{});
+    defer parsed.deinit();
+
+    try std.testing.expect(parsed.value == .array);
+    try std.testing.expectEqual(@as(usize, 2), parsed.value.array.items.len);
+    try std.testing.expectEqualStrings(id_str, parsed.value.array.items[0].object.get("id").?.string);
+    try std.testing.expectEqualStrings("999", parsed.value.array.items[1].object.get("id").?.string);
 }
 
 test "statuses: create + get + home timeline" {
