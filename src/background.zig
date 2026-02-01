@@ -4,6 +4,7 @@ const app = @import("app.zig");
 const config = @import("config.zig");
 const db = @import("db.zig");
 const federation = @import("federation.zig");
+const log = @import("log.zig");
 const statuses = @import("statuses.zig");
 const users = @import("users.zig");
 
@@ -34,6 +35,7 @@ pub fn sendFollow(
 
     job.* = .{
         .cfg = app_state.cfg,
+        .logger = app_state.logger,
         .user_id = user_id,
         .remote_actor_id = remote_actor_id_copy,
         .follow_activity_id = follow_activity_id_copy,
@@ -70,6 +72,7 @@ pub fn acceptInboundFollow(
 
     job.* = .{
         .cfg = app_state.cfg,
+        .logger = app_state.logger,
         .user_id = user_id,
         .username = username_copy,
         .remote_actor_id = remote_actor_id_copy,
@@ -100,6 +103,7 @@ pub fn deliverStatusToFollowers(
 
     job.* = .{
         .cfg = app_state.cfg,
+        .logger = app_state.logger,
         .user_id = user_id,
         .status_id = status_id,
     };
@@ -110,6 +114,7 @@ pub fn deliverStatusToFollowers(
 
 const SendFollowJob = struct {
     cfg: config.Config,
+    logger: *log.Logger,
     user_id: i64,
     remote_actor_id: []u8,
     follow_activity_id: []u8,
@@ -132,6 +137,7 @@ const SendFollowJob = struct {
             .allocator = a,
             .cfg = job.cfg,
             .conn = conn,
+            .logger = job.logger,
         };
 
         federation.sendFollowActivity(&thread_app, a, job.user_id, job.remote_actor_id, job.follow_activity_id) catch {};
@@ -140,6 +146,7 @@ const SendFollowJob = struct {
 
 const AcceptInboundFollowJob = struct {
     cfg: config.Config,
+    logger: *log.Logger,
     user_id: i64,
     username: []u8,
     remote_actor_id: []u8,
@@ -164,6 +171,7 @@ const AcceptInboundFollowJob = struct {
             .allocator = a,
             .cfg = job.cfg,
             .conn = conn,
+            .logger = job.logger,
         };
 
         federation.acceptInboundFollow(
@@ -179,6 +187,7 @@ const AcceptInboundFollowJob = struct {
 
 const DeliverStatusJob = struct {
     cfg: config.Config,
+    logger: *log.Logger,
     user_id: i64,
     status_id: i64,
 
@@ -196,6 +205,7 @@ const DeliverStatusJob = struct {
             .allocator = a,
             .cfg = job.cfg,
             .conn = conn,
+            .logger = job.logger,
         };
 
         const user = users.lookupUserById(&thread_app.conn, a, job.user_id) catch null;

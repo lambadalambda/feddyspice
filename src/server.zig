@@ -23,6 +23,8 @@ pub fn serveOnce(app_state: *app.App, listener: *net.Server) !void {
     var write_buffer: [16 * 1024]u8 = undefined;
     var body_read_buffer: [16 * 1024]u8 = undefined;
 
+    const start_ms: i64 = std.time.milliTimestamp();
+
     var reader = net.Stream.Reader.init(conn.stream, &read_buffer);
     var writer = net.Stream.Writer.init(conn.stream, &write_buffer);
 
@@ -56,6 +58,7 @@ pub fn serveOnce(app_state: *app.App, listener: *net.Server) !void {
                 .body = "payload too large\n",
             };
             try writeResponse(&request, resp);
+            logAccess(app_state, conn.address, method, target, resp.status, start_ms);
             return;
         }
 
@@ -74,6 +77,7 @@ pub fn serveOnce(app_state: *app.App, listener: *net.Server) !void {
     });
 
     try writeResponse(&request, resp);
+    logAccess(app_state, conn.address, method, target, resp.status, start_ms);
 }
 
 fn writeResponse(request: *http.Server.Request, resp: routes.Response) !void {
@@ -98,6 +102,23 @@ fn writeResponse(request: *http.Server.Request, resp: routes.Response) !void {
         .keep_alive = false,
         .extra_headers = headers,
     });
+}
+
+fn logAccess(
+    app_state: *app.App,
+    remote_addr: net.Address,
+    method: http.Method,
+    target: []const u8,
+    status: http.Status,
+    start_ms: i64,
+) void {
+    const elapsed_ms: i64 = std.time.milliTimestamp() - start_ms;
+    var addr_buf: [128]u8 = undefined;
+    const addr_str = std.fmt.bufPrint(&addr_buf, "{any}", .{remote_addr}) catch "unknown";
+    app_state.logger.info(
+        "access remote={s} method={s} target={s} status={d} dur_ms={d}",
+        .{ addr_str, @tagName(method), target, @intFromEnum(status), elapsed_ms },
+    );
 }
 
 test "serveOnce: GET /healthz -> 200" {

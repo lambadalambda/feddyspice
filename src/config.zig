@@ -1,5 +1,6 @@
 const std = @import("std");
 
+const log = @import("log.zig");
 const password = @import("password.zig");
 
 pub const Scheme = enum { http, https };
@@ -10,6 +11,8 @@ pub const Config = struct {
     listen_address: std.net.Address,
     db_path: []const u8,
     ca_cert_file: ?[]const u8,
+    log_file: ?[]const u8,
+    log_level: log.Level,
     password_params: password.Params,
 
     pub fn load(allocator: std.mem.Allocator) !Config {
@@ -18,6 +21,8 @@ pub const Config = struct {
         const listen_env = std.posix.getenv("FEDDYSPICE_LISTEN") orelse "0.0.0.0:8080";
         const db_path_env = std.posix.getenv("FEDDYSPICE_DB_PATH") orelse "feddyspice.sqlite3";
         const ca_cert_env = std.posix.getenv("FEDDYSPICE_CACERTFILE");
+        const log_file_env = std.posix.getenv("FEDDYSPICE_LOG_FILE");
+        const log_level_env = std.posix.getenv("FEDDYSPICE_LOG_LEVEL") orelse "info";
 
         const domain = try allocator.dupe(u8, domain_env);
         errdefer allocator.free(domain);
@@ -33,6 +38,16 @@ pub const Config = struct {
             }
         }
 
+        var log_file: ?[]const u8 = null;
+        if (log_file_env) |p| {
+            if (p.len > 0) {
+                log_file = try allocator.dupe(u8, p);
+                errdefer allocator.free(log_file.?);
+            }
+        }
+
+        const log_level = log.levelFromString(log_level_env);
+
         const scheme: Scheme = if (std.mem.eql(u8, scheme_env, "https")) .https else .http;
         const listen_address = try std.net.Address.parseIpAndPort(listen_env);
 
@@ -42,6 +57,8 @@ pub const Config = struct {
             .listen_address = listen_address,
             .db_path = db_path,
             .ca_cert_file = ca_cert_file,
+            .log_file = log_file,
+            .log_level = log_level,
             .password_params = password.Params.owasp_2id,
         };
     }
@@ -50,6 +67,7 @@ pub const Config = struct {
         allocator.free(cfg.domain);
         allocator.free(cfg.db_path);
         if (cfg.ca_cert_file) |p| allocator.free(p);
+        if (cfg.log_file) |p| allocator.free(p);
         cfg.* = undefined;
     }
 };

@@ -10,6 +10,7 @@ pub const follows = @import("follows.zig");
 pub const followers = @import("followers.zig");
 pub const http = @import("http.zig");
 pub const http_signatures = @import("http_signatures.zig");
+pub const log = @import("log.zig");
 pub const migrations = @import("migrations.zig");
 pub const password = @import("password.zig");
 pub const oauth = @import("oauth.zig");

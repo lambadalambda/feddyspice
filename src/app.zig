@@ -2,6 +2,7 @@ const std = @import("std");
 
 const config = @import("config.zig");
 const db = @import("db.zig");
+const log = @import("log.zig");
 const migrations = @import("migrations.zig");
 const password = @import("password.zig");
 
@@ -9,8 +10,17 @@ pub const App = struct {
     allocator: std.mem.Allocator,
     cfg: config.Config,
     conn: db.Db,
+    logger: *log.Logger,
 
     pub fn initFromConfig(allocator: std.mem.Allocator, cfg: config.Config) !App {
+        const logger = try allocator.create(log.Logger);
+        errdefer allocator.destroy(logger);
+        logger.* = if (cfg.log_file) |p|
+            try log.Logger.initFile(p, .{ .to_stderr = true, .min_level = cfg.log_level })
+        else
+            .{ .opts = .{ .to_stderr = true, .min_level = cfg.log_level } };
+        errdefer logger.deinit();
+
         var conn = try db.Db.open(allocator, cfg.db_path);
         errdefer conn.close();
 
@@ -20,6 +30,7 @@ pub const App = struct {
             .allocator = allocator,
             .cfg = cfg,
             .conn = conn,
+            .logger = logger,
         };
     }
 
@@ -30,6 +41,8 @@ pub const App = struct {
             .listen_address = try std.net.Address.parseIp("127.0.0.1", 0),
             .db_path = try allocator.dupe(u8, ":memory:"),
             .ca_cert_file = null,
+            .log_file = null,
+            .log_level = .err,
             .password_params = password.Params{ .t = 1, .m = 8, .p = 1 },
         };
 
@@ -37,16 +50,23 @@ pub const App = struct {
         errdefer conn.close();
         try migrations.migrate(&conn);
 
+        const logger = try allocator.create(log.Logger);
+        errdefer allocator.destroy(logger);
+        logger.* = log.Logger.initNull();
+
         return .{
             .allocator = allocator,
             .cfg = cfg,
             .conn = conn,
+            .logger = logger,
         };
     }
 
     pub fn deinit(app: *App) void {
         app.conn.close();
         app.cfg.deinit(app.allocator);
+        app.logger.deinit();
+        app.allocator.destroy(app.logger);
         app.* = undefined;
     }
 };

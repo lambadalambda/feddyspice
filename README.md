@@ -38,6 +38,15 @@ FEDDYSPICE_DB_PATH=./feddyspice.sqlite3 \
 zig build run
 ```
 
+## Logging
+
+By default, logs go to stderr. To also write logs to a file:
+
+```bash
+export FEDDYSPICE_LOG_FILE=./feddyspice.log
+export FEDDYSPICE_LOG_LEVEL=info # debug|info|warn|error
+```
+
 ## Running behind ngrok (practical)
 
 If you're exposing a local instance to the internet via ngrok, make sure the **external** domain is what feddyspice uses when generating ActivityPub URLs.

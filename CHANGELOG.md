@@ -33,6 +33,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Outbound federation work is offloaded to background jobs to avoid blocking request handling.
 - Docker image for feddyspice + fedbox compose integration (`docker/federation/compose.yml`).
 - Fedbox E2E tests cover feddyspice federation (follow + post delivery).
+- Basic access logging plus optional file logs (`FEDDYSPICE_LOG_FILE`, `FEDDYSPICE_LOG_LEVEL`).
 
 ### Fixed
 
