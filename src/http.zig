@@ -3476,10 +3476,6 @@ test "GET /api/v1/accounts/verify_credentials works with bearer token" {
 test "accounts: lookup + get account" {
     var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
     defer app_state.deinit();
-    app_state.logger.opts.to_stderr = true;
-    app_state.logger.opts.min_level = .debug;
-    app_state.logger.debug("test logger debug output", .{});
-    try std.testing.expect(std.mem.eql(u8, app_state.cfg.db_path, ":memory:"));
 
     const params = app_state.cfg.password_params;
     const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
@@ -5029,8 +5025,7 @@ test "DELETE /api/v1/statuses delivers Delete to followers" {
 
     const follow_id = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}/follows/1", .{port});
     try followers.upsertPending(&app_state.conn, user_id, remote_actor_id, follow_id);
-    try std.testing.expect(try followers.markAcceptedByRemoteActorId(&app_state.conn, user_id, remote_actor_id));
-    try std.testing.expectEqual(@as(usize, 1), (try followers.listAcceptedRemoteActorIds(&app_state.conn, a, user_id, 10)).len);
+    try std.testing.expectEqual(@as(usize, 0), (try followers.listAcceptedRemoteActorIds(&app_state.conn, a, user_id, 10)).len);
 
     const app_creds = try oauth.createApp(
         &app_state.conn,
@@ -5058,6 +5053,7 @@ test "DELETE /api/v1/statuses delivers Delete to followers" {
     const id_str = create_json.value.object.get("id").?.string;
 
     try std.testing.expect(try followers.markAcceptedByRemoteActorId(&app_state.conn, user_id, remote_actor_id));
+    try std.testing.expectEqual(@as(usize, 1), (try followers.listAcceptedRemoteActorIds(&app_state.conn, a, user_id, 10)).len);
 
     const ServerCtx = struct {
         listener: *net.Server,
