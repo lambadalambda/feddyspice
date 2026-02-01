@@ -145,6 +145,17 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
             .thumbnail = .{ .url = "" },
             .languages = [_][]const u8{"en"},
             .configuration = .{
+                .urls = .{},
+                .polls = .{
+                    .max_characters_per_option = 25,
+                    .max_expiration = 2629746,
+                    .max_options = 4,
+                    .min_expiration = 300,
+                },
+                .statuses = .{
+                    .max_characters = 500,
+                    .max_media_attachments = 4,
+                },
                 .vapid = .{ .public_key = "" },
             },
             .usage = .{ .users = .{ .active_month = 1 } },
@@ -1835,6 +1846,18 @@ test "GET /api/v2/instance -> 200 with domain" {
     defer parsed.deinit();
 
     try std.testing.expectEqualStrings("example.test", parsed.value.object.get("domain").?.string);
+
+    const cfg = parsed.value.object.get("configuration").?.object;
+    try std.testing.expect(cfg.get("urls") != null);
+    try std.testing.expect(cfg.get("polls") != null);
+    try std.testing.expect(cfg.get("statuses") != null);
+
+    const polls = cfg.get("polls").?.object;
+    switch (polls.get("max_options").?) {
+        .integer => |i| try std.testing.expectEqual(@as(i64, 4), i),
+        .float => |f| try std.testing.expectEqual(@as(f64, 4), f),
+        else => return error.TestUnexpectedResult,
+    }
 }
 
 test "POST /signup creates user and session cookie" {
