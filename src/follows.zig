@@ -30,6 +30,49 @@ pub const Follow = struct {
     state: FollowState,
 };
 
+pub fn lookupByUserAndRemoteActorId(
+    conn: *db.Db,
+    allocator: std.mem.Allocator,
+    user_id: i64,
+    remote_actor_id: []const u8,
+) Error!?Follow {
+    var stmt = try conn.prepareZ(
+        "SELECT id, user_id, remote_actor_id, follow_activity_id, state FROM follows WHERE user_id = ?1 AND remote_actor_id = ?2 LIMIT 1;\x00",
+    );
+    defer stmt.finalize();
+    try stmt.bindInt64(1, user_id);
+    try stmt.bindText(2, remote_actor_id);
+
+    switch (try stmt.step()) {
+        .done => return null,
+        .row => {},
+    }
+
+    const state = FollowState.parse(stmt.columnText(4)) orelse .pending;
+
+    return .{
+        .id = stmt.columnInt64(0),
+        .user_id = stmt.columnInt64(1),
+        .remote_actor_id = try allocator.dupe(u8, stmt.columnText(2)),
+        .follow_activity_id = try allocator.dupe(u8, stmt.columnText(3)),
+        .state = state,
+    };
+}
+
+pub fn deleteByUserAndRemoteActorId(conn: *db.Db, user_id: i64, remote_actor_id: []const u8) db.Error!bool {
+    var stmt = try conn.prepareZ("DELETE FROM follows WHERE user_id = ?1 AND remote_actor_id = ?2;\x00");
+    defer stmt.finalize();
+    try stmt.bindInt64(1, user_id);
+    try stmt.bindText(2, remote_actor_id);
+
+    switch (try stmt.step()) {
+        .done => {},
+        .row => return error.Sqlite,
+    }
+
+    return conn.changes() > 0;
+}
+
 pub fn createPending(
     conn: *db.Db,
     user_id: i64,
@@ -171,4 +214,34 @@ test "createPending + markAcceptedByActivityId" {
     const ids = try listAcceptedRemoteActorIds(&conn, arena.allocator(), user_id, 10);
     try std.testing.expectEqual(@as(usize, 1), ids.len);
     try std.testing.expectEqualStrings("https://remote.test/users/bob", ids[0]);
+}
+
+test "lookupByUserAndRemoteActorId + deleteByUserAndRemoteActorId" {
+    var conn = try db.Db.openZ(":memory:");
+    defer conn.close();
+
+    try @import("migrations.zig").migrate(&conn);
+
+    const params: @import("password.zig").Params = .{ .t = 1, .m = 8, .p = 1 };
+    const user_id = try @import("users.zig").create(&conn, std.testing.allocator, "alice", "password", params);
+
+    try @import("remote_actors.zig").upsert(&conn, .{
+        .id = "https://remote.test/users/bob",
+        .inbox = "https://remote.test/users/bob/inbox",
+        .shared_inbox = null,
+        .preferred_username = "bob",
+        .domain = "remote.test",
+        .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
+    });
+
+    _ = try createPending(&conn, user_id, "https://remote.test/users/bob", "http://example.test/follows/1");
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const got = (try lookupByUserAndRemoteActorId(&conn, arena.allocator(), user_id, "https://remote.test/users/bob")).?;
+    try std.testing.expectEqualStrings("http://example.test/follows/1", got.follow_activity_id);
+
+    try std.testing.expect(try deleteByUserAndRemoteActorId(&conn, user_id, "https://remote.test/users/bob"));
+    try std.testing.expect((try lookupByUserAndRemoteActorId(&conn, arena.allocator(), user_id, "https://remote.test/users/bob")) == null);
 }
