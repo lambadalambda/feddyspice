@@ -127,6 +127,76 @@ pub fn listByUser(
     return out.toOwnedSlice(allocator);
 }
 
+pub fn listByUserBeforeCreatedAt(
+    conn: *db.Db,
+    allocator: std.mem.Allocator,
+    user_id: i64,
+    limit: usize,
+    before_created_at: ?[]const u8,
+    before_id: ?i64,
+) Error![]Status {
+    const lim: i64 = @intCast(@min(limit, 200));
+
+    var out: std.ArrayListUnmanaged(Status) = .empty;
+    errdefer out.deinit(allocator);
+
+    if (before_created_at == null) {
+        var stmt = try conn.prepareZ(
+            "SELECT id, user_id, text, visibility, created_at, deleted_at FROM statuses WHERE user_id = ?1 AND deleted_at IS NULL ORDER BY created_at DESC, id DESC LIMIT ?2;\x00",
+        );
+        defer stmt.finalize();
+        try stmt.bindInt64(1, user_id);
+        try stmt.bindInt64(2, lim);
+
+        while (true) {
+            switch (try stmt.step()) {
+                .done => break,
+                .row => {
+                    try out.append(allocator, .{
+                        .id = stmt.columnInt64(0),
+                        .user_id = stmt.columnInt64(1),
+                        .text = try allocator.dupe(u8, stmt.columnText(2)),
+                        .visibility = try allocator.dupe(u8, stmt.columnText(3)),
+                        .created_at = try allocator.dupe(u8, stmt.columnText(4)),
+                        .deleted_at = if (stmt.columnType(5) == .null) null else try allocator.dupe(u8, stmt.columnText(5)),
+                    });
+                },
+            }
+        }
+
+        return out.toOwnedSlice(allocator);
+    }
+
+    const anchor_id = before_id orelse std.math.maxInt(i64);
+
+    var stmt = try conn.prepareZ(
+        "SELECT id, user_id, text, visibility, created_at, deleted_at FROM statuses WHERE user_id = ?1 AND deleted_at IS NULL AND (created_at < ?2 OR (created_at = ?2 AND id < ?3)) ORDER BY created_at DESC, id DESC LIMIT ?4;\x00",
+    );
+    defer stmt.finalize();
+    try stmt.bindInt64(1, user_id);
+    try stmt.bindText(2, before_created_at.?);
+    try stmt.bindInt64(3, anchor_id);
+    try stmt.bindInt64(4, lim);
+
+    while (true) {
+        switch (try stmt.step()) {
+            .done => break,
+            .row => {
+                try out.append(allocator, .{
+                    .id = stmt.columnInt64(0),
+                    .user_id = stmt.columnInt64(1),
+                    .text = try allocator.dupe(u8, stmt.columnText(2)),
+                    .visibility = try allocator.dupe(u8, stmt.columnText(3)),
+                    .created_at = try allocator.dupe(u8, stmt.columnText(4)),
+                    .deleted_at = if (stmt.columnType(5) == .null) null else try allocator.dupe(u8, stmt.columnText(5)),
+                });
+            },
+        }
+    }
+
+    return out.toOwnedSlice(allocator);
+}
+
 pub fn markDeleted(conn: *db.Db, id: i64, user_id: i64) db.Error!bool {
     var stmt = try conn.prepareZ(
         "UPDATE statuses SET deleted_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?1 AND user_id = ?2 AND deleted_at IS NULL;\x00",

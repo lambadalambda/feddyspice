@@ -29,7 +29,7 @@ Target: pl-fe can log in and post/read.
 - [x] Posting: delete status
 - [x] Timelines: home (minimal)
 - [x] Timelines: public (basic)
-- [ ] Timelines: pagination (Link headers; `since_id`/`min_id`/`max_id`)
+- [x] Timelines: pagination (Link headers; `since_id`/`min_id`/`max_id`)
 - [ ] Attachments (optional early): upload + include in status
 - [x] Markers: basic support (`GET/POST /api/v1/markers`)
 

@@ -216,6 +216,75 @@ pub fn listLatest(conn: *db.Db, allocator: std.mem.Allocator, limit: usize) Erro
     return out.toOwnedSlice(allocator);
 }
 
+pub fn listLatestBeforeCreatedAt(
+    conn: *db.Db,
+    allocator: std.mem.Allocator,
+    limit: usize,
+    before_created_at: ?[]const u8,
+    before_id: ?i64,
+) Error![]RemoteStatus {
+    const lim: i64 = @intCast(@min(limit, 200));
+
+    var out: std.ArrayListUnmanaged(RemoteStatus) = .empty;
+    errdefer out.deinit(allocator);
+
+    if (before_created_at == null) {
+        var stmt = try conn.prepareZ(
+            "SELECT id, remote_uri, remote_actor_id, content_html, visibility, created_at, deleted_at FROM remote_statuses WHERE deleted_at IS NULL ORDER BY created_at DESC, id DESC LIMIT ?1;\x00",
+        );
+        defer stmt.finalize();
+        try stmt.bindInt64(1, lim);
+
+        while (true) {
+            switch (try stmt.step()) {
+                .done => break,
+                .row => {
+                    try out.append(allocator, .{
+                        .id = stmt.columnInt64(0),
+                        .remote_uri = try allocator.dupe(u8, stmt.columnText(1)),
+                        .remote_actor_id = try allocator.dupe(u8, stmt.columnText(2)),
+                        .content_html = try allocator.dupe(u8, stmt.columnText(3)),
+                        .visibility = try allocator.dupe(u8, stmt.columnText(4)),
+                        .created_at = try allocator.dupe(u8, stmt.columnText(5)),
+                        .deleted_at = if (stmt.columnType(6) == .null) null else try allocator.dupe(u8, stmt.columnText(6)),
+                    });
+                },
+            }
+        }
+
+        return out.toOwnedSlice(allocator);
+    }
+
+    const anchor_id = before_id orelse std.math.maxInt(i64);
+
+    var stmt = try conn.prepareZ(
+        "SELECT id, remote_uri, remote_actor_id, content_html, visibility, created_at, deleted_at FROM remote_statuses WHERE deleted_at IS NULL AND (created_at < ?1 OR (created_at = ?1 AND id < ?2)) ORDER BY created_at DESC, id DESC LIMIT ?3;\x00",
+    );
+    defer stmt.finalize();
+    try stmt.bindText(1, before_created_at.?);
+    try stmt.bindInt64(2, anchor_id);
+    try stmt.bindInt64(3, lim);
+
+    while (true) {
+        switch (try stmt.step()) {
+            .done => break,
+            .row => {
+                try out.append(allocator, .{
+                    .id = stmt.columnInt64(0),
+                    .remote_uri = try allocator.dupe(u8, stmt.columnText(1)),
+                    .remote_actor_id = try allocator.dupe(u8, stmt.columnText(2)),
+                    .content_html = try allocator.dupe(u8, stmt.columnText(3)),
+                    .visibility = try allocator.dupe(u8, stmt.columnText(4)),
+                    .created_at = try allocator.dupe(u8, stmt.columnText(5)),
+                    .deleted_at = if (stmt.columnType(6) == .null) null else try allocator.dupe(u8, stmt.columnText(6)),
+                });
+            },
+        }
+    }
+
+    return out.toOwnedSlice(allocator);
+}
+
 test "createIfNotExists assigns negative ids" {
     var conn = try db.Db.openZ(":memory:");
     defer conn.close();

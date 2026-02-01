@@ -45,6 +45,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Deleted local ActivityPub objects return Tombstones (`GET /users/:name/statuses/:id`).
 - ActivityPub `Delete` deliveries to followers when local statuses are deleted.
 - ActivityPub inbox handling for `Delete` to mark remote statuses deleted.
+- Timeline pagination (`max_id`, `since_id`, `min_id`) with `Link` headers on home/public timelines.
 
 ### Fixed
 

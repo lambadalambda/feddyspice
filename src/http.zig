@@ -1222,17 +1222,62 @@ fn isPublicVisibility(visibility: []const u8) bool {
     return std.mem.eql(u8, visibility, "public") or std.mem.eql(u8, visibility, "unlisted");
 }
 
+const TimelineCursor = struct {
+    created_at: []const u8,
+    id: i64,
+};
+
+fn lookupTimelineCursor(app_state: *app.App, allocator: std.mem.Allocator, id: i64) ?TimelineCursor {
+    if (id < 0) {
+        const st = remote_statuses.lookupIncludingDeleted(&app_state.conn, allocator, id) catch return null;
+        if (st == null) return null;
+        return .{ .created_at = st.?.created_at, .id = id };
+    }
+
+    const st = statuses.lookupIncludingDeleted(&app_state.conn, allocator, id) catch return null;
+    if (st == null) return null;
+    return .{ .created_at = st.?.created_at, .id = id };
+}
+
+fn retainStatusesNewerThan(payloads: *std.ArrayListUnmanaged(StatusPayload), cursor: TimelineCursor) void {
+    var out_len: usize = 0;
+    for (payloads.items) |p| {
+        const keep = switch (std.mem.order(u8, p.created_at, cursor.created_at)) {
+            .gt => true,
+            .lt => false,
+            .eq => statusPayloadIdInt(p) > cursor.id,
+        };
+
+        if (keep) {
+            payloads.items[out_len] = p;
+            out_len += 1;
+        }
+    }
+    payloads.items = payloads.items[0..out_len];
+}
+
 fn publicTimeline(app_state: *app.App, allocator: std.mem.Allocator, req: Request) Response {
     const q = queryString(req.target);
     var params = form.parse(allocator, q) catch form.Form{ .map = .empty };
 
     const limit: usize = blk: {
         const lim_str = params.get("limit") orelse break :blk 20;
-        break :blk std.fmt.parseInt(usize, lim_str, 10) catch 20;
+        const parsed = std.fmt.parseInt(usize, lim_str, 10) catch 20;
+        break :blk @min(parsed, 200);
     };
 
     const max_id: ?i64 = blk: {
         const s = params.get("max_id") orelse break :blk null;
+        break :blk std.fmt.parseInt(i64, s, 10) catch null;
+    };
+
+    const since_id: ?i64 = blk: {
+        const s = params.get("since_id") orelse break :blk null;
+        break :blk std.fmt.parseInt(i64, s, 10) catch null;
+    };
+
+    const min_id: ?i64 = blk: {
+        const s = params.get("min_id") orelse break :blk null;
         break :blk std.fmt.parseInt(i64, s, 10) catch null;
     };
 
@@ -1243,6 +1288,10 @@ fn publicTimeline(app_state: *app.App, allocator: std.mem.Allocator, req: Reques
         break :blk false;
     };
 
+    const cursor = if (max_id) |id| lookupTimelineCursor(app_state, allocator, id) else null;
+    const before_created_at = if (cursor) |c| c.created_at else null;
+    const before_id = if (cursor) |c| c.id else null;
+
     const user = users.lookupFirstUser(&app_state.conn, allocator) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
 
@@ -1250,7 +1299,7 @@ fn publicTimeline(app_state: *app.App, allocator: std.mem.Allocator, req: Reques
     defer payloads.deinit(allocator);
 
     if (user) |u| {
-        const local_list = statuses.listByUser(&app_state.conn, allocator, u.id, limit, max_id) catch
+        const local_list = statuses.listByUserBeforeCreatedAt(&app_state.conn, allocator, u.id, limit, before_created_at, before_id) catch
             return .{ .status = .internal_server_error, .body = "internal server error\n" };
 
         for (local_list) |st| {
@@ -1263,7 +1312,7 @@ fn publicTimeline(app_state: *app.App, allocator: std.mem.Allocator, req: Reques
     }
 
     if (!local_only) {
-        const remote_list = remote_statuses.listLatest(&app_state.conn, allocator, limit) catch
+        const remote_list = remote_statuses.listLatestBeforeCreatedAt(&app_state.conn, allocator, limit, before_created_at, before_id) catch
             return .{ .status = .internal_server_error, .body = "internal server error\n" };
 
         for (remote_list) |st| {
@@ -1281,13 +1330,55 @@ fn publicTimeline(app_state: *app.App, allocator: std.mem.Allocator, req: Reques
 
     std.sort.block(StatusPayload, payloads.items, {}, statusPayloadNewerFirst);
 
+    if (since_id) |id| {
+        if (lookupTimelineCursor(app_state, allocator, id)) |c| {
+            retainStatusesNewerThan(&payloads, c);
+        }
+    }
+    if (min_id) |id| {
+        if (lookupTimelineCursor(app_state, allocator, id)) |c| {
+            retainStatusesNewerThan(&payloads, c);
+        }
+    }
+
     const slice = payloads.items[0..@min(limit, payloads.items.len)];
     const body = std.json.Stringify.valueAlloc(allocator, slice, .{}) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
 
+    var headers: []const std.http.Header = &.{};
+    if (slice.len > 0) {
+        const base = baseUrlAlloc(app_state, allocator) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        const newest_id = statusPayloadIdInt(slice[0]);
+        const oldest_id = statusPayloadIdInt(slice[slice.len - 1]);
+
+        const local_param: []const u8 = if (local_only) "&local=true" else "";
+        const next_url = std.fmt.allocPrint(
+            allocator,
+            "{s}/api/v1/timelines/public?limit={d}{s}&max_id={d}",
+            .{ base, limit, local_param, oldest_id },
+        ) catch "";
+        const prev_url = std.fmt.allocPrint(
+            allocator,
+            "{s}/api/v1/timelines/public?limit={d}{s}&since_id={d}",
+            .{ base, limit, local_param, newest_id },
+        ) catch "";
+        const link = std.fmt.allocPrint(
+            allocator,
+            "<{s}>; rel=\"next\", <{s}>; rel=\"prev\"",
+            .{ next_url, prev_url },
+        ) catch "";
+
+        var header_slice = allocator.alloc(std.http.Header, 1) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        header_slice[0] = .{ .name = "link", .value = link };
+        headers = header_slice;
+    }
+
     return .{
         .content_type = "application/json; charset=utf-8",
         .body = body,
+        .headers = headers,
     };
 }
 
@@ -1302,7 +1393,8 @@ fn homeTimeline(app_state: *app.App, allocator: std.mem.Allocator, req: Request)
 
     const limit: usize = blk: {
         const lim_str = params.get("limit") orelse break :blk 20;
-        break :blk std.fmt.parseInt(usize, lim_str, 10) catch 20;
+        const parsed = std.fmt.parseInt(usize, lim_str, 10) catch 20;
+        break :blk @min(parsed, 200);
     };
 
     const max_id: ?i64 = blk: {
@@ -1310,11 +1402,25 @@ fn homeTimeline(app_state: *app.App, allocator: std.mem.Allocator, req: Request)
         break :blk std.fmt.parseInt(i64, s, 10) catch null;
     };
 
+    const since_id: ?i64 = blk: {
+        const s = params.get("since_id") orelse break :blk null;
+        break :blk std.fmt.parseInt(i64, s, 10) catch null;
+    };
+
+    const min_id: ?i64 = blk: {
+        const s = params.get("min_id") orelse break :blk null;
+        break :blk std.fmt.parseInt(i64, s, 10) catch null;
+    };
+
+    const cursor = if (max_id) |id| lookupTimelineCursor(app_state, allocator, id) else null;
+    const before_created_at = if (cursor) |c| c.created_at else null;
+    const before_id = if (cursor) |c| c.id else null;
+
     const user = users.lookupUserById(&app_state.conn, allocator, info.?.user_id) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
     if (user == null) return unauthorized(allocator);
 
-    const local_list = statuses.listByUser(&app_state.conn, allocator, info.?.user_id, limit, max_id) catch
+    const local_list = statuses.listByUserBeforeCreatedAt(&app_state.conn, allocator, info.?.user_id, limit, before_created_at, before_id) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
 
     var payloads = std.ArrayListUnmanaged(StatusPayload).empty;
@@ -1327,7 +1433,7 @@ fn homeTimeline(app_state: *app.App, allocator: std.mem.Allocator, req: Request)
         };
     }
 
-    const remote_list = remote_statuses.listLatest(&app_state.conn, allocator, limit) catch
+    const remote_list = remote_statuses.listLatestBeforeCreatedAt(&app_state.conn, allocator, limit, before_created_at, before_id) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
 
     for (remote_list) |st| {
@@ -1343,13 +1449,54 @@ fn homeTimeline(app_state: *app.App, allocator: std.mem.Allocator, req: Request)
 
     std.sort.block(StatusPayload, payloads.items, {}, statusPayloadNewerFirst);
 
+    if (since_id) |id| {
+        if (lookupTimelineCursor(app_state, allocator, id)) |c| {
+            retainStatusesNewerThan(&payloads, c);
+        }
+    }
+    if (min_id) |id| {
+        if (lookupTimelineCursor(app_state, allocator, id)) |c| {
+            retainStatusesNewerThan(&payloads, c);
+        }
+    }
+
     const slice = payloads.items[0..@min(limit, payloads.items.len)];
     const body = std.json.Stringify.valueAlloc(allocator, slice, .{}) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
 
+    var headers: []const std.http.Header = &.{};
+    if (slice.len > 0) {
+        const base = baseUrlAlloc(app_state, allocator) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        const newest_id = statusPayloadIdInt(slice[0]);
+        const oldest_id = statusPayloadIdInt(slice[slice.len - 1]);
+
+        const next_url = std.fmt.allocPrint(
+            allocator,
+            "{s}/api/v1/timelines/home?limit={d}&max_id={d}",
+            .{ base, limit, oldest_id },
+        ) catch "";
+        const prev_url = std.fmt.allocPrint(
+            allocator,
+            "{s}/api/v1/timelines/home?limit={d}&since_id={d}",
+            .{ base, limit, newest_id },
+        ) catch "";
+        const link = std.fmt.allocPrint(
+            allocator,
+            "<{s}>; rel=\"next\", <{s}>; rel=\"prev\"",
+            .{ next_url, prev_url },
+        ) catch "";
+
+        var header_slice = allocator.alloc(std.http.Header, 1) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        header_slice[0] = .{ .name = "link", .value = link };
+        headers = header_slice;
+    }
+
     return .{
         .content_type = "application/json; charset=utf-8",
         .body = body,
+        .headers = headers,
     };
 }
 
@@ -1455,11 +1602,15 @@ const StatusPayload = struct {
     account: AccountPayload,
 };
 
+fn statusPayloadIdInt(p: StatusPayload) i64 {
+    return std.fmt.parseInt(i64, p.id, 10) catch 0;
+}
+
 fn statusPayloadNewerFirst(_: void, a: StatusPayload, b: StatusPayload) bool {
     return switch (std.mem.order(u8, a.created_at, b.created_at)) {
         .gt => true,
         .lt => false,
-        .eq => std.mem.order(u8, a.id, b.id) == .gt,
+        .eq => statusPayloadIdInt(a) > statusPayloadIdInt(b),
     };
 }
 
@@ -3308,6 +3459,106 @@ test "timelines: public timeline returns local statuses" {
     try std.testing.expect(tl_json.value == .array);
     try std.testing.expectEqual(@as(usize, 1), tl_json.value.array.items.len);
     try std.testing.expectEqualStrings(id, tl_json.value.array.items[0].object.get("id").?.string);
+}
+
+test "timelines: home timeline pagination (Link + max_id/since_id)" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const app_creds = try oauth.createApp(
+        &app_state.conn,
+        a,
+        "pl-fe",
+        "urn:ietf:wg:oauth:2.0:oob",
+        "read write",
+        "",
+    );
+    const token = try oauth.createAccessToken(&app_state.conn, a, app_creds.id, user_id, "read write");
+    const auth_header = try std.fmt.allocPrint(a, "Bearer {s}", .{token});
+
+    _ = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/api/v1/statuses",
+        .content_type = "application/x-www-form-urlencoded",
+        .body = "status=one&visibility=public",
+        .authorization = auth_header,
+    });
+    _ = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/api/v1/statuses",
+        .content_type = "application/x-www-form-urlencoded",
+        .body = "status=two&visibility=public",
+        .authorization = auth_header,
+    });
+    _ = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/api/v1/statuses",
+        .content_type = "application/x-www-form-urlencoded",
+        .body = "status=three&visibility=public",
+        .authorization = auth_header,
+    });
+
+    const page1 = handle(&app_state, a, .{
+        .method = .GET,
+        .target = "/api/v1/timelines/home?limit=2",
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, page1.status);
+
+    const link = blk: {
+        for (page1.headers) |h| {
+            if (std.ascii.eqlIgnoreCase(h.name, "link")) break :blk h.value;
+        }
+        break :blk null;
+    };
+    try std.testing.expect(link != null);
+
+    var page1_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, page1.body, .{});
+    defer page1_json.deinit();
+    try std.testing.expect(page1_json.value == .array);
+    try std.testing.expectEqual(@as(usize, 2), page1_json.value.array.items.len);
+
+    const newest_id = page1_json.value.array.items[0].object.get("id").?.string;
+    const oldest_id = page1_json.value.array.items[1].object.get("id").?.string;
+
+    const next_max_id = extractBetween(link.?, "max_id=", ">;") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(oldest_id, next_max_id);
+
+    const page2_target = try std.fmt.allocPrint(a, "/api/v1/timelines/home?limit=2&max_id={s}", .{next_max_id});
+    const page2 = handle(&app_state, a, .{
+        .method = .GET,
+        .target = page2_target,
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, page2.status);
+
+    var page2_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, page2.body, .{});
+    defer page2_json.deinit();
+    try std.testing.expect(page2_json.value == .array);
+    try std.testing.expectEqual(@as(usize, 1), page2_json.value.array.items.len);
+    const page2_id = page2_json.value.array.items[0].object.get("id").?.string;
+    try std.testing.expect(!std.mem.eql(u8, page2_id, newest_id));
+    try std.testing.expect(!std.mem.eql(u8, page2_id, oldest_id));
+
+    const since_target = try std.fmt.allocPrint(a, "/api/v1/timelines/home?since_id={s}", .{newest_id});
+    const since_resp = handle(&app_state, a, .{
+        .method = .GET,
+        .target = since_target,
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, since_resp.status);
+
+    var since_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, since_resp.body, .{});
+    defer since_json.deinit();
+    try std.testing.expect(since_json.value == .array);
+    try std.testing.expectEqual(@as(usize, 0), since_json.value.array.items.len);
 }
 
 test "statuses: delete" {
