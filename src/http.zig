@@ -415,6 +415,10 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
         return accountRelationships(app_state, allocator, req);
     }
 
+    if (req.method == .GET and std.mem.startsWith(u8, path, "/api/v1/accounts/") and std.mem.endsWith(u8, path, "/statuses")) {
+        return accountStatuses(app_state, allocator, req, path);
+    }
+
     if (req.method == .GET and std.mem.startsWith(u8, path, "/api/v1/accounts/")) {
         const rest = path["/api/v1/accounts/".len..];
         if (std.mem.indexOfScalar(u8, rest, '/') == null) {
@@ -1548,6 +1552,82 @@ fn accountRelationships(app_state: *app.App, allocator: std.mem.Allocator, req: 
     }
 
     const body = std.json.Stringify.valueAlloc(allocator, rels.items, .{}) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    return .{
+        .content_type = "application/json; charset=utf-8",
+        .body = body,
+    };
+}
+
+fn accountStatuses(app_state: *app.App, allocator: std.mem.Allocator, req: Request, path: []const u8) Response {
+    const prefix = "/api/v1/accounts/";
+    const suffix = "/statuses";
+    if (!std.mem.startsWith(u8, path, prefix)) return .{ .status = .not_found, .body = "not found\n" };
+    if (!std.mem.endsWith(u8, path, suffix)) return .{ .status = .not_found, .body = "not found\n" };
+
+    const id_part = path[prefix.len .. path.len - suffix.len];
+    if (id_part.len == 0) return .{ .status = .not_found, .body = "not found\n" };
+    if (std.mem.indexOfScalar(u8, id_part, '/') != null) return .{ .status = .not_found, .body = "not found\n" };
+
+    const account_id = std.fmt.parseInt(i64, id_part, 10) catch
+        return .{ .status = .not_found, .body = "not found\n" };
+
+    const user = users.lookupUserById(&app_state.conn, allocator, account_id) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (user == null) return .{ .status = .not_found, .body = "not found\n" };
+
+    const q = queryString(req.target);
+    var params = form.parse(allocator, q) catch form.Form{ .map = .empty };
+
+    const pinned: bool = blk: {
+        const s = params.get("pinned") orelse break :blk false;
+        if (std.ascii.eqlIgnoreCase(s, "true")) break :blk true;
+        if (std.mem.eql(u8, s, "1")) break :blk true;
+        break :blk false;
+    };
+
+    const only_media: bool = blk: {
+        const s = params.get("only_media") orelse break :blk false;
+        if (std.ascii.eqlIgnoreCase(s, "true")) break :blk true;
+        if (std.mem.eql(u8, s, "1")) break :blk true;
+        break :blk false;
+    };
+
+    if (pinned or only_media) {
+        return jsonOk(allocator, [_]i32{});
+    }
+
+    const limit: usize = blk: {
+        const lim_str = params.get("limit") orelse break :blk 20;
+        break :blk std.fmt.parseInt(usize, lim_str, 10) catch 20;
+    };
+
+    const max_id: ?i64 = blk: {
+        const s = params.get("max_id") orelse break :blk null;
+        break :blk std.fmt.parseInt(i64, s, 10) catch null;
+    };
+
+    const include_all: bool = blk: {
+        const token = bearerToken(req.authorization) orelse break :blk false;
+        const info = oauth.verifyAccessToken(&app_state.conn, allocator, token) catch break :blk false;
+        if (info == null) break :blk false;
+        break :blk info.?.user_id == user.?.id;
+    };
+
+    const list = statuses.listByUser(&app_state.conn, allocator, user.?.id, limit, max_id) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    var payloads: std.ArrayListUnmanaged(StatusPayload) = .empty;
+    defer payloads.deinit(allocator);
+
+    for (list) |st| {
+        if (!include_all and !isPublicVisibility(st.visibility)) continue;
+        payloads.append(allocator, makeStatusPayload(app_state, allocator, user.?, st)) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    }
+
+    const body = std.json.Stringify.valueAlloc(allocator, payloads.items, .{}) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
 
     return .{
@@ -2879,6 +2959,81 @@ test "accounts: relationships" {
     try std.testing.expectEqual(@as(usize, 2), parsed.value.array.items.len);
     try std.testing.expectEqualStrings(id_str, parsed.value.array.items[0].object.get("id").?.string);
     try std.testing.expectEqualStrings("999", parsed.value.array.items[1].object.get("id").?.string);
+}
+
+test "accounts: statuses list (public vs authed)" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const id_str = try std.fmt.allocPrint(a, "{d}", .{user_id});
+
+    const app_creds = try oauth.createApp(
+        &app_state.conn,
+        a,
+        "pl-fe",
+        "urn:ietf:wg:oauth:2.0:oob",
+        "read write",
+        "",
+    );
+    const token = try oauth.createAccessToken(&app_state.conn, a, app_creds.id, user_id, "read write");
+    const auth_header = try std.fmt.allocPrint(a, "Bearer {s}", .{token});
+
+    _ = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/api/v1/statuses",
+        .content_type = "application/x-www-form-urlencoded",
+        .body = "status=pub&visibility=public",
+        .authorization = auth_header,
+    });
+
+    _ = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/api/v1/statuses",
+        .content_type = "application/x-www-form-urlencoded",
+        .body = "status=secret&visibility=private",
+        .authorization = auth_header,
+    });
+
+    const statuses_target = try std.fmt.allocPrint(a, "/api/v1/accounts/{s}/statuses?exclude_replies=true", .{id_str});
+
+    const public_resp = handle(&app_state, a, .{ .method = .GET, .target = statuses_target });
+    try std.testing.expectEqual(std.http.Status.ok, public_resp.status);
+
+    var public_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, public_resp.body, .{});
+    defer public_json.deinit();
+
+    try std.testing.expect(public_json.value == .array);
+    try std.testing.expectEqual(@as(usize, 1), public_json.value.array.items.len);
+    try std.testing.expectEqualStrings("<p>pub</p>", public_json.value.array.items[0].object.get("content").?.string);
+
+    const authed_resp = handle(&app_state, a, .{
+        .method = .GET,
+        .target = statuses_target,
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, authed_resp.status);
+
+    var authed_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, authed_resp.body, .{});
+    defer authed_json.deinit();
+
+    try std.testing.expect(authed_json.value == .array);
+    try std.testing.expectEqual(@as(usize, 2), authed_json.value.array.items.len);
+
+    const pinned_target = try std.fmt.allocPrint(a, "/api/v1/accounts/{s}/statuses?pinned=true", .{id_str});
+    const pinned_resp = handle(&app_state, a, .{ .method = .GET, .target = pinned_target });
+    try std.testing.expectEqual(std.http.Status.ok, pinned_resp.status);
+
+    var pinned_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, pinned_resp.body, .{});
+    defer pinned_json.deinit();
+    try std.testing.expect(pinned_json.value == .array);
+    try std.testing.expectEqual(@as(usize, 0), pinned_json.value.array.items.len);
 }
 
 test "statuses: create + get + home timeline" {

@@ -39,6 +39,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Additional Mastodon API placeholder endpoints used by Elk/pl-fe (notifications, markers, preferences, search, etc.).
 - Account lookup + profile endpoint (`GET /api/v1/accounts/lookup`, `GET /api/v1/accounts/:id`).
 - Accounts relationships endpoint (`GET /api/v1/accounts/relationships`).
+- Account statuses endpoint (`GET /api/v1/accounts/:id/statuses`).
 
 ### Fixed
 
