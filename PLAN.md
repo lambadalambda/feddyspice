@@ -24,12 +24,14 @@ Target: pl-fe can log in and post/read.
 - [x] OAuth 2.0: app registration (`POST /api/v1/apps`)
 - [x] OAuth 2.0: authorization code flow (`/oauth/authorize`, `/oauth/token`)
 - [x] Accounts: verify credentials
-- [ ] Accounts: profile lookup
+- [x] Accounts: profile lookup (`GET /api/v1/accounts/lookup`, `GET /api/v1/accounts/:id`)
 - [x] Posting: create status
 - [ ] Posting: delete status
 - [x] Timelines: home (minimal)
-- [ ] Timelines: public, pagination
+- [x] Timelines: public (basic)
+- [ ] Timelines: pagination (Link headers; `since_id`/`min_id`/`max_id`)
 - [ ] Attachments (optional early): upload + include in status
+- [x] Markers: basic support (`GET/POST /api/v1/markers`)
 
 ## 3) Federation basics (ActivityPub)
 
@@ -63,3 +65,65 @@ Target: automated federation smoke tests against multiple real servers.
 - [ ] SSRF protections + allowlist for fedbox-only private networking
 - [ ] Media storage + cleanup
 - [ ] Minimal observability (structured logs, basic metrics)
+
+## 6) Client requests: eliminate 404s (from `feddyspice.log`)
+
+We keep this list in-sync with reality by periodically scanning `feddyspice.log` for `status=404` and adding tasks here.
+
+- [x] `GET /api/v1/announcements` (client compat placeholder)
+- [x] `GET /api/v1/accounts/lookup?acct=:acct` (seen as `acct=alice`)
+- [x] `GET /api/v1/custom_emojis` (client compat placeholder)
+- [x] `GET /api/v1/follow_requests` (client compat placeholder)
+- [x] `GET /api/v1/followed_tags` (client compat placeholder)
+- [x] `GET /api/v1/lists` (client compat placeholder)
+- [x] `GET/POST /api/v1/markers` (client compat placeholder; include `updated_at`)
+- [x] `GET /api/v1/notifications` (client compat placeholder)
+- [x] `GET /api/v1/preferences` (client compat placeholder)
+- [x] `GET /api/v1/push/subscription` (client compat placeholder)
+- [ ] `GET /api/v1/accounts/relationships?id[]=:id` (seen as `id[]=1`)
+- [ ] `GET /api/v1/accounts/:id/statuses` (seen with `pinned=true`, `only_media=true`, `exclude_replies=true`)
+- [x] `GET /api/v1/scheduled_statuses` (client compat placeholder)
+- [x] `GET /api/v1/timelines/public` (basic)
+- [x] `GET /api/v1/trends/tags` (client compat placeholder)
+- [x] `GET /api/v2/filters` (client compat placeholder)
+- [x] `GET /api/v2/search` (client compat placeholder)
+- [x] `GET /api/v2/suggestions` (client compat placeholder)
+
+## 7) Mastodon API parity (selected, from `../mastodon/config/routes/api.rb`)
+
+This is the “eventually” list. We should keep it scoped to what pl-fe needs, but `../mastodon/config/routes/api.rb` is the canonical reference for what clients might try.
+
+### Accounts
+
+- [ ] `GET /api/v1/accounts/:id` (profile view)
+- [ ] `GET /api/v1/accounts/:id/statuses` (profile timeline; filters + pagination)
+- [ ] `GET /api/v1/accounts/:id/followers`
+- [ ] `GET /api/v1/accounts/:id/following`
+- [ ] `POST /api/v1/accounts/:id/follow` + `POST /api/v1/accounts/:id/unfollow` (or document why we only support `POST /api/v1/follows`)
+- [ ] `GET /api/v1/accounts/relationships` (Relationship entity)
+
+### Statuses
+
+- [ ] `DELETE /api/v1/statuses/:id` (delete local status)
+- [ ] `GET /api/v1/statuses/:id/context`
+- [ ] `POST /api/v1/statuses/:id/favourite` + `POST /api/v1/statuses/:id/unfavourite`
+- [ ] `POST /api/v1/statuses/:id/reblog` + `POST /api/v1/statuses/:id/unreblog`
+- [ ] `POST /api/v1/statuses/:id/bookmark` + `POST /api/v1/statuses/:id/unbookmark`
+
+### Timelines
+
+- [ ] `GET /api/v1/timelines/tag/:tag`
+- [ ] `GET /api/v1/timelines/list/:id`
+- [ ] `GET /api/v1/timelines/link?url=...`
+
+### Media
+
+- [ ] `POST /api/v1/media` (upload)
+- [ ] `PUT /api/v1/media/:id` (update metadata)
+- [ ] Attachments in `POST /api/v1/statuses` (IDs from media upload)
+
+### Notifications / streaming
+
+- [ ] `GET /api/v1/notifications` (real notifications)
+- [ ] `POST /api/v1/notifications/clear` + `POST /api/v1/notifications/:id/dismiss`
+- [ ] Streaming endpoint strategy (implement `/api/v1/streaming` or ensure clients don’t rely on it)
