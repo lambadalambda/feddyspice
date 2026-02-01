@@ -22,6 +22,8 @@ Tooling is managed via `mise`:
 mise install
 ```
 
+Copy `.env.example` to `.env` (gitignored) and adjust as needed.
+
 Common workflows:
 
 - `zig build test`
