@@ -21,6 +21,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Public timeline endpoint (`GET /api/v1/timelines/public`).
 - Mastodon v2 instance endpoint (`GET /api/v2/instance`) for client compatibility.
 - Initial ActivityPub discovery endpoints: WebFinger, NodeInfo, and actor document (`/.well-known/webfinger`, `/.well-known/nodeinfo`, `/nodeinfo/2.0`, `/users/:name`).
+- Host-meta discovery endpoint (`/.well-known/host-meta`) advertising WebFinger LRDD template.
 - Per-actor RSA keypairs (stored in SQLite) and `publicKeyPem` in the ActivityPub actor document.
 - HTTP Signatures helper for signing outbound ActivityPub requests (`Digest`, `Date`, `Signature`).
 - Remote actor discovery storage + follow tracking tables, plus inbox handling for `Accept` to mark follows as accepted.
@@ -34,6 +35,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Outbound federation work is offloaded to background jobs to avoid blocking request handling.
 - Docker image for feddyspice + fedbox compose integration (`docker/federation/compose.yml`).
 - Fedbox E2E tests cover feddyspice federation (follow + post delivery).
+- Fedbox E2E test covers inbound `direct` messages and ensures they never leak into the public timeline.
 - Basic access logging plus optional file logs (`FEDDYSPICE_LOG_FILE`, `FEDDYSPICE_LOG_LEVEL`).
 - `mise` loads local env from `.env` (gitignored) and provides `.env.example`.
 - Additional Mastodon API placeholder endpoints used by Elk/pl-fe (notifications, markers, preferences, search, etc.).
@@ -65,3 +67,5 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - SQLite statements bind text/blob as `SQLITE_TRANSIENT` to avoid pointer lifetime issues.
 - Inbound ActivityPub `Create` no longer silently ignores unknown actors (fetches the actor doc on first contact).
 - Inbound ActivityPub `Create` infers `direct` vs `public` visibility based on recipients.
+- `POST /api/v1/follows` is idempotent when the follow already exists.
+- Actor key generation tolerates concurrent requests (avoids transient failures when multiple requests race to create keys).
