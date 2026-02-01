@@ -46,7 +46,12 @@ pub fn ensureForUser(conn: *db.Db, allocator: std.mem.Allocator, user_id: i64) E
     try stmt.bindText(2, kp.private_key_pem);
     try stmt.bindText(3, kp.public_key_pem);
 
-    switch (try stmt.step()) {
+    const step_result = stmt.step() catch |err| switch (err) {
+        // Handle a common race: another request inserted keys after our initial lookup.
+        error.Sqlite => return (try lookup(conn, allocator, user_id)) orelse error.Sqlite,
+    };
+
+    switch (step_result) {
         .done => {},
         .row => return error.Sqlite,
     }
