@@ -223,11 +223,7 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
     }
 
     if (req.method == .GET and std.mem.eql(u8, path, "/api/v2/search")) {
-        return jsonOk(allocator, .{
-            .accounts = [_]i32{},
-            .statuses = [_]i32{},
-            .hashtags = [_]i32{},
-        });
+        return apiV2Search(app_state, allocator, req);
     }
 
     if (std.mem.eql(u8, path, "/api/v1/markers")) {
@@ -417,6 +413,14 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
 
     if (req.method == .GET and std.mem.startsWith(u8, path, "/api/v1/accounts/") and std.mem.endsWith(u8, path, "/statuses")) {
         return accountStatuses(app_state, allocator, req, path);
+    }
+
+    if (req.method == .POST and std.mem.startsWith(u8, path, "/api/v1/accounts/") and std.mem.endsWith(u8, path, "/follow")) {
+        return accountFollow(app_state, allocator, req, path);
+    }
+
+    if (req.method == .POST and std.mem.startsWith(u8, path, "/api/v1/accounts/") and std.mem.endsWith(u8, path, "/unfollow")) {
+        return accountUnfollow(app_state, allocator, req, path);
     }
 
     if (req.method == .GET and std.mem.startsWith(u8, path, "/api/v1/accounts/")) {
@@ -1591,6 +1595,47 @@ const AccountPayload = struct {
     header_static: []const u8,
 };
 
+const remote_actor_id_base: i64 = 1_000_000_000;
+
+fn remoteAccountApiIdAlloc(app_state: *app.App, allocator: std.mem.Allocator, actor_id: []const u8) []const u8 {
+    const rowid = remote_actors.lookupRowIdById(&app_state.conn, actor_id) catch return actor_id;
+    if (rowid == null) return actor_id;
+    return std.fmt.allocPrint(allocator, "{d}", .{remote_actor_id_base + rowid.?}) catch actor_id;
+}
+
+fn makeRemoteAccountPayload(
+    app_state: *app.App,
+    allocator: std.mem.Allocator,
+    api_id: []const u8,
+    actor: remote_actors.RemoteActor,
+) AccountPayload {
+    const acct = std.fmt.allocPrint(allocator, "{s}@{s}", .{ actor.preferred_username, actor.domain }) catch
+        actor.preferred_username;
+    const avatar_url = defaultAvatarUrlAlloc(app_state, allocator) catch actor.id;
+    const header_url = defaultHeaderUrlAlloc(app_state, allocator) catch actor.id;
+
+    return .{
+        .id = api_id,
+        .username = actor.preferred_username,
+        .acct = acct,
+        .display_name = "",
+        .note = "",
+        .url = actor.id,
+        .locked = false,
+        .bot = false,
+        .group = false,
+        .discoverable = true,
+        .created_at = "1970-01-01T00:00:00.000Z",
+        .followers_count = 0,
+        .following_count = 0,
+        .statuses_count = 0,
+        .avatar = avatar_url,
+        .avatar_static = avatar_url,
+        .header = header_url,
+        .header_static = header_url,
+    };
+}
+
 const StatusPayload = struct {
     id: []const u8,
     created_at: []const u8,
@@ -1675,8 +1720,10 @@ fn makeRemoteStatusPayload(
     const avatar_url = defaultAvatarUrlAlloc(app_state, allocator) catch actor.id;
     const header_url = defaultHeaderUrlAlloc(app_state, allocator) catch actor.id;
 
+    const api_id = remoteAccountApiIdAlloc(app_state, allocator, actor.id);
+
     const acct: AccountPayload = .{
-        .id = actor.id,
+        .id = api_id,
         .username = actor.preferred_username,
         .acct = acct_str,
         .display_name = "",
@@ -1793,6 +1840,47 @@ fn accountLookup(app_state: *app.App, allocator: std.mem.Allocator, req: Request
     return accountByUser(app_state, allocator, user.?);
 }
 
+fn apiV2Search(app_state: *app.App, allocator: std.mem.Allocator, req: Request) Response {
+    const q = queryString(req.target);
+    const q_param = parseQueryParam(allocator, q, "q") catch
+        return .{ .status = .bad_request, .body = "invalid query\n" };
+
+    const query_raw = q_param orelse return jsonOk(allocator, .{
+        .accounts = [_]i32{},
+        .statuses = [_]i32{},
+        .hashtags = [_]i32{},
+    });
+
+    const query_trimmed = std.mem.trim(u8, query_raw, " \t\r\n");
+    if (query_trimmed.len == 0) return jsonOk(allocator, .{
+        .accounts = [_]i32{},
+        .statuses = [_]i32{},
+        .hashtags = [_]i32{},
+    });
+
+    var accounts: std.ArrayListUnmanaged(AccountPayload) = .empty;
+    defer accounts.deinit(allocator);
+
+    // Minimal: resolve acct handles like `@user@domain` / `user@domain`.
+    if (!std.mem.startsWith(u8, query_trimmed, "http://") and
+        !std.mem.startsWith(u8, query_trimmed, "https://") and
+        std.mem.indexOfScalar(u8, query_trimmed, '@') != null)
+    {
+        const actor = federation.resolveRemoteActorByHandle(app_state, allocator, query_trimmed) catch null;
+        if (actor) |a| {
+            const api_id = remoteAccountApiIdAlloc(app_state, allocator, a.id);
+            accounts.append(allocator, makeRemoteAccountPayload(app_state, allocator, api_id, a)) catch
+                return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        }
+    }
+
+    return jsonOk(allocator, .{
+        .accounts = accounts.items,
+        .statuses = [_]i32{},
+        .hashtags = [_]i32{},
+    });
+}
+
 fn accountGet(app_state: *app.App, allocator: std.mem.Allocator, path: []const u8) Response {
     const prefix = "/api/v1/accounts/";
     if (!std.mem.startsWith(u8, path, prefix)) return .{ .status = .not_found, .body = "not found\n" };
@@ -1800,6 +1888,17 @@ fn accountGet(app_state: *app.App, allocator: std.mem.Allocator, path: []const u
     const id_str = path[prefix.len..];
     const id = std.fmt.parseInt(i64, id_str, 10) catch
         return .{ .status = .not_found, .body = "not found\n" };
+
+    if (id >= remote_actor_id_base) {
+        const rowid = id - remote_actor_id_base;
+        if (rowid <= 0) return .{ .status = .not_found, .body = "not found\n" };
+
+        const actor = remote_actors.lookupByRowId(&app_state.conn, allocator, rowid) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        if (actor == null) return .{ .status = .not_found, .body = "not found\n" };
+
+        return jsonOk(allocator, makeRemoteAccountPayload(app_state, allocator, id_str, actor.?));
+    }
 
     const user = users.lookupUserById(&app_state.conn, allocator, id) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
@@ -1834,12 +1933,35 @@ fn accountRelationships(app_state: *app.App, allocator: std.mem.Allocator, req: 
         }
     }
 
-    const Rel = struct { id: []const u8 };
+    const Rel = struct {
+        id: []const u8,
+        following: bool = false,
+        followed_by: bool = false,
+        requested: bool = false,
+    };
     var rels: std.ArrayListUnmanaged(Rel) = .empty;
     defer rels.deinit(allocator);
 
     for (ids.items) |id_str| {
-        rels.append(allocator, .{ .id = id_str }) catch
+        var following = false;
+        var requested = false;
+
+        const id_num = std.fmt.parseInt(i64, id_str, 10) catch null;
+        if (id_num != null and id_num.? >= remote_actor_id_base) {
+            const rowid = id_num.? - remote_actor_id_base;
+            if (rowid > 0) {
+                const actor = remote_actors.lookupByRowId(&app_state.conn, allocator, rowid) catch null;
+                if (actor) |a| {
+                    const f = follows.lookupByUserAndRemoteActorId(&app_state.conn, allocator, info.?.user_id, a.id) catch null;
+                    if (f) |follow| {
+                        following = follow.state == .accepted;
+                        requested = follow.state == .pending;
+                    }
+                }
+            }
+        }
+
+        rels.append(allocator, .{ .id = id_str, .following = following, .requested = requested }) catch
             return .{ .status = .internal_server_error, .body = "internal server error\n" };
     }
 
@@ -1850,6 +1972,113 @@ fn accountRelationships(app_state: *app.App, allocator: std.mem.Allocator, req: 
         .content_type = "application/json; charset=utf-8",
         .body = body,
     };
+}
+
+const RelationshipPayload = struct {
+    id: []const u8,
+    following: bool,
+    followed_by: bool = false,
+    requested: bool,
+};
+
+fn relationshipPayload(id: []const u8, state: ?follows.FollowState) RelationshipPayload {
+    const following = state != null and state.? == .accepted;
+    const requested = state != null and state.? == .pending;
+    return .{ .id = id, .following = following, .requested = requested };
+}
+
+fn accountFollow(app_state: *app.App, allocator: std.mem.Allocator, req: Request, path: []const u8) Response {
+    const token = bearerToken(req.authorization) orelse return unauthorized(allocator);
+    const info = oauth.verifyAccessToken(&app_state.conn, allocator, token) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (info == null) return unauthorized(allocator);
+
+    const prefix = "/api/v1/accounts/";
+    const suffix = "/follow";
+    if (!std.mem.startsWith(u8, path, prefix)) return .{ .status = .not_found, .body = "not found\n" };
+    if (!std.mem.endsWith(u8, path, suffix)) return .{ .status = .not_found, .body = "not found\n" };
+
+    const id_part = path[prefix.len .. path.len - suffix.len];
+    if (id_part.len == 0) return .{ .status = .not_found, .body = "not found\n" };
+    if (std.mem.indexOfScalar(u8, id_part, '/') != null) return .{ .status = .not_found, .body = "not found\n" };
+
+    const account_id = std.fmt.parseInt(i64, id_part, 10) catch
+        return .{ .status = .not_found, .body = "not found\n" };
+
+    if (account_id < remote_actor_id_base) {
+        return jsonOk(allocator, relationshipPayload(id_part, null));
+    }
+
+    const rowid = account_id - remote_actor_id_base;
+    if (rowid <= 0) return .{ .status = .not_found, .body = "not found\n" };
+
+    const actor = remote_actors.lookupByRowId(&app_state.conn, allocator, rowid) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (actor == null) return .{ .status = .not_found, .body = "not found\n" };
+
+    const existing = follows.lookupByUserAndRemoteActorId(&app_state.conn, allocator, info.?.user_id, actor.?.id) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (existing) |f| {
+        return jsonOk(allocator, relationshipPayload(id_part, f.state));
+    }
+
+    const base = baseUrlAlloc(app_state, allocator) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    var id_bytes: [16]u8 = undefined;
+    std.crypto.random.bytes(&id_bytes);
+    const id_hex = std.fmt.bytesToHex(id_bytes, .lower);
+    const follow_activity_id = std.fmt.allocPrint(allocator, "{s}/follows/{s}", .{ base, id_hex[0..] }) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    _ = follows.createPending(&app_state.conn, info.?.user_id, actor.?.id, follow_activity_id) catch |err| switch (err) {
+        error.Sqlite => {
+            const f = follows.lookupByUserAndRemoteActorId(&app_state.conn, allocator, info.?.user_id, actor.?.id) catch null;
+            if (f) |existing_follow| {
+                return jsonOk(allocator, relationshipPayload(id_part, existing_follow.state));
+            }
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        },
+    };
+
+    background.sendFollow(app_state, allocator, info.?.user_id, actor.?.id, follow_activity_id);
+
+    return jsonOk(allocator, relationshipPayload(id_part, .pending));
+}
+
+fn accountUnfollow(app_state: *app.App, allocator: std.mem.Allocator, req: Request, path: []const u8) Response {
+    const token = bearerToken(req.authorization) orelse return unauthorized(allocator);
+    const info = oauth.verifyAccessToken(&app_state.conn, allocator, token) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (info == null) return unauthorized(allocator);
+
+    const prefix = "/api/v1/accounts/";
+    const suffix = "/unfollow";
+    if (!std.mem.startsWith(u8, path, prefix)) return .{ .status = .not_found, .body = "not found\n" };
+    if (!std.mem.endsWith(u8, path, suffix)) return .{ .status = .not_found, .body = "not found\n" };
+
+    const id_part = path[prefix.len .. path.len - suffix.len];
+    if (id_part.len == 0) return .{ .status = .not_found, .body = "not found\n" };
+    if (std.mem.indexOfScalar(u8, id_part, '/') != null) return .{ .status = .not_found, .body = "not found\n" };
+
+    const account_id = std.fmt.parseInt(i64, id_part, 10) catch
+        return .{ .status = .not_found, .body = "not found\n" };
+
+    if (account_id < remote_actor_id_base) {
+        return jsonOk(allocator, relationshipPayload(id_part, null));
+    }
+
+    const rowid = account_id - remote_actor_id_base;
+    if (rowid <= 0) return .{ .status = .not_found, .body = "not found\n" };
+
+    const actor = remote_actors.lookupByRowId(&app_state.conn, allocator, rowid) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (actor == null) return .{ .status = .not_found, .body = "not found\n" };
+
+    _ = follows.deleteByUserAndRemoteActorId(&app_state.conn, info.?.user_id, actor.?.id) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    return jsonOk(allocator, relationshipPayload(id_part, null));
 }
 
 fn accountStatuses(app_state: *app.App, allocator: std.mem.Allocator, req: Request, path: []const u8) Response {
@@ -1864,6 +2093,10 @@ fn accountStatuses(app_state: *app.App, allocator: std.mem.Allocator, req: Reque
 
     const account_id = std.fmt.parseInt(i64, id_part, 10) catch
         return .{ .status = .not_found, .body = "not found\n" };
+
+    if (account_id >= remote_actor_id_base) {
+        return jsonOk(allocator, [_]i32{});
+    }
 
     const user = users.lookupUserById(&app_state.conn, allocator, account_id) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
@@ -2000,30 +2233,9 @@ fn apiFollow(app_state: *app.App, allocator: std.mem.Allocator, req: Request) Re
 
     background.sendFollow(app_state, allocator, info.?.user_id, actor.id, follow_activity_id);
 
-    const acct = std.fmt.allocPrint(allocator, "{s}@{s}", .{ actor.preferred_username, actor.domain }) catch "";
-    const avatar_url = defaultAvatarUrlAlloc(app_state, allocator) catch actor.id;
-    const header_url = defaultHeaderUrlAlloc(app_state, allocator) catch actor.id;
+    const api_id = remoteAccountApiIdAlloc(app_state, allocator, actor.id);
 
-    const payload = .{
-        .id = actor.id,
-        .username = actor.preferred_username,
-        .acct = acct,
-        .display_name = "",
-        .note = "",
-        .url = actor.id,
-        .locked = false,
-        .bot = false,
-        .group = false,
-        .discoverable = true,
-        .created_at = "1970-01-01T00:00:00.000Z",
-        .followers_count = 0,
-        .following_count = 0,
-        .statuses_count = 0,
-        .avatar = avatar_url,
-        .avatar_static = avatar_url,
-        .header = header_url,
-        .header_static = header_url,
-    };
+    const payload = makeRemoteAccountPayload(app_state, allocator, api_id, actor);
 
     const body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
@@ -3780,6 +3992,297 @@ test "POST /api/v1/follows requires bearer token" {
         .body = "uri=@bob@remote.test",
     });
     try std.testing.expectEqual(std.http.Status.unauthorized, resp.status);
+}
+
+test "GET /api/v2/search resolves acct handle into an account" {
+    const net = std.net;
+    const http = std.http;
+    const posix = std.posix;
+
+    const listen_address = try net.Address.parseIp("127.0.0.1", 0);
+    var listener = try listen_address.listen(.{ .reuse_address = true });
+    defer listener.deinit();
+
+    const addr = listener.listen_address;
+    const port = addr.in.getPort();
+
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const ServerCtx = struct {
+        listener: *net.Server,
+        port: u16,
+        ok: bool = true,
+
+        fn run(ctx: *@This()) !void {
+            var buf: [16 * 1024]u8 = undefined;
+            var out: [16 * 1024]u8 = undefined;
+
+            var seen_webfinger = false;
+            var seen_actor = false;
+
+            while (!(seen_webfinger and seen_actor)) {
+                var fds = [_]posix.pollfd{
+                    .{ .fd = ctx.listener.stream.handle, .events = posix.POLL.IN, .revents = 0 },
+                };
+                const ready = try posix.poll(&fds, 5000);
+                if (ready == 0) {
+                    ctx.ok = false;
+                    return;
+                }
+
+                var conn = try ctx.listener.accept();
+                defer conn.stream.close();
+
+                var reader = net.Stream.Reader.init(conn.stream, &buf);
+                var writer = net.Stream.Writer.init(conn.stream, &out);
+
+                var server = http.Server.init(reader.interface(), &writer.interface);
+                var request = try server.receiveHead();
+
+                const method = request.head.method;
+                const target = request.head.target;
+
+                var conn_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+                defer conn_arena.deinit();
+                const a = conn_arena.allocator();
+
+                if (method == .GET and std.mem.startsWith(u8, target, "/.well-known/webfinger")) {
+                    seen_webfinger = true;
+
+                    const actor_id = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}/users/bob", .{ctx.port});
+                    const resp_body = try std.fmt.allocPrint(
+                        a,
+                        "{{\"subject\":\"acct:bob@127.0.0.1\",\"links\":[{{\"rel\":\"self\",\"type\":\"application/activity+json\",\"href\":\"{s}\"}}]}}",
+                        .{actor_id},
+                    );
+
+                    try request.respond(resp_body, .{
+                        .status = .ok,
+                        .keep_alive = false,
+                        .extra_headers = &.{
+                            .{ .name = "content-type", .value = "application/jrd+json" },
+                        },
+                    });
+                    continue;
+                }
+
+                if (method == .GET and std.mem.eql(u8, target, "/users/bob")) {
+                    seen_actor = true;
+                    const resp_body = try std.fmt.allocPrint(
+                        a,
+                        "{{\"@context\":\"https://www.w3.org/ns/activitystreams\",\"id\":\"http://127.0.0.1:{d}/users/bob\",\"type\":\"Person\",\"preferredUsername\":\"bob\",\"inbox\":\"http://127.0.0.1:{d}/users/bob/inbox\",\"publicKey\":{{\"id\":\"http://127.0.0.1:{d}/users/bob#main-key\",\"owner\":\"http://127.0.0.1:{d}/users/bob\",\"publicKeyPem\":\"-----BEGIN PUBLIC KEY-----\\\\n...\\\\n-----END PUBLIC KEY-----\\\\n\"}}}}",
+                        .{ ctx.port, ctx.port, ctx.port, ctx.port },
+                    );
+                    try request.respond(resp_body, .{
+                        .status = .ok,
+                        .keep_alive = false,
+                        .extra_headers = &.{
+                            .{ .name = "content-type", .value = "application/activity+json" },
+                        },
+                    });
+                    continue;
+                }
+
+                ctx.ok = false;
+                try request.respond("not found\n", .{
+                    .status = .not_found,
+                    .keep_alive = false,
+                    .extra_headers = &.{
+                        .{ .name = "content-type", .value = "text/plain" },
+                    },
+                });
+                return;
+            }
+        }
+    };
+
+    var ctx: ServerCtx = .{ .listener = &listener, .port = port };
+    var t = try std.Thread.spawn(.{}, ServerCtx.run, .{&ctx});
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const handle_str = try std.fmt.allocPrint(a, "@bob@127.0.0.1:{d}", .{port});
+    const q_enc = try percentEncodeAlloc(a, handle_str);
+
+    const target = try std.fmt.allocPrint(a, "/api/v2/search?q={s}&resolve=true&limit=1", .{q_enc});
+    const resp = handle(&app_state, a, .{ .method = .GET, .target = target });
+    try std.testing.expectEqual(std.http.Status.ok, resp.status);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, resp.body, .{});
+    defer parsed.deinit();
+
+    const accounts = parsed.value.object.get("accounts").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), accounts.len);
+
+    const actor_id = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}/users/bob", .{port});
+    const rowid = (try remote_actors.lookupRowIdById(&app_state.conn, actor_id)).?;
+    const expected_id = try std.fmt.allocPrint(a, "{d}", .{remote_actor_id_base + rowid});
+
+    try std.testing.expectEqualStrings(expected_id, accounts[0].object.get("id").?.string);
+    try std.testing.expectEqualStrings("bob@127.0.0.1", accounts[0].object.get("acct").?.string);
+    try std.testing.expectEqualStrings(actor_id, accounts[0].object.get("url").?.string);
+
+    t.join();
+    try std.testing.expect(ctx.ok);
+}
+
+test "POST /api/v1/accounts/:id/follow creates pending follow and delivers Follow" {
+    const net = std.net;
+    const http = std.http;
+    const posix = std.posix;
+
+    const listen_address = try net.Address.parseIp("127.0.0.1", 0);
+    var listener = try listen_address.listen(.{ .reuse_address = true });
+    defer listener.deinit();
+
+    const addr = listener.listen_address;
+    const port = addr.in.getPort();
+
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const remote_actor_id = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}/users/bob", .{port});
+    const remote_inbox = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}/users/bob/inbox", .{port});
+
+    try remote_actors.upsert(&app_state.conn, .{
+        .id = remote_actor_id,
+        .inbox = remote_inbox,
+        .shared_inbox = null,
+        .preferred_username = "bob",
+        .domain = "127.0.0.1",
+        .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
+    });
+
+    const rowid = (try remote_actors.lookupRowIdById(&app_state.conn, remote_actor_id)).?;
+    const account_id_str = try std.fmt.allocPrint(a, "{d}", .{remote_actor_id_base + rowid});
+
+    const app_creds = try oauth.createApp(
+        &app_state.conn,
+        a,
+        "pl-fe",
+        "urn:ietf:wg:oauth:2.0:oob",
+        "read follow",
+        "",
+    );
+    const token = try oauth.createAccessToken(&app_state.conn, a, app_creds.id, user_id, "read follow");
+    const auth_header = try std.fmt.allocPrint(a, "Bearer {s}", .{token});
+
+    const ServerCtx = struct {
+        listener: *net.Server,
+        expected_target: []const u8,
+        ok: bool = true,
+        seen: bool = false,
+
+        fn run(ctx: *@This()) !void {
+            var buf: [16 * 1024]u8 = undefined;
+            var out: [16 * 1024]u8 = undefined;
+            var body_buf: [16 * 1024]u8 = undefined;
+
+            while (!ctx.seen) {
+                var fds = [_]posix.pollfd{
+                    .{ .fd = ctx.listener.stream.handle, .events = posix.POLL.IN, .revents = 0 },
+                };
+                const ready = try posix.poll(&fds, 5000);
+                if (ready == 0) {
+                    ctx.ok = false;
+                    return;
+                }
+
+                var conn = try ctx.listener.accept();
+                defer conn.stream.close();
+
+                var reader = net.Stream.Reader.init(conn.stream, &buf);
+                var writer = net.Stream.Writer.init(conn.stream, &out);
+
+                var server = http.Server.init(reader.interface(), &writer.interface);
+                var request = try server.receiveHead();
+
+                const method = request.head.method;
+                const target = request.head.target;
+
+                if (method != .POST or !std.mem.eql(u8, target, ctx.expected_target)) {
+                    ctx.ok = false;
+                }
+
+                var conn_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+                defer conn_arena.deinit();
+                const conn_alloc = conn_arena.allocator();
+
+                var body: []const u8 = "";
+                if (method.requestHasBody()) {
+                    const content_length: usize = @intCast(request.head.content_length orelse 0);
+                    request.head.expect = null;
+                    const br = request.readerExpectNone(&body_buf);
+                    body = try br.readAlloc(conn_alloc, content_length);
+                }
+
+                var parsed = std.json.parseFromSlice(std.json.Value, conn_alloc, body, .{}) catch {
+                    ctx.ok = false;
+                    ctx.seen = true;
+                    try request.respond("ok\n", .{
+                        .status = .accepted,
+                        .keep_alive = false,
+                        .extra_headers = &.{
+                            .{ .name = "content-type", .value = "text/plain" },
+                        },
+                    });
+                    continue;
+                };
+                defer parsed.deinit();
+
+                const typ = parsed.value.object.get("type");
+                if (typ == null or typ.? != .string or !std.mem.eql(u8, typ.?.string, "Follow")) ctx.ok = false;
+
+                ctx.seen = true;
+
+                try request.respond("ok\n", .{
+                    .status = .accepted,
+                    .keep_alive = false,
+                    .extra_headers = &.{
+                        .{ .name = "content-type", .value = "text/plain" },
+                    },
+                });
+            }
+        }
+    };
+
+    const expected_target = "/users/bob/inbox";
+    var ctx: ServerCtx = .{
+        .listener = &listener,
+        .expected_target = expected_target,
+    };
+
+    var t = try std.Thread.spawn(.{}, ServerCtx.run, .{&ctx});
+
+    const follow_target = try std.fmt.allocPrint(a, "/api/v1/accounts/{s}/follow", .{account_id_str});
+    const follow_resp = handle(&app_state, a, .{
+        .method = .POST,
+        .target = follow_target,
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, follow_resp.status);
+
+    var follow_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, follow_resp.body, .{});
+    defer follow_json.deinit();
+
+    try std.testing.expectEqualStrings(account_id_str, follow_json.value.object.get("id").?.string);
+    try std.testing.expect(follow_json.value.object.get("requested").?.bool);
+
+    const f = (try follows.lookupByUserAndRemoteActorId(&app_state.conn, a, user_id, remote_actor_id)).?;
+    try std.testing.expectEqual(follows.FollowState.pending, f.state);
+
+    t.join();
+    try std.testing.expect(ctx.ok);
 }
 
 test "GET /.well-known/webfinger returns actor self link" {
