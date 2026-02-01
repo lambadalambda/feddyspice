@@ -51,6 +51,29 @@ pub fn lookup(conn: *db.Db, allocator: std.mem.Allocator, id: i64) Error!?Remote
     };
 }
 
+pub fn lookupIncludingDeleted(conn: *db.Db, allocator: std.mem.Allocator, id: i64) Error!?RemoteStatus {
+    var stmt = try conn.prepareZ(
+        "SELECT id, remote_uri, remote_actor_id, content_html, visibility, created_at, deleted_at FROM remote_statuses WHERE id = ?1 LIMIT 1;\x00",
+    );
+    defer stmt.finalize();
+    try stmt.bindInt64(1, id);
+
+    switch (try stmt.step()) {
+        .done => return null,
+        .row => {},
+    }
+
+    return .{
+        .id = stmt.columnInt64(0),
+        .remote_uri = try allocator.dupe(u8, stmt.columnText(1)),
+        .remote_actor_id = try allocator.dupe(u8, stmt.columnText(2)),
+        .content_html = try allocator.dupe(u8, stmt.columnText(3)),
+        .visibility = try allocator.dupe(u8, stmt.columnText(4)),
+        .created_at = try allocator.dupe(u8, stmt.columnText(5)),
+        .deleted_at = if (stmt.columnType(6) == .null) null else try allocator.dupe(u8, stmt.columnText(6)),
+    };
+}
+
 pub fn lookupByUri(conn: *db.Db, allocator: std.mem.Allocator, remote_uri: []const u8) Error!?RemoteStatus {
     var stmt = try conn.prepareZ(
         "SELECT id, remote_uri, remote_actor_id, content_html, visibility, created_at, deleted_at FROM remote_statuses WHERE remote_uri = ?1 AND deleted_at IS NULL LIMIT 1;\x00",
@@ -72,6 +95,60 @@ pub fn lookupByUri(conn: *db.Db, allocator: std.mem.Allocator, remote_uri: []con
         .created_at = try allocator.dupe(u8, stmt.columnText(5)),
         .deleted_at = if (stmt.columnType(6) == .null) null else try allocator.dupe(u8, stmt.columnText(6)),
     };
+}
+
+pub fn lookupByUriIncludingDeleted(conn: *db.Db, allocator: std.mem.Allocator, remote_uri: []const u8) Error!?RemoteStatus {
+    var stmt = try conn.prepareZ(
+        "SELECT id, remote_uri, remote_actor_id, content_html, visibility, created_at, deleted_at FROM remote_statuses WHERE remote_uri = ?1 LIMIT 1;\x00",
+    );
+    defer stmt.finalize();
+    try stmt.bindText(1, remote_uri);
+
+    switch (try stmt.step()) {
+        .done => return null,
+        .row => {},
+    }
+
+    return .{
+        .id = stmt.columnInt64(0),
+        .remote_uri = try allocator.dupe(u8, stmt.columnText(1)),
+        .remote_actor_id = try allocator.dupe(u8, stmt.columnText(2)),
+        .content_html = try allocator.dupe(u8, stmt.columnText(3)),
+        .visibility = try allocator.dupe(u8, stmt.columnText(4)),
+        .created_at = try allocator.dupe(u8, stmt.columnText(5)),
+        .deleted_at = if (stmt.columnType(6) == .null) null else try allocator.dupe(u8, stmt.columnText(6)),
+    };
+}
+
+pub fn markDeletedByUri(conn: *db.Db, remote_uri: []const u8, deleted_at: ?[]const u8) db.Error!bool {
+    if (deleted_at) |ts| {
+        var stmt = try conn.prepareZ(
+            "UPDATE remote_statuses SET deleted_at = ?2 WHERE remote_uri = ?1 AND deleted_at IS NULL;\x00",
+        );
+        defer stmt.finalize();
+        try stmt.bindText(1, remote_uri);
+        try stmt.bindText(2, ts);
+
+        switch (try stmt.step()) {
+            .done => {},
+            .row => return error.Sqlite,
+        }
+
+        return conn.changes() > 0;
+    }
+
+    var stmt = try conn.prepareZ(
+        "UPDATE remote_statuses SET deleted_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE remote_uri = ?1 AND deleted_at IS NULL;\x00",
+    );
+    defer stmt.finalize();
+    try stmt.bindText(1, remote_uri);
+
+    switch (try stmt.step()) {
+        .done => {},
+        .row => return error.Sqlite,
+    }
+
+    return conn.changes() > 0;
 }
 
 pub fn createIfNotExists(
@@ -183,4 +260,8 @@ test "createIfNotExists assigns negative ids" {
 
     try std.testing.expect(s1.id < 0);
     try std.testing.expect(s2.id < s1.id);
+
+    try std.testing.expect(try markDeletedByUri(&conn, "https://remote.test/notes/2", "2020-01-01T00:00:02.000Z"));
+    try std.testing.expect((try lookupByUri(&conn, a, "https://remote.test/notes/2")) == null);
+    try std.testing.expect((try lookupByUriIncludingDeleted(&conn, a, "https://remote.test/notes/2")).?.deleted_at != null);
 }

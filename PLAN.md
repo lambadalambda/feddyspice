@@ -45,7 +45,7 @@ Target: follow and receive posts from other servers.
 - [x] Follow flow: send Follow, receive Accept, store relationship
 - [x] Follow flow: receive Follow, send Accept, store follower
 - [x] Create flow: send Create(Note) to followers, receive Create(Note)
-- [ ] Delete handling (tombstones)
+- [x] Delete handling (tombstones)
 
 ## 4) Fedbox E2E tests (Docker)
 

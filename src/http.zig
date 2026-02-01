@@ -1031,6 +1031,97 @@ fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: Request, pa
         return .{ .status = .accepted, .body = "ok\n" };
     }
 
+    if (std.mem.eql(u8, typ.string, "Delete")) {
+        const actor_val = parsed.value.object.get("actor") orelse
+            return .{ .status = .bad_request, .body = "missing actor\n" };
+        if (actor_val != .string) return .{ .status = .bad_request, .body = "invalid actor\n" };
+
+        const remote_actor = blk: {
+            if (remote_actors.lookupById(&app_state.conn, allocator, actor_val.string) catch
+                return .{ .status = .internal_server_error, .body = "internal server error\n" }) |found|
+            {
+                break :blk found;
+            }
+
+            const trimmed = trimTrailingSlash(actor_val.string);
+            if (!std.mem.eql(u8, trimmed, actor_val.string)) {
+                if (remote_actors.lookupById(&app_state.conn, allocator, trimmed) catch
+                    return .{ .status = .internal_server_error, .body = "internal server error\n" }) |found|
+                {
+                    break :blk found;
+                }
+            } else {
+                const with_slash = std.fmt.allocPrint(allocator, "{s}/", .{actor_val.string}) catch
+                    break :blk null;
+                if (remote_actors.lookupById(&app_state.conn, allocator, with_slash) catch
+                    return .{ .status = .internal_server_error, .body = "internal server error\n" }) |found|
+                {
+                    break :blk found;
+                }
+            }
+
+            break :blk null;
+        };
+        if (remote_actor == null) return .{ .status = .accepted, .body = "ignored\n" };
+
+        const obj = parsed.value.object.get("object") orelse
+            return .{ .status = .bad_request, .body = "missing object\n" };
+
+        var object_id: []const u8 = undefined;
+        var deleted_at: ?[]const u8 = null;
+        switch (obj) {
+            .string => |s| object_id = s,
+            .object => |o| {
+                const id_val = o.get("id") orelse return .{ .status = .bad_request, .body = "missing id\n" };
+                if (id_val != .string) return .{ .status = .bad_request, .body = "invalid id\n" };
+                object_id = id_val.string;
+
+                if (o.get("deleted")) |deleted_val| {
+                    if (deleted_val == .string and deleted_val.string.len > 0) {
+                        deleted_at = deleted_val.string;
+                    }
+                }
+            },
+            else => return .{ .status = .bad_request, .body = "invalid object\n" },
+        }
+
+        const remote_status = blk: {
+            if (remote_statuses.lookupByUriIncludingDeleted(&app_state.conn, allocator, object_id) catch
+                return .{ .status = .internal_server_error, .body = "internal server error\n" }) |found|
+            {
+                break :blk found;
+            }
+
+            const trimmed = trimTrailingSlash(object_id);
+            if (!std.mem.eql(u8, trimmed, object_id)) {
+                if (remote_statuses.lookupByUriIncludingDeleted(&app_state.conn, allocator, trimmed) catch
+                    return .{ .status = .internal_server_error, .body = "internal server error\n" }) |found|
+                {
+                    break :blk found;
+                }
+            } else {
+                const with_slash = std.fmt.allocPrint(allocator, "{s}/", .{object_id}) catch
+                    break :blk null;
+                if (remote_statuses.lookupByUriIncludingDeleted(&app_state.conn, allocator, with_slash) catch
+                    return .{ .status = .internal_server_error, .body = "internal server error\n" }) |found|
+                {
+                    break :blk found;
+                }
+            }
+
+            break :blk null;
+        };
+        if (remote_status == null) return .{ .status = .accepted, .body = "ignored\n" };
+        if (!std.mem.eql(u8, remote_status.?.remote_actor_id, remote_actor.?.id)) {
+            return .{ .status = .accepted, .body = "ignored\n" };
+        }
+
+        _ = remote_statuses.markDeletedByUri(&app_state.conn, remote_status.?.remote_uri, deleted_at) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+        return .{ .status = .accepted, .body = "ok\n" };
+    }
+
     if (std.mem.eql(u8, typ.string, "Follow")) {
         const id_val = parsed.value.object.get("id") orelse
             return .{ .status = .bad_request, .body = "missing id\n" };
@@ -1316,6 +1407,8 @@ fn deleteStatus(app_state: *app.App, allocator: std.mem.Allocator, req: Request,
     const ok = statuses.markDeleted(&app_state.conn, id, info.?.user_id) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
     if (!ok) return .{ .status = .not_found, .body = "not found\n" };
+
+    background.deliverDeleteToFollowers(app_state, allocator, info.?.user_id, id);
 
     return statusResponse(app_state, allocator, user.?, st.?);
 }
@@ -2930,6 +3023,10 @@ test "GET /api/v1/accounts/verify_credentials works with bearer token" {
 test "accounts: lookup + get account" {
     var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
     defer app_state.deinit();
+    app_state.logger.opts.to_stderr = true;
+    app_state.logger.opts.min_level = .debug;
+    app_state.logger.debug("test logger debug output", .{});
+    try std.testing.expect(std.mem.eql(u8, app_state.cfg.db_path, ":memory:"));
 
     const params = app_state.cfg.password_params;
     const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
@@ -3857,6 +3954,244 @@ test "POST /api/v1/statuses delivers Create to followers" {
         listener: *net.Server,
         local_public_key_pem: []const u8,
         ok: bool = true,
+        fail: u8 = 0,
+
+        fn setFail(ctx: *@This(), code: u8) void {
+            if (ctx.fail == 0) ctx.fail = code;
+            ctx.ok = false;
+        }
+
+        fn run(ctx: *@This()) !void {
+            var fds = [_]posix.pollfd{
+                .{ .fd = ctx.listener.stream.handle, .events = posix.POLL.IN, .revents = 0 },
+            };
+            const ready = try posix.poll(&fds, 5000);
+            if (ready == 0) {
+                ctx.setFail(1);
+                return;
+            }
+
+            var buf: [16 * 1024]u8 = undefined;
+            var out: [16 * 1024]u8 = undefined;
+            var body_buf: [16 * 1024]u8 = undefined;
+
+            var conn = try ctx.listener.accept();
+            defer conn.stream.close();
+
+            var reader = net.Stream.Reader.init(conn.stream, &buf);
+            var writer = net.Stream.Writer.init(conn.stream, &out);
+
+            var server = http.Server.init(reader.interface(), &writer.interface);
+            var request = try server.receiveHead();
+
+            const method = request.head.method;
+            const target = request.head.target;
+
+            var host: ?[]const u8 = null;
+            var date: ?[]const u8 = null;
+            var digest: ?[]const u8 = null;
+            var signature: ?[]const u8 = null;
+
+            var header_it = request.iterateHeaders();
+            while (header_it.next()) |h| {
+                if (std.ascii.eqlIgnoreCase(h.name, "host")) host = h.value;
+                if (std.ascii.eqlIgnoreCase(h.name, "date")) date = h.value;
+                if (std.ascii.eqlIgnoreCase(h.name, "digest")) digest = h.value;
+                if (std.ascii.eqlIgnoreCase(h.name, "signature")) signature = h.value;
+            }
+
+            var conn_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+            defer conn_arena.deinit();
+            const conn_alloc = conn_arena.allocator();
+
+            var body: []const u8 = "";
+            if (method.requestHasBody()) {
+                const content_length: usize = @intCast(request.head.content_length orelse 0);
+                request.head.expect = null;
+                const br = request.readerExpectNone(&body_buf);
+                body = try br.readAlloc(conn_alloc, content_length);
+            }
+
+            if (method != .POST or !std.mem.eql(u8, target, "/users/bob/inbox")) {
+                ctx.setFail(2);
+                try request.respond("not found\n", .{
+                    .status = .not_found,
+                    .keep_alive = false,
+                    .extra_headers = &.{
+                        .{ .name = "content-type", .value = "text/plain" },
+                    },
+                });
+                return;
+            }
+
+            if (host == null or date == null or digest == null or signature == null) {
+                ctx.setFail(3);
+            } else {
+                const expected_digest = try @import("http_signatures.zig").digestHeaderValueAlloc(conn_alloc, body);
+                if (!std.mem.eql(u8, expected_digest, digest.?)) ctx.setFail(4);
+
+                const signing_string = try @import("http_signatures.zig").signingStringAlloc(
+                    conn_alloc,
+                    .POST,
+                    "/users/bob/inbox",
+                    host.?,
+                    date.?,
+                    digest.?,
+                );
+
+                const sig_prefix = "signature=\"";
+                const sig_b64_i = std.mem.indexOf(u8, signature.?, sig_prefix) orelse {
+                    ctx.setFail(5);
+                    return;
+                };
+                const sig_b64_start = sig_b64_i + sig_prefix.len;
+                const sig_b64_end = std.mem.indexOfPos(u8, signature.?, sig_b64_start, "\"") orelse {
+                    ctx.setFail(5);
+                    return;
+                };
+
+                const sig_b64 = signature.?[sig_b64_start..sig_b64_end];
+                const sig_len = std.base64.standard.Decoder.calcSizeForSlice(sig_b64) catch {
+                    ctx.setFail(5);
+                    return;
+                };
+                const sig_bytes = try conn_alloc.alloc(u8, sig_len);
+                std.base64.standard.Decoder.decode(sig_bytes, sig_b64) catch {
+                    ctx.setFail(5);
+                    return;
+                };
+
+                if (!(try @import("crypto_rsa.zig").verifyRsaSha256Pem(
+                    ctx.local_public_key_pem,
+                    signing_string,
+                    sig_bytes,
+                ))) ctx.setFail(6);
+
+                var parsed = std.json.parseFromSlice(std.json.Value, conn_alloc, body, .{}) catch {
+                    ctx.setFail(7);
+                    return;
+                };
+                defer parsed.deinit();
+
+                if (parsed.value == .object) {
+                    const typ = parsed.value.object.get("type");
+                    if (typ == null or typ.? != .string or !std.mem.eql(u8, typ.?.string, "Create")) ctx.setFail(8);
+
+                    const obj = parsed.value.object.get("object");
+                    if (obj == null or obj.? != .object) ctx.setFail(9);
+
+                    const content = obj.?.object.get("content");
+                    if (content == null or content.? != .string or !std.mem.eql(u8, content.?.string, "<p>federated</p>")) {
+                        ctx.setFail(10);
+                    }
+                } else {
+                    ctx.setFail(11);
+                }
+            }
+
+            try request.respond("ok\n", .{
+                .status = .accepted,
+                .keep_alive = false,
+                .extra_headers = &.{
+                    .{ .name = "content-type", .value = "text/plain" },
+                },
+            });
+        }
+    };
+
+    var ctx: ServerCtx = .{
+        .listener = &listener,
+        .local_public_key_pem = keys.public_key_pem,
+    };
+
+    var t = try std.Thread.spawn(.{}, ServerCtx.run, .{&ctx});
+
+    const create_resp = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/api/v1/statuses",
+        .content_type = "application/x-www-form-urlencoded",
+        .body = "status=federated&visibility=public",
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, create_resp.status);
+
+    t.join();
+    try std.testing.expectEqual(@as(u8, 0), ctx.fail);
+}
+
+test "DELETE /api/v1/statuses delivers Delete to followers" {
+    const net = std.net;
+    const http = std.http;
+    const posix = std.posix;
+
+    const listen_address = try net.Address.parseIp("127.0.0.1", 0);
+    var listener = try listen_address.listen(.{ .reuse_address = true });
+    defer listener.deinit();
+
+    const addr = listener.listen_address;
+    const port = addr.in.getPort();
+
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const keys = try actor_keys.ensureForUser(&app_state.conn, a, user_id);
+
+    const remote_actor_id = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}/users/bob", .{port});
+    const remote_inbox = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}/users/bob/inbox", .{port});
+
+    try remote_actors.upsert(&app_state.conn, .{
+        .id = remote_actor_id,
+        .inbox = remote_inbox,
+        .shared_inbox = null,
+        .preferred_username = "bob",
+        .domain = "127.0.0.1",
+        .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
+    });
+
+    const follow_id = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}/follows/1", .{port});
+    try followers.upsertPending(&app_state.conn, user_id, remote_actor_id, follow_id);
+    try std.testing.expect(try followers.markAcceptedByRemoteActorId(&app_state.conn, user_id, remote_actor_id));
+    try std.testing.expectEqual(@as(usize, 1), (try followers.listAcceptedRemoteActorIds(&app_state.conn, a, user_id, 10)).len);
+
+    const app_creds = try oauth.createApp(
+        &app_state.conn,
+        a,
+        "pl-fe",
+        "urn:ietf:wg:oauth:2.0:oob",
+        "read write",
+        "",
+    );
+
+    const token = try oauth.createAccessToken(&app_state.conn, a, app_creds.id, user_id, "read write");
+    const auth_header = try std.fmt.allocPrint(a, "Bearer {s}", .{token});
+
+    const create_resp = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/api/v1/statuses",
+        .content_type = "application/x-www-form-urlencoded",
+        .body = "status=to-delete&visibility=public",
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, create_resp.status);
+
+    var create_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, create_resp.body, .{});
+    defer create_json.deinit();
+    const id_str = create_json.value.object.get("id").?.string;
+
+    try std.testing.expect(try followers.markAcceptedByRemoteActorId(&app_state.conn, user_id, remote_actor_id));
+
+    const ServerCtx = struct {
+        listener: *net.Server,
+        local_public_key_pem: []const u8,
+        expected_object_id: []const u8,
+        ok: bool = true,
 
         fn run(ctx: *@This()) !void {
             var fds = [_]posix.pollfd{
@@ -3972,13 +4307,13 @@ test "POST /api/v1/statuses delivers Create to followers" {
 
                 if (parsed.value == .object) {
                     const typ = parsed.value.object.get("type");
-                    if (typ == null or typ.? != .string or !std.mem.eql(u8, typ.?.string, "Create")) ctx.ok = false;
+                    if (typ == null or typ.? != .string or !std.mem.eql(u8, typ.?.string, "Delete")) ctx.ok = false;
 
                     const obj = parsed.value.object.get("object");
                     if (obj == null or obj.? != .object) ctx.ok = false;
 
-                    const content = obj.?.object.get("content");
-                    if (content == null or content.? != .string or !std.mem.eql(u8, content.?.string, "<p>federated</p>")) {
+                    const obj_id = obj.?.object.get("id");
+                    if (obj_id == null or obj_id.? != .string or !std.mem.eql(u8, obj_id.?.string, ctx.expected_object_id)) {
                         ctx.ok = false;
                     }
                 } else {
@@ -3996,21 +4331,23 @@ test "POST /api/v1/statuses delivers Create to followers" {
         }
     };
 
+    const expected_object_id = try std.fmt.allocPrint(a, "http://example.test/users/alice/statuses/{s}", .{id_str});
+
     var ctx: ServerCtx = .{
         .listener = &listener,
         .local_public_key_pem = keys.public_key_pem,
+        .expected_object_id = expected_object_id,
     };
 
     var t = try std.Thread.spawn(.{}, ServerCtx.run, .{&ctx});
 
-    const create_resp = handle(&app_state, a, .{
-        .method = .POST,
-        .target = "/api/v1/statuses",
-        .content_type = "application/x-www-form-urlencoded",
-        .body = "status=federated&visibility=public",
+    const del_target = try std.fmt.allocPrint(a, "/api/v1/statuses/{s}", .{id_str});
+    const del_resp = handle(&app_state, a, .{
+        .method = .DELETE,
+        .target = del_target,
         .authorization = auth_header,
     });
-    try std.testing.expectEqual(std.http.Status.ok, create_resp.status);
+    try std.testing.expectEqual(std.http.Status.ok, del_resp.status);
 
     t.join();
     try std.testing.expect(ctx.ok);
@@ -4096,6 +4433,57 @@ test "POST /users/:name/inbox Create stores remote status" {
     const st = (try remote_statuses.lookupByUri(&app_state.conn, a, "https://remote.test/notes/1")).?;
     try std.testing.expect(st.id < 0);
     try std.testing.expectEqualStrings("<p>Hello</p>", st.content_html);
+}
+
+test "POST /users/:name/inbox Delete marks remote status deleted" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    _ = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    try remote_actors.upsert(&app_state.conn, .{
+        .id = "https://remote.test/users/bob",
+        .inbox = "https://remote.test/users/bob/inbox",
+        .shared_inbox = null,
+        .preferred_username = "bob",
+        .domain = "remote.test",
+        .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
+    });
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const create_body =
+        \\{"@context":"https://www.w3.org/ns/activitystreams","type":"Create","actor":"https://remote.test/users/bob","object":{"id":"https://remote.test/notes/1","type":"Note","content":"<p>Hello</p>","published":"2020-01-01T00:00:00.000Z"}}
+    ;
+
+    const create_resp = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/users/alice/inbox",
+        .content_type = "application/activity+json",
+        .body = create_body,
+    });
+    try std.testing.expectEqual(std.http.Status.accepted, create_resp.status);
+    try std.testing.expect((try remote_statuses.lookupByUri(&app_state.conn, a, "https://remote.test/notes/1")) != null);
+
+    const deleted_ts = "2020-01-01T00:00:02.000Z";
+    const delete_body =
+        \\{"@context":"https://www.w3.org/ns/activitystreams","type":"Delete","actor":"https://remote.test/users/bob","object":{"id":"https://remote.test/notes/1","type":"Tombstone","deleted":"2020-01-01T00:00:02.000Z"}}
+    ;
+
+    const delete_resp = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/users/alice/inbox",
+        .content_type = "application/activity+json",
+        .body = delete_body,
+    });
+    try std.testing.expectEqual(std.http.Status.accepted, delete_resp.status);
+
+    try std.testing.expect((try remote_statuses.lookupByUri(&app_state.conn, a, "https://remote.test/notes/1")) == null);
+    const st2 = (try remote_statuses.lookupByUriIncludingDeleted(&app_state.conn, a, "https://remote.test/notes/1")).?;
+    try std.testing.expectEqualStrings(deleted_ts, st2.deleted_at.?);
 }
 
 fn extractBetween(haystack: []const u8, start: []const u8, end: []const u8) ?[]const u8 {

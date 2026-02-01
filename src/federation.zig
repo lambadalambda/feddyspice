@@ -482,7 +482,9 @@ pub fn acceptInboundFollow(
 }
 
 pub fn deliverStatusToFollowers(app_state: *app.App, allocator: std.mem.Allocator, user: users.User, st: statuses.Status) Error!void {
+    app_state.logger.debug("deliverStatusToFollowers: user_id={d}", .{user.id});
     const follower_ids = try followers.listAcceptedRemoteActorIds(&app_state.conn, allocator, user.id, 200);
+    app_state.logger.debug("deliverStatusToFollowers: followers={d}", .{follower_ids.len});
     if (follower_ids.len == 0) return;
 
     const base = try baseUrlAlloc(app_state, allocator);
@@ -526,16 +528,38 @@ pub fn deliverStatusToFollowers(app_state: *app.App, allocator: std.mem.Allocato
     const keys = try actor_keys.ensureForUser(&app_state.conn, allocator, user.id);
 
     for (follower_ids) |remote_actor_id| {
-        const actor = remote_actors.lookupById(&app_state.conn, allocator, remote_actor_id) catch continue;
-        if (actor == null) continue;
+        const actor = remote_actors.lookupById(&app_state.conn, allocator, remote_actor_id) catch |err| {
+            app_state.logger.err("deliverStatusToFollowers: lookup remote actor failed actor_id={s} err={any}", .{ remote_actor_id, err });
+            continue;
+        };
+        if (actor == null) {
+            app_state.logger.err("deliverStatusToFollowers: remote actor missing actor_id={s}", .{remote_actor_id});
+            continue;
+        }
 
         const inbox_url = actor.?.inbox;
-        const inbox_uri = std.Uri.parse(inbox_url) catch continue;
-        const inbox_target = requestTargetAlloc(allocator, inbox_uri) catch continue;
+        app_state.logger.debug("deliverStatusToFollowers: inbox={s}", .{inbox_url});
+        const inbox_uri = std.Uri.parse(inbox_url) catch |err| {
+            app_state.logger.err("deliverStatusToFollowers: invalid inbox url={s} err={any}", .{ inbox_url, err });
+            continue;
+        };
+        const inbox_target = requestTargetAlloc(allocator, inbox_uri) catch |err| {
+            app_state.logger.err("deliverStatusToFollowers: requestTargetAlloc failed inbox={s} err={any}", .{ inbox_url, err });
+            continue;
+        };
 
-        const inbox_host_part = inbox_uri.host orelse continue;
-        const inbox_host = inbox_host_part.toRawMaybeAlloc(allocator) catch continue;
-        const inbox_host_header = hostHeaderAlloc(allocator, inbox_host, inbox_uri.port, app_state.cfg.scheme) catch continue;
+        const inbox_host_part = inbox_uri.host orelse {
+            app_state.logger.err("deliverStatusToFollowers: inbox url missing host url={s}", .{inbox_url});
+            continue;
+        };
+        const inbox_host = inbox_host_part.toRawMaybeAlloc(allocator) catch |err| {
+            app_state.logger.err("deliverStatusToFollowers: toRawMaybeAlloc failed inbox={s} err={any}", .{ inbox_url, err });
+            continue;
+        };
+        const inbox_host_header = hostHeaderAlloc(allocator, inbox_host, inbox_uri.port, app_state.cfg.scheme) catch |err| {
+            app_state.logger.err("deliverStatusToFollowers: hostHeaderAlloc failed inbox={s} err={any}", .{ inbox_url, err });
+            continue;
+        };
 
         const signed = http_signatures.signRequest(
             allocator,
@@ -546,7 +570,10 @@ pub fn deliverStatusToFollowers(app_state: *app.App, allocator: std.mem.Allocato
             inbox_host_header,
             create_body,
             std.time.timestamp(),
-        ) catch continue;
+        ) catch |err| {
+            app_state.logger.err("deliverStatusToFollowers: signRequest failed inbox={s} err={any}", .{ inbox_url, err });
+            continue;
+        };
 
         _ = fetchBodyAlloc(
             &client,
@@ -566,7 +593,123 @@ pub fn deliverStatusToFollowers(app_state: *app.App, allocator: std.mem.Allocato
                 .{ .name = "signature", .value = signed.signature },
             },
             create_body,
-        ) catch continue;
+        ) catch |err| {
+            app_state.logger.err("deliverStatusToFollowers: deliver failed inbox={s} err={any}", .{ inbox_url, err });
+            continue;
+        };
+    }
+}
+
+pub fn deliverDeleteToFollowers(app_state: *app.App, allocator: std.mem.Allocator, user: users.User, st: statuses.Status) Error!void {
+    if (st.deleted_at == null) return;
+
+    const follower_ids = try followers.listAcceptedRemoteActorIds(&app_state.conn, allocator, user.id, 200);
+    if (follower_ids.len == 0) return;
+
+    const base = try baseUrlAlloc(app_state, allocator);
+    const local_actor_id = try std.fmt.allocPrint(allocator, "{s}/users/{s}", .{ base, user.username });
+    const key_id = try std.fmt.allocPrint(allocator, "{s}#main-key", .{local_actor_id});
+    const followers_url = try std.fmt.allocPrint(allocator, "{s}/users/{s}/followers", .{ base, user.username });
+
+    const status_url = try std.fmt.allocPrint(allocator, "{s}/users/{s}/statuses/{d}", .{ base, user.username, st.id });
+    const delete_id = try std.fmt.allocPrint(allocator, "{s}#delete", .{status_url});
+
+    const to = [_][]const u8{"https://www.w3.org/ns/activitystreams#Public"};
+    const cc = [_][]const u8{followers_url};
+
+    const payload = .{
+        .@"@context" = "https://www.w3.org/ns/activitystreams",
+        .id = delete_id,
+        .type = "Delete",
+        .actor = local_actor_id,
+        .to = to[0..],
+        .cc = cc[0..],
+        .object = .{
+            .id = status_url,
+            .type = "Tombstone",
+            .formerType = "Note",
+            .deleted = st.deleted_at.?,
+        },
+    };
+
+    const delete_body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch
+        return error.OutOfMemory;
+
+    var client = try initHttpClient(allocator, app_state.cfg.ca_cert_file);
+    defer client.deinit();
+
+    const keys = try actor_keys.ensureForUser(&app_state.conn, allocator, user.id);
+
+    for (follower_ids) |remote_actor_id| {
+        const actor = remote_actors.lookupById(&app_state.conn, allocator, remote_actor_id) catch |err| {
+            app_state.logger.err("deliverDeleteToFollowers: lookup remote actor failed actor_id={s} err={any}", .{ remote_actor_id, err });
+            continue;
+        };
+        if (actor == null) {
+            app_state.logger.err("deliverDeleteToFollowers: remote actor missing actor_id={s}", .{remote_actor_id});
+            continue;
+        }
+
+        const inbox_url = actor.?.inbox;
+        app_state.logger.debug("deliverDeleteToFollowers: inbox={s}", .{inbox_url});
+        const inbox_uri = std.Uri.parse(inbox_url) catch |err| {
+            app_state.logger.err("deliverDeleteToFollowers: invalid inbox url={s} err={any}", .{ inbox_url, err });
+            continue;
+        };
+        const inbox_target = requestTargetAlloc(allocator, inbox_uri) catch |err| {
+            app_state.logger.err("deliverDeleteToFollowers: requestTargetAlloc failed inbox={s} err={any}", .{ inbox_url, err });
+            continue;
+        };
+
+        const inbox_host_part = inbox_uri.host orelse {
+            app_state.logger.err("deliverDeleteToFollowers: inbox url missing host url={s}", .{inbox_url});
+            continue;
+        };
+        const inbox_host = inbox_host_part.toRawMaybeAlloc(allocator) catch |err| {
+            app_state.logger.err("deliverDeleteToFollowers: toRawMaybeAlloc failed inbox={s} err={any}", .{ inbox_url, err });
+            continue;
+        };
+        const inbox_host_header = hostHeaderAlloc(allocator, inbox_host, inbox_uri.port, app_state.cfg.scheme) catch |err| {
+            app_state.logger.err("deliverDeleteToFollowers: hostHeaderAlloc failed inbox={s} err={any}", .{ inbox_url, err });
+            continue;
+        };
+
+        const signed = http_signatures.signRequest(
+            allocator,
+            keys.private_key_pem,
+            key_id,
+            .POST,
+            inbox_target,
+            inbox_host_header,
+            delete_body,
+            std.time.timestamp(),
+        ) catch |err| {
+            app_state.logger.err("deliverDeleteToFollowers: signRequest failed inbox={s} err={any}", .{ inbox_url, err });
+            continue;
+        };
+
+        _ = fetchBodyAlloc(
+            &client,
+            allocator,
+            inbox_url,
+            .POST,
+            .{
+                .host = .{ .override = inbox_host_header },
+                .content_type = .{ .override = "application/activity+json" },
+                .accept_encoding = .omit,
+                .user_agent = .{ .override = "feddyspice" },
+            },
+            &.{
+                .{ .name = "accept", .value = "application/activity+json" },
+                .{ .name = "date", .value = signed.date },
+                .{ .name = "digest", .value = signed.digest },
+                .{ .name = "signature", .value = signed.signature },
+            },
+            delete_body,
+        ) catch |err| {
+            app_state.logger.err("deliverDeleteToFollowers: deliver failed inbox={s} err={any}", .{ inbox_url, err });
+            continue;
+        };
     }
 }
 

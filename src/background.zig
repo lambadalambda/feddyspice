@@ -89,12 +89,21 @@ pub fn deliverStatusToFollowers(
     user_id: i64,
     status_id: i64,
 ) void {
+    app_state.logger.debug("deliverStatusToFollowers: in_memory={any} user_id={d} status_id={d}", .{ isInMemory(app_state), user_id, status_id });
     if (isInMemory(app_state)) {
-        const user = users.lookupUserById(&app_state.conn, allocator, user_id) catch null;
+        const user = users.lookupUserById(&app_state.conn, allocator, user_id) catch |err| {
+            app_state.logger.err("deliverStatusToFollowers: user lookup err={any}", .{err});
+            return;
+        };
         if (user == null) return;
-        const st = statuses.lookup(&app_state.conn, allocator, status_id) catch null;
+        const st = statuses.lookup(&app_state.conn, allocator, status_id) catch |err| {
+            app_state.logger.err("deliverStatusToFollowers: status lookup err={any}", .{err});
+            return;
+        };
         if (st == null) return;
-        federation.deliverStatusToFollowers(app_state, allocator, user.?, st.?) catch {};
+        federation.deliverStatusToFollowers(app_state, allocator, user.?, st.?) catch |err| {
+            app_state.logger.err("deliverStatusToFollowers: delivery failed err={any}", .{err});
+        };
         return;
     }
 
@@ -109,6 +118,38 @@ pub fn deliverStatusToFollowers(
     };
 
     var t = std.Thread.spawn(.{}, DeliverStatusJob.run, .{job}) catch return;
+    t.detach();
+}
+
+pub fn deliverDeleteToFollowers(
+    app_state: *app.App,
+    allocator: std.mem.Allocator,
+    user_id: i64,
+    status_id: i64,
+) void {
+    if (isInMemory(app_state)) {
+        const user = users.lookupUserById(&app_state.conn, allocator, user_id) catch null;
+        if (user == null) return;
+        const st = statuses.lookupIncludingDeleted(&app_state.conn, allocator, status_id) catch null;
+        if (st == null) return;
+        if (st.?.deleted_at == null) return;
+        federation.deliverDeleteToFollowers(app_state, allocator, user.?, st.?) catch |err| {
+            app_state.logger.err("deliverDeleteToFollowers: delivery failed err={any}", .{err});
+        };
+        return;
+    }
+
+    const job = std.heap.page_allocator.create(DeliverDeleteJob) catch return;
+    errdefer std.heap.page_allocator.destroy(job);
+
+    job.* = .{
+        .cfg = app_state.cfg,
+        .logger = app_state.logger,
+        .user_id = user_id,
+        .status_id = status_id,
+    };
+
+    var t = std.Thread.spawn(.{}, DeliverDeleteJob.run, .{job}) catch return;
     t.detach();
 }
 
@@ -214,5 +255,38 @@ const DeliverStatusJob = struct {
         if (st == null) return;
 
         federation.deliverStatusToFollowers(&thread_app, a, user.?, st.?) catch {};
+    }
+};
+
+const DeliverDeleteJob = struct {
+    cfg: config.Config,
+    logger: *log.Logger,
+    user_id: i64,
+    status_id: i64,
+
+    fn run(job: *@This()) void {
+        defer std.heap.page_allocator.destroy(job);
+
+        var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+
+        var conn = db.Db.open(a, job.cfg.db_path) catch return;
+        defer conn.close();
+
+        var thread_app: app.App = .{
+            .allocator = a,
+            .cfg = job.cfg,
+            .conn = conn,
+            .logger = job.logger,
+        };
+
+        const user = users.lookupUserById(&thread_app.conn, a, job.user_id) catch null;
+        if (user == null) return;
+        const st = statuses.lookupIncludingDeleted(&thread_app.conn, a, job.status_id) catch null;
+        if (st == null) return;
+        if (st.?.deleted_at == null) return;
+
+        federation.deliverDeleteToFollowers(&thread_app, a, user.?, st.?) catch {};
     }
 };
