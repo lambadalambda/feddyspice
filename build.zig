@@ -14,11 +14,23 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const c_flags = &[_][]const u8{
+        "-std=c99",
+        "-I/opt/homebrew/include",
+        "-I/usr/local/include",
+    };
+
+    const sqlite_bind_c: std.Build.Module.CSourceFile = .{
+        .file = b.path("src/sqlite_bind.c"),
+        .flags = c_flags,
+    };
+
     const mod = b.addModule("feddyspice", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
     });
+    mod.addCSourceFile(sqlite_bind_c);
     mod.linkSystemLibrary("c", .{});
     mod.linkSystemLibrary("sqlite3", .{});
     mod.linkSystemLibrary("crypto", .{});

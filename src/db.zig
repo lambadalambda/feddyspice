@@ -4,6 +4,9 @@ const c = @cImport({
     @cInclude("sqlite3.h");
 });
 
+extern fn feddyspice_bind_text_transient(stmt: *c.sqlite3_stmt, idx: c_int, value: [*c]const u8, n: c_int) c_int;
+extern fn feddyspice_bind_blob_transient(stmt: *c.sqlite3_stmt, idx: c_int, value: ?*const anyopaque, n: c_int) c_int;
+
 pub const Error = error{
     Sqlite,
 };
@@ -77,24 +80,14 @@ pub const Stmt = struct {
     }
 
     pub fn bindText(s: *Stmt, index: usize, value: []const u8) Error!void {
-        const rc = c.sqlite3_bind_text(
-            s.stmt,
-            @intCast(index),
-            value.ptr,
-            @intCast(value.len),
-            null,
-        );
+        const ptr: [*c]const u8 = if (value.len == 0) "" else value.ptr;
+        const rc = feddyspice_bind_text_transient(s.stmt, @intCast(index), ptr, @intCast(value.len));
         if (rc != c.SQLITE_OK) return error.Sqlite;
     }
 
     pub fn bindBlob(s: *Stmt, index: usize, value: []const u8) Error!void {
-        const rc = c.sqlite3_bind_blob(
-            s.stmt,
-            @intCast(index),
-            value.ptr,
-            @intCast(value.len),
-            null,
-        );
+        const ptr: ?*const anyopaque = if (value.len == 0) null else @ptrCast(value.ptr);
+        const rc = feddyspice_bind_blob_transient(s.stmt, @intCast(index), ptr, @intCast(value.len));
         if (rc != c.SQLITE_OK) return error.Sqlite;
     }
 
