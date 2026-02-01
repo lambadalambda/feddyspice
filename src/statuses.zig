@@ -64,6 +64,28 @@ pub fn lookup(conn: *db.Db, allocator: std.mem.Allocator, id: i64) Error!?Status
     };
 }
 
+pub fn lookupIncludingDeleted(conn: *db.Db, allocator: std.mem.Allocator, id: i64) Error!?Status {
+    var stmt = try conn.prepareZ(
+        "SELECT id, user_id, text, visibility, created_at, deleted_at FROM statuses WHERE id = ?1 LIMIT 1;\x00",
+    );
+    defer stmt.finalize();
+    try stmt.bindInt64(1, id);
+
+    switch (try stmt.step()) {
+        .done => return null,
+        .row => {},
+    }
+
+    return .{
+        .id = stmt.columnInt64(0),
+        .user_id = stmt.columnInt64(1),
+        .text = try allocator.dupe(u8, stmt.columnText(2)),
+        .visibility = try allocator.dupe(u8, stmt.columnText(3)),
+        .created_at = try allocator.dupe(u8, stmt.columnText(4)),
+        .deleted_at = if (stmt.columnType(5) == .null) null else try allocator.dupe(u8, stmt.columnText(5)),
+    };
+}
+
 pub fn listByUser(
     conn: *db.Db,
     allocator: std.mem.Allocator,
@@ -159,6 +181,7 @@ test "create + list + lookup" {
 
     try std.testing.expect(try markDeleted(&conn, s2.id, user_id));
     try std.testing.expect((try lookup(&conn, a, s2.id)) == null);
+    try std.testing.expect((try lookupIncludingDeleted(&conn, a, s2.id)).?.deleted_at != null);
 
     const list2 = try listByUser(&conn, a, user_id, 10, null);
     try std.testing.expectEqual(@as(usize, 1), list2.len);

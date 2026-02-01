@@ -884,7 +884,7 @@ fn userStatusGet(app_state: *app.App, allocator: std.mem.Allocator, path: []cons
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
     if (user == null) return .{ .status = .not_found, .body = "not found\n" };
 
-    const st = statuses.lookup(&app_state.conn, allocator, id) catch
+    const st = statuses.lookupIncludingDeleted(&app_state.conn, allocator, id) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
     if (st == null) return .{ .status = .not_found, .body = "not found\n" };
     if (st.?.user_id != user.?.id) return .{ .status = .not_found, .body = "not found\n" };
@@ -899,6 +899,24 @@ fn userStatusGet(app_state: *app.App, allocator: std.mem.Allocator, path: []cons
 
     const note_id = std.fmt.allocPrint(allocator, "{s}/users/{s}/statuses/{d}", .{ base, username, st.?.id }) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    if (st.?.deleted_at) |deleted_at| {
+        const payload = .{
+            .@"@context" = "https://www.w3.org/ns/activitystreams",
+            .id = note_id,
+            .type = "Tombstone",
+            .formerType = "Note",
+            .deleted = deleted_at,
+        };
+
+        const body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+        return .{
+            .content_type = "application/activity+json; charset=utf-8",
+            .body = body,
+        };
+    }
 
     const to = [_][]const u8{"https://www.w3.org/ns/activitystreams#Public"};
     const cc = [_][]const u8{followers_url};
@@ -3244,6 +3262,60 @@ test "statuses: delete" {
         .authorization = auth_header,
     });
     try std.testing.expectEqual(std.http.Status.not_found, get_resp.status);
+}
+
+test "ActivityPub: deleted local status returns Tombstone" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const app_creds = try oauth.createApp(
+        &app_state.conn,
+        a,
+        "pl-fe",
+        "urn:ietf:wg:oauth:2.0:oob",
+        "read write",
+        "",
+    );
+    const token = try oauth.createAccessToken(&app_state.conn, a, app_creds.id, user_id, "read write");
+    const auth_header = try std.fmt.allocPrint(a, "Bearer {s}", .{token});
+
+    const create_resp = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/api/v1/statuses",
+        .content_type = "application/x-www-form-urlencoded",
+        .body = "status=bye&visibility=public",
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, create_resp.status);
+
+    var create_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, create_resp.body, .{});
+    defer create_json.deinit();
+    const id = create_json.value.object.get("id").?.string;
+
+    const del_target = try std.fmt.allocPrint(a, "/api/v1/statuses/{s}", .{id});
+    const del_resp = handle(&app_state, a, .{
+        .method = .DELETE,
+        .target = del_target,
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, del_resp.status);
+
+    const ap_target = try std.fmt.allocPrint(a, "/users/alice/statuses/{s}", .{id});
+    const ap_resp = handle(&app_state, a, .{ .method = .GET, .target = ap_target });
+    try std.testing.expectEqual(std.http.Status.ok, ap_resp.status);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, ap_resp.body, .{});
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("Tombstone", parsed.value.object.get("type").?.string);
+    try std.testing.expect(parsed.value.object.get("deleted") != null);
 }
 
 test "remote statuses: appear in home timeline and can be fetched" {
