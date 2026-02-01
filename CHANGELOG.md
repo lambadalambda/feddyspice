@@ -48,3 +48,4 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - OAuth redirect parameters and hidden form fields are more robust via percent-encoding + HTML escaping.
 - Account payloads include valid `url`/`avatar_static`/`header`/`header_static` values for pl-fe validation, with placeholder image endpoints.
 - `GET /api/v2/instance` includes `configuration.urls` and `configuration.polls` to avoid Elk client crashes.
+- `GET /api/v1/markers` includes required `updated_at`, and status payloads include `sensitive` (pl-fe validation).

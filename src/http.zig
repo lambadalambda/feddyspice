@@ -232,9 +232,10 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
 
     if (std.mem.eql(u8, path, "/api/v1/markers")) {
         if (req.method == .GET or req.method == .POST) {
+            const updated_at = "1970-01-01T00:00:00.000Z";
             return jsonOk(allocator, .{
-                .home = .{ .last_read_id = "0", .version = 0 },
-                .notifications = .{ .last_read_id = "0", .version = 0 },
+                .home = .{ .last_read_id = "0", .version = 0, .updated_at = updated_at },
+                .notifications = .{ .last_read_id = "0", .version = 0, .updated_at = updated_at },
             });
         }
     }
@@ -1288,6 +1289,7 @@ const StatusPayload = struct {
     created_at: []const u8,
     content: []const u8,
     visibility: []const u8,
+    sensitive: bool,
     uri: []const u8,
     url: []const u8,
     account: AccountPayload,
@@ -1341,6 +1343,7 @@ fn makeStatusPayload(app_state: *app.App, allocator: std.mem.Allocator, user: us
         .created_at = st.created_at,
         .content = html_content,
         .visibility = st.visibility,
+        .sensitive = false,
         .uri = uri,
         .url = uri,
         .account = acct,
@@ -1387,6 +1390,7 @@ fn makeRemoteStatusPayload(
         .created_at = st.created_at,
         .content = st.content_html,
         .visibility = st.visibility,
+        .sensitive = false,
         .uri = st.remote_uri,
         .url = st.remote_uri,
         .account = acct,
@@ -2081,6 +2085,7 @@ test "client compat: placeholder endpoints return JSON" {
             const notif = parsed.value.object.get("notifications").?.object;
             try std.testing.expect(notif.get("last_read_id") != null);
             try std.testing.expect(notif.get("version") != null);
+            try std.testing.expect(notif.get("updated_at") != null);
         }
     }
 }
@@ -2707,6 +2712,7 @@ test "statuses: create + get + home timeline" {
         "http://example.test/static/header.png",
         create_json.value.object.get("account").?.object.get("header_static").?.string,
     );
+    try std.testing.expectEqual(@as(bool, false), create_json.value.object.get("sensitive").?.bool);
 
     const expected_uri = try std.fmt.allocPrint(a, "http://example.test/api/v1/statuses/{s}", .{id});
     try std.testing.expectEqualStrings(expected_uri, create_json.value.object.get("uri").?.string);
