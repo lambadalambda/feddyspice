@@ -91,6 +91,10 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
         return webfinger(app_state, allocator, req);
     }
 
+    if (req.method == .GET and std.mem.eql(u8, path, "/.well-known/host-meta")) {
+        return hostMeta(app_state, allocator);
+    }
+
     if (req.method == .GET and std.mem.eql(u8, path, "/.well-known/nodeinfo")) {
         return nodeinfoDiscovery(app_state, allocator);
     }
@@ -462,6 +466,27 @@ fn baseUrlAlloc(app_state: *app.App, allocator: std.mem.Allocator) ![]u8 {
         @tagName(app_state.cfg.scheme),
         app_state.cfg.domain,
     });
+}
+
+fn hostMeta(app_state: *app.App, allocator: std.mem.Allocator) Response {
+    const scheme = @tagName(app_state.cfg.scheme);
+    const domain = app_state.cfg.domain;
+
+    const body = std.fmt.allocPrint(
+        allocator,
+        \\<?xml version="1.0" encoding="UTF-8"?>
+        \\<XRD xmlns="http://docs.oasis-open.org/ns/xri/xrd-1.0">
+        \\  <Link rel="lrdd" type="application/jrd+json" template="{s}://{s}/.well-known/webfinger?resource={{uri}}" />
+        \\</XRD>
+        \\
+    ,
+        .{ scheme, domain },
+    ) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    return .{
+        .content_type = "application/xrd+xml; charset=utf-8",
+        .body = body,
+    };
 }
 
 fn defaultAvatarUrlAlloc(app_state: *app.App, allocator: std.mem.Allocator) ![]u8 {
@@ -4375,6 +4400,24 @@ test "GET /.well-known/webfinger returns actor self link" {
     try std.testing.expectEqual(@as(usize, 1), links.len);
     try std.testing.expectEqualStrings("self", links[0].object.get("rel").?.string);
     try std.testing.expectEqualStrings("http://example.test/users/alice", links[0].object.get("href").?.string);
+}
+
+test "GET /.well-known/host-meta advertises WebFinger template" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const resp = handle(&app_state, arena.allocator(), .{
+        .method = .GET,
+        .target = "/.well-known/host-meta",
+    });
+    try std.testing.expectEqual(std.http.Status.ok, resp.status);
+
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, ".well-known/webfinger") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "http://example.test") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "{uri}") != null);
 }
 
 test "GET /.well-known/nodeinfo returns discovery document" {
