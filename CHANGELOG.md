@@ -46,6 +46,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - ActivityPub `Delete` deliveries to followers when local statuses are deleted.
 - ActivityPub inbox handling for `Delete` to mark remote statuses deleted.
 - Timeline pagination (`max_id`, `since_id`, `min_id`) with `Link` headers on home/public timelines.
+- `GET /api/v2/search` resolves acct handles via WebFinger (enables finding remote accounts in pl-fe/Elk).
+- `POST /api/v1/accounts/:id/follow` and `POST /api/v1/accounts/:id/unfollow` for client follow UX.
+- Stable, path-safe numeric IDs for remote accounts (SQLite `rowid`-based offset).
+- `zig build test -Dtest-filter="..."` support for faster test iteration.
 
 ### Fixed
 
@@ -59,3 +63,5 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `GET /api/v2/instance` includes `configuration.urls` and `configuration.polls` to avoid Elk client crashes.
 - `GET /api/v1/markers` includes required `updated_at`, and status payloads include `sensitive` (pl-fe validation).
 - SQLite statements bind text/blob as `SQLITE_TRANSIENT` to avoid pointer lifetime issues.
+- Inbound ActivityPub `Create` no longer silently ignores unknown actors when the activity is addressed to the local actor.
+- Inbound ActivityPub `Create` infers `direct` vs `public` visibility based on recipients.
