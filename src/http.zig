@@ -171,6 +171,74 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
         };
     }
 
+    // --- Client-compat placeholders (Elk/pl-fe) ---
+    if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/custom_emojis")) {
+        return jsonOk(allocator, [_]i32{});
+    }
+
+    if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/notifications")) {
+        return jsonOk(allocator, [_]i32{});
+    }
+
+    if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/follow_requests")) {
+        return jsonOk(allocator, [_]i32{});
+    }
+
+    if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/scheduled_statuses")) {
+        return jsonOk(allocator, [_]i32{});
+    }
+
+    if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/lists")) {
+        return jsonOk(allocator, [_]i32{});
+    }
+
+    if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/announcements")) {
+        return jsonOk(allocator, [_]i32{});
+    }
+
+    if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/trends/tags")) {
+        return jsonOk(allocator, [_]i32{});
+    }
+
+    if (req.method == .GET and std.mem.eql(u8, path, "/api/v2/filters")) {
+        return jsonOk(allocator, [_]i32{});
+    }
+
+    if (req.method == .GET and std.mem.eql(u8, path, "/api/v2/suggestions")) {
+        return jsonOk(allocator, [_]i32{});
+    }
+
+    if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/followed_tags")) {
+        return jsonOk(allocator, [_]i32{});
+    }
+
+    if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/preferences")) {
+        const payload: struct {} = .{};
+        return jsonOk(allocator, payload);
+    }
+
+    if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/push/subscription")) {
+        const payload: struct {} = .{};
+        return jsonOk(allocator, payload);
+    }
+
+    if (req.method == .GET and std.mem.eql(u8, path, "/api/v2/search")) {
+        return jsonOk(allocator, .{
+            .accounts = [_]i32{},
+            .statuses = [_]i32{},
+            .hashtags = [_]i32{},
+        });
+    }
+
+    if (std.mem.eql(u8, path, "/api/v1/markers")) {
+        if (req.method == .GET or req.method == .POST) {
+            return jsonOk(allocator, .{
+                .home = .{ .last_read_id = "0", .version = 0 },
+                .notifications = .{ .last_read_id = "0", .version = 0 },
+            });
+        }
+    }
+
     if (req.method == .POST and std.mem.eql(u8, path, "/api/v1/apps")) {
         var parsed = parseBodyParams(allocator, req) catch
             return .{ .status = .bad_request, .body = "invalid form\n" };
@@ -1379,6 +1447,16 @@ fn apiFollow(app_state: *app.App, allocator: std.mem.Allocator, req: Request) Re
     };
 }
 
+fn jsonOk(allocator: std.mem.Allocator, payload: anytype) Response {
+    const body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    return .{
+        .content_type = "application/json; charset=utf-8",
+        .body = body,
+    };
+}
+
 fn bearerToken(authorization: ?[]const u8) ?[]const u8 {
     const h = authorization orelse return null;
     const prefix = "Bearer ";
@@ -1857,6 +1935,76 @@ test "GET /api/v2/instance -> 200 with domain" {
         .integer => |i| try std.testing.expectEqual(@as(i64, 4), i),
         .float => |f| try std.testing.expectEqual(@as(f64, 4), f),
         else => return error.TestUnexpectedResult,
+    }
+}
+
+test "client compat: placeholder endpoints return JSON" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const Kind = enum { array, object };
+    const Case = struct {
+        method: std.http.Method,
+        target: []const u8,
+        kind: Kind,
+        require_key: ?[]const u8 = null,
+    };
+
+    const cases = [_]Case{
+        .{ .method = .GET, .target = "/api/v1/custom_emojis", .kind = .array },
+        .{ .method = .GET, .target = "/api/v1/notifications?types[]=follow", .kind = .array },
+        .{ .method = .GET, .target = "/api/v1/follow_requests", .kind = .array },
+        .{ .method = .GET, .target = "/api/v1/scheduled_statuses", .kind = .array },
+        .{ .method = .GET, .target = "/api/v1/lists", .kind = .array },
+        .{ .method = .GET, .target = "/api/v1/announcements", .kind = .array },
+        .{ .method = .GET, .target = "/api/v1/trends/tags", .kind = .array },
+        .{ .method = .GET, .target = "/api/v2/filters", .kind = .array },
+        .{ .method = .GET, .target = "/api/v2/suggestions?", .kind = .array },
+        .{ .method = .GET, .target = "/api/v1/followed_tags", .kind = .array },
+        .{ .method = .GET, .target = "/api/v1/preferences", .kind = .object },
+        .{ .method = .GET, .target = "/api/v1/push/subscription", .kind = .object },
+        .{ .method = .GET, .target = "/api/v2/search?q=https%3A%2F%2Fexample.test%2F&resolve=true&limit=1", .kind = .object, .require_key = "accounts" },
+        .{ .method = .GET, .target = "/api/v1/markers?timeline[]=notifications", .kind = .object, .require_key = "notifications" },
+        .{ .method = .POST, .target = "/api/v1/markers", .kind = .object, .require_key = "notifications" },
+    };
+
+    for (cases) |tc| {
+        const resp = handle(&app_state, a, .{
+            .method = tc.method,
+            .target = tc.target,
+            .content_type = if (tc.method == .POST) "application/json" else null,
+            .body = if (tc.method == .POST) "{}" else "",
+        });
+
+        try std.testing.expectEqual(std.http.Status.ok, resp.status);
+        try std.testing.expect(std.mem.startsWith(u8, resp.content_type, "application/json"));
+
+        var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, resp.body, .{});
+        defer parsed.deinit();
+
+        const tag = std.meta.activeTag(parsed.value);
+        switch (tc.kind) {
+            .array => {
+                try std.testing.expect(tag == .array);
+            },
+            .object => {
+                try std.testing.expect(tag == .object);
+            },
+        }
+
+        if (tc.require_key) |k| {
+            try std.testing.expect(parsed.value.object.get(k) != null);
+        }
+
+        if (std.mem.eql(u8, tc.target, "/api/v1/markers?timeline[]=notifications") or std.mem.eql(u8, tc.target, "/api/v1/markers")) {
+            const notif = parsed.value.object.get("notifications").?.object;
+            try std.testing.expect(notif.get("last_read_id") != null);
+            try std.testing.expect(notif.get("version") != null);
+        }
     }
 }
 
