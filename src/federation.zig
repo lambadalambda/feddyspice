@@ -716,6 +716,7 @@ pub fn deliverDeleteToFollowers(app_state: *app.App, allocator: std.mem.Allocato
 test "followHandle sends signed Follow to remote inbox" {
     const net = std.net;
     const http = std.http;
+    const posix = std.posix;
 
     const listen_address = try net.Address.parseIp("127.0.0.1", 0);
     var listener = try listen_address.listen(.{ .reuse_address = true });
@@ -751,6 +752,15 @@ test "followHandle sends signed Follow to remote inbox" {
             var seen_inbox = false;
 
             while (!(seen_webfinger and seen_actor and seen_inbox)) {
+                var fds = [_]posix.pollfd{
+                    .{ .fd = ctx.listener.stream.handle, .events = posix.POLL.IN, .revents = 0 },
+                };
+                const ready = try posix.poll(&fds, 5000);
+                if (ready == 0) {
+                    ctx.ok = false;
+                    return;
+                }
+
                 var conn = try ctx.listener.accept();
                 defer conn.stream.close();
 
