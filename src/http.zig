@@ -2270,6 +2270,20 @@ fn apiFollow(app_state: *app.App, allocator: std.mem.Allocator, req: Request) Re
         else => return .{ .status = .internal_server_error, .body = "internal server error\n" },
     };
 
+    // Idempotent behavior: if the follow already exists, just return the account.
+    const existing = follows.lookupByUserAndRemoteActorId(&app_state.conn, allocator, info.?.user_id, actor.id) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (existing != null) {
+        const api_id = remoteAccountApiIdAlloc(app_state, allocator, actor.id);
+        const payload = makeRemoteAccountPayload(app_state, allocator, api_id, actor);
+        const body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        return .{
+            .content_type = "application/json; charset=utf-8",
+            .body = body,
+        };
+    }
+
     const base = baseUrlAlloc(app_state, allocator) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
 
