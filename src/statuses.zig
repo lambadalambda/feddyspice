@@ -12,6 +12,7 @@ pub const Status = struct {
     text: []const u8,
     visibility: []const u8,
     created_at: []const u8,
+    deleted_at: ?[]const u8,
 };
 
 pub fn create(
@@ -43,7 +44,7 @@ pub fn create(
 
 pub fn lookup(conn: *db.Db, allocator: std.mem.Allocator, id: i64) Error!?Status {
     var stmt = try conn.prepareZ(
-        "SELECT id, user_id, text, visibility, created_at FROM statuses WHERE id = ?1 LIMIT 1;\x00",
+        "SELECT id, user_id, text, visibility, created_at, deleted_at FROM statuses WHERE id = ?1 AND deleted_at IS NULL LIMIT 1;\x00",
     );
     defer stmt.finalize();
     try stmt.bindInt64(1, id);
@@ -59,6 +60,7 @@ pub fn lookup(conn: *db.Db, allocator: std.mem.Allocator, id: i64) Error!?Status
         .text = try allocator.dupe(u8, stmt.columnText(2)),
         .visibility = try allocator.dupe(u8, stmt.columnText(3)),
         .created_at = try allocator.dupe(u8, stmt.columnText(4)),
+        .deleted_at = if (stmt.columnType(5) == .null) null else try allocator.dupe(u8, stmt.columnText(5)),
     };
 }
 
@@ -73,7 +75,7 @@ pub fn listByUser(
     const lim: i64 = @intCast(@min(limit, 200));
 
     var stmt = try conn.prepareZ(
-        "SELECT id, user_id, text, visibility, created_at FROM statuses WHERE user_id = ?1 AND id < ?2 ORDER BY id DESC LIMIT ?3;\x00",
+        "SELECT id, user_id, text, visibility, created_at, deleted_at FROM statuses WHERE user_id = ?1 AND id < ?2 AND deleted_at IS NULL ORDER BY id DESC LIMIT ?3;\x00",
     );
     defer stmt.finalize();
 
@@ -94,12 +96,30 @@ pub fn listByUser(
                     .text = try allocator.dupe(u8, stmt.columnText(2)),
                     .visibility = try allocator.dupe(u8, stmt.columnText(3)),
                     .created_at = try allocator.dupe(u8, stmt.columnText(4)),
+                    .deleted_at = if (stmt.columnType(5) == .null) null else try allocator.dupe(u8, stmt.columnText(5)),
                 });
             },
         }
     }
 
     return out.toOwnedSlice(allocator);
+}
+
+pub fn markDeleted(conn: *db.Db, id: i64, user_id: i64) db.Error!bool {
+    var stmt = try conn.prepareZ(
+        "UPDATE statuses SET deleted_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?1 AND user_id = ?2 AND deleted_at IS NULL;\x00",
+    );
+    defer stmt.finalize();
+
+    try stmt.bindInt64(1, id);
+    try stmt.bindInt64(2, user_id);
+
+    switch (try stmt.step()) {
+        .done => {},
+        .row => return error.Sqlite,
+    }
+
+    return conn.changes() > 0;
 }
 
 test "create + list + lookup" {
@@ -136,4 +156,11 @@ test "create + list + lookup" {
     try std.testing.expectEqual(@as(usize, 2), list.len);
     try std.testing.expectEqualStrings("world", list[0].text);
     try std.testing.expectEqualStrings("hello", list[1].text);
+
+    try std.testing.expect(try markDeleted(&conn, s2.id, user_id));
+    try std.testing.expect((try lookup(&conn, a, s2.id)) == null);
+
+    const list2 = try listByUser(&conn, a, user_id, 10, null);
+    try std.testing.expectEqual(@as(usize, 1), list2.len);
+    try std.testing.expectEqualStrings("hello", list2[0].text);
 }

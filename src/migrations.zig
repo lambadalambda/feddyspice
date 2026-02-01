@@ -89,6 +89,11 @@ const migrations = [_]Migration{
         .name = "create_followers",
         .sql = followers_v8_sql,
     },
+    .{
+        .version = 9,
+        .name = "add_deleted_at",
+        .sql = deleted_at_v9_sql,
+    },
 };
 
 const schema_migrations_sql: [:0]const u8 =
@@ -236,6 +241,13 @@ const followers_v8_sql: [:0]const u8 =
     \\CREATE UNIQUE INDEX IF NOT EXISTS followers_user_remote_actor_id ON followers(user_id, remote_actor_id);
 ++ "\x00";
 
+const deleted_at_v9_sql: [:0]const u8 =
+    \\ALTER TABLE statuses ADD COLUMN deleted_at TEXT;
+    \\ALTER TABLE remote_statuses ADD COLUMN deleted_at TEXT;
+    \\CREATE INDEX IF NOT EXISTS statuses_user_id_deleted_at ON statuses(user_id, deleted_at);
+    \\CREATE INDEX IF NOT EXISTS remote_statuses_remote_actor_id_deleted_at ON remote_statuses(remote_actor_id, deleted_at);
+++ "\x00";
+
 test "migrate: creates users table and records version" {
     var conn = try db.Db.openZ(":memory:");
     defer conn.close();
@@ -268,6 +280,8 @@ test "migrate: creates users table and records version" {
     try std.testing.expectEqual(@as(i64, 7), v_stmt.columnInt64(0));
     try std.testing.expectEqual(db.Stmt.Step.row, try v_stmt.step());
     try std.testing.expectEqual(@as(i64, 8), v_stmt.columnInt64(0));
+    try std.testing.expectEqual(db.Stmt.Step.row, try v_stmt.step());
+    try std.testing.expectEqual(@as(i64, 9), v_stmt.columnInt64(0));
     try std.testing.expectEqual(db.Stmt.Step.done, try v_stmt.step());
 }
 
@@ -282,6 +296,6 @@ test "migrate: is idempotent" {
     defer stmt.finalize();
 
     try std.testing.expectEqual(db.Stmt.Step.row, try stmt.step());
-    try std.testing.expectEqual(@as(i64, 8), stmt.columnInt64(0));
+    try std.testing.expectEqual(@as(i64, 9), stmt.columnInt64(0));
     try std.testing.expectEqual(db.Stmt.Step.done, try stmt.step());
 }

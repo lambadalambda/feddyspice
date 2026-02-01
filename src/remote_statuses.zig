@@ -11,6 +11,7 @@ pub const RemoteStatus = struct {
     content_html: []const u8,
     visibility: []const u8,
     created_at: []const u8,
+    deleted_at: ?[]const u8,
 };
 
 fn nextNegativeId(conn: *db.Db) db.Error!i64 {
@@ -29,7 +30,7 @@ fn nextNegativeId(conn: *db.Db) db.Error!i64 {
 
 pub fn lookup(conn: *db.Db, allocator: std.mem.Allocator, id: i64) Error!?RemoteStatus {
     var stmt = try conn.prepareZ(
-        "SELECT id, remote_uri, remote_actor_id, content_html, visibility, created_at FROM remote_statuses WHERE id = ?1 LIMIT 1;\x00",
+        "SELECT id, remote_uri, remote_actor_id, content_html, visibility, created_at, deleted_at FROM remote_statuses WHERE id = ?1 AND deleted_at IS NULL LIMIT 1;\x00",
     );
     defer stmt.finalize();
     try stmt.bindInt64(1, id);
@@ -46,12 +47,13 @@ pub fn lookup(conn: *db.Db, allocator: std.mem.Allocator, id: i64) Error!?Remote
         .content_html = try allocator.dupe(u8, stmt.columnText(3)),
         .visibility = try allocator.dupe(u8, stmt.columnText(4)),
         .created_at = try allocator.dupe(u8, stmt.columnText(5)),
+        .deleted_at = if (stmt.columnType(6) == .null) null else try allocator.dupe(u8, stmt.columnText(6)),
     };
 }
 
 pub fn lookupByUri(conn: *db.Db, allocator: std.mem.Allocator, remote_uri: []const u8) Error!?RemoteStatus {
     var stmt = try conn.prepareZ(
-        "SELECT id, remote_uri, remote_actor_id, content_html, visibility, created_at FROM remote_statuses WHERE remote_uri = ?1 LIMIT 1;\x00",
+        "SELECT id, remote_uri, remote_actor_id, content_html, visibility, created_at, deleted_at FROM remote_statuses WHERE remote_uri = ?1 AND deleted_at IS NULL LIMIT 1;\x00",
     );
     defer stmt.finalize();
     try stmt.bindText(1, remote_uri);
@@ -68,6 +70,7 @@ pub fn lookupByUri(conn: *db.Db, allocator: std.mem.Allocator, remote_uri: []con
         .content_html = try allocator.dupe(u8, stmt.columnText(3)),
         .visibility = try allocator.dupe(u8, stmt.columnText(4)),
         .created_at = try allocator.dupe(u8, stmt.columnText(5)),
+        .deleted_at = if (stmt.columnType(6) == .null) null else try allocator.dupe(u8, stmt.columnText(6)),
     };
 }
 
@@ -108,7 +111,7 @@ pub fn listLatest(conn: *db.Db, allocator: std.mem.Allocator, limit: usize) Erro
     const lim: i64 = @intCast(@min(limit, 200));
 
     var stmt = try conn.prepareZ(
-        "SELECT id, remote_uri, remote_actor_id, content_html, visibility, created_at FROM remote_statuses ORDER BY id DESC LIMIT ?1;\x00",
+        "SELECT id, remote_uri, remote_actor_id, content_html, visibility, created_at, deleted_at FROM remote_statuses WHERE deleted_at IS NULL ORDER BY id DESC LIMIT ?1;\x00",
     );
     defer stmt.finalize();
     try stmt.bindInt64(1, lim);
@@ -127,6 +130,7 @@ pub fn listLatest(conn: *db.Db, allocator: std.mem.Allocator, limit: usize) Erro
                     .content_html = try allocator.dupe(u8, stmt.columnText(3)),
                     .visibility = try allocator.dupe(u8, stmt.columnText(4)),
                     .created_at = try allocator.dupe(u8, stmt.columnText(5)),
+                    .deleted_at = if (stmt.columnType(6) == .null) null else try allocator.dupe(u8, stmt.columnText(6)),
                 });
             },
         }
