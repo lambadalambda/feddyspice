@@ -947,6 +947,35 @@ fn userStatusGet(app_state: *app.App, allocator: std.mem.Allocator, path: []cons
     };
 }
 
+fn jsonContainsIri(v: ?std.json.Value, needle: []const u8) bool {
+    const val = v orelse return false;
+    const want = trimTrailingSlash(needle);
+
+    switch (val) {
+        .string => |s| return std.mem.eql(u8, trimTrailingSlash(s), want),
+        .object => |o| {
+            const id_val = o.get("id") orelse return false;
+            if (id_val != .string) return false;
+            return std.mem.eql(u8, trimTrailingSlash(id_val.string), want);
+        },
+        .array => |arr| {
+            for (arr.items) |item| {
+                switch (item) {
+                    .string => |s| if (std.mem.eql(u8, trimTrailingSlash(s), want)) return true,
+                    .object => |o| {
+                        const id_val = o.get("id") orelse continue;
+                        if (id_val != .string) continue;
+                        if (std.mem.eql(u8, trimTrailingSlash(id_val.string), want)) return true;
+                    },
+                    else => continue,
+                }
+            }
+            return false;
+        },
+        else => return false,
+    }
+}
+
 fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: Request, path: []const u8) Response {
     const prefix = "/users/";
     const suffix = "/inbox";
@@ -994,7 +1023,7 @@ fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: Request, pa
             break :blk p.string;
         };
 
-        const remote_actor = blk: {
+        var remote_actor = blk: {
             if (remote_actors.lookupById(&app_state.conn, allocator, actor_val.string) catch
                 return .{ .status = .internal_server_error, .body = "internal server error\n" }) |found|
             {
@@ -1020,7 +1049,42 @@ fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: Request, pa
 
             break :blk null;
         };
-        if (remote_actor == null) return .{ .status = .accepted, .body = "ignored\n" };
+
+        if (remote_actor == null) {
+            const base = baseUrlAlloc(app_state, allocator) catch
+                return .{ .status = .internal_server_error, .body = "internal server error\n" };
+            const local_actor_id = std.fmt.allocPrint(allocator, "{s}/users/{s}", .{ base, username }) catch
+                return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+            const addressed =
+                jsonContainsIri(parsed.value.object.get("to"), local_actor_id) or
+                jsonContainsIri(parsed.value.object.get("cc"), local_actor_id) or
+                jsonContainsIri(obj.object.get("to"), local_actor_id) or
+                jsonContainsIri(obj.object.get("cc"), local_actor_id);
+
+            if (!addressed) return .{ .status = .accepted, .body = "ignored\n" };
+
+            remote_actor = federation.ensureRemoteActorById(app_state, allocator, actor_val.string) catch null;
+            if (remote_actor == null) return .{ .status = .accepted, .body = "ignored\n" };
+        }
+
+        const visibility: []const u8 = blk: {
+            const has_recipients =
+                (parsed.value.object.get("to") != null) or
+                (parsed.value.object.get("cc") != null) or
+                (obj.object.get("to") != null) or
+                (obj.object.get("cc") != null);
+            if (!has_recipients) break :blk "public";
+
+            const public_iri = "https://www.w3.org/ns/activitystreams#Public";
+            const is_public =
+                jsonContainsIri(parsed.value.object.get("to"), public_iri) or
+                jsonContainsIri(parsed.value.object.get("cc"), public_iri) or
+                jsonContainsIri(obj.object.get("to"), public_iri) or
+                jsonContainsIri(obj.object.get("cc"), public_iri);
+            if (is_public) break :blk "public";
+            break :blk "direct";
+        };
 
         _ = remote_statuses.createIfNotExists(
             &app_state.conn,
@@ -1028,7 +1092,7 @@ fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: Request, pa
             note_id_val.string,
             remote_actor.?.id,
             content_val.string,
-            "public",
+            visibility,
             created_at,
         ) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
 
@@ -4387,6 +4451,7 @@ test "GET /users/:name returns ActivityPub actor" {
 test "POST /users/:name/inbox Follow stores follower and sends Accept" {
     const net = std.net;
     const http = std.http;
+    const posix = std.posix;
 
     const listen_address = try net.Address.parseIp("127.0.0.1", 0);
     var listener = try listen_address.listen(.{ .reuse_address = true });
@@ -4422,6 +4487,15 @@ test "POST /users/:name/inbox Follow stores follower and sends Accept" {
             var seen_inbox = false;
 
             while (!(seen_actor and seen_inbox)) {
+                var fds = [_]posix.pollfd{
+                    .{ .fd = ctx.listener.stream.handle, .events = posix.POLL.IN, .revents = 0 },
+                };
+                const ready = try posix.poll(&fds, 5000);
+                if (ready == 0) {
+                    ctx.ok = false;
+                    return;
+                }
+
                 var conn = try ctx.listener.accept();
                 defer conn.stream.close();
 
@@ -5152,6 +5226,116 @@ test "POST /users/:name/inbox Accept marks follow accepted" {
     try std.testing.expectEqual(follows.FollowState.accepted, follow.state);
 }
 
+test "POST /users/:name/inbox Create discovers actor when addressed" {
+    const net = std.net;
+    const http = std.http;
+    const posix = std.posix;
+
+    const listen_address = try net.Address.parseIp("127.0.0.1", 0);
+    var listener = try listen_address.listen(.{ .reuse_address = true });
+    defer listener.deinit();
+
+    const addr = listener.listen_address;
+    const port = addr.in.getPort();
+
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    _ = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    const ServerCtx = struct {
+        listener: *net.Server,
+        port: u16,
+        ok: bool = true,
+
+        fn run(ctx: *@This()) !void {
+            var fds = [_]posix.pollfd{
+                .{ .fd = ctx.listener.stream.handle, .events = posix.POLL.IN, .revents = 0 },
+            };
+            const ready = try posix.poll(&fds, 5000);
+            if (ready == 0) {
+                ctx.ok = false;
+                return;
+            }
+
+            var buf: [16 * 1024]u8 = undefined;
+            var out: [16 * 1024]u8 = undefined;
+
+            var conn = try ctx.listener.accept();
+            defer conn.stream.close();
+
+            var reader = net.Stream.Reader.init(conn.stream, &buf);
+            var writer = net.Stream.Writer.init(conn.stream, &out);
+
+            var server = http.Server.init(reader.interface(), &writer.interface);
+            var request = try server.receiveHead();
+
+            const method = request.head.method;
+            const target = request.head.target;
+
+            var conn_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+            defer conn_arena.deinit();
+            const a = conn_arena.allocator();
+
+            if (method != .GET or !std.mem.eql(u8, target, "/users/bob")) {
+                ctx.ok = false;
+                try request.respond("not found\n", .{
+                    .status = .not_found,
+                    .keep_alive = false,
+                    .extra_headers = &.{
+                        .{ .name = "content-type", .value = "text/plain" },
+                    },
+                });
+                return;
+            }
+
+            const resp_body = try std.fmt.allocPrint(
+                a,
+                "{{\"@context\":\"https://www.w3.org/ns/activitystreams\",\"id\":\"http://127.0.0.1:{d}/users/bob\",\"type\":\"Person\",\"preferredUsername\":\"bob\",\"inbox\":\"http://127.0.0.1:{d}/users/bob/inbox\",\"publicKey\":{{\"id\":\"http://127.0.0.1:{d}/users/bob#main-key\",\"owner\":\"http://127.0.0.1:{d}/users/bob\",\"publicKeyPem\":\"-----BEGIN PUBLIC KEY-----\\\\n...\\\\n-----END PUBLIC KEY-----\\\\n\"}}}}",
+                .{ ctx.port, ctx.port, ctx.port, ctx.port },
+            );
+            try request.respond(resp_body, .{
+                .status = .ok,
+                .keep_alive = false,
+                .extra_headers = &.{
+                    .{ .name = "content-type", .value = "application/activity+json" },
+                },
+            });
+        }
+    };
+
+    var ctx: ServerCtx = .{ .listener = &listener, .port = port };
+    var t = try std.Thread.spawn(.{}, ServerCtx.run, .{&ctx});
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const actor_id = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}/users/bob", .{port});
+
+    const body = try std.fmt.allocPrint(
+        a,
+        "{{\"@context\":\"https://www.w3.org/ns/activitystreams\",\"type\":\"Create\",\"actor\":\"{s}\",\"to\":[\"http://example.test/users/alice\"],\"object\":{{\"id\":\"https://remote.test/notes/1\",\"type\":\"Note\",\"content\":\"<p>Hello</p>\",\"published\":\"2020-01-01T00:00:00.000Z\"}}}}",
+        .{actor_id},
+    );
+
+    const resp = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/users/alice/inbox",
+        .content_type = "application/activity+json",
+        .body = body,
+    });
+    try std.testing.expectEqual(std.http.Status.accepted, resp.status);
+
+    t.join();
+    try std.testing.expect(ctx.ok);
+
+    try std.testing.expect((try remote_actors.lookupById(&app_state.conn, a, actor_id)) != null);
+    const st = (try remote_statuses.lookupByUri(&app_state.conn, a, "https://remote.test/notes/1")).?;
+    try std.testing.expectEqualStrings("direct", st.visibility);
+}
+
 test "POST /users/:name/inbox Create stores remote status" {
     var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
     defer app_state.deinit();
@@ -5187,6 +5371,7 @@ test "POST /users/:name/inbox Create stores remote status" {
     const st = (try remote_statuses.lookupByUri(&app_state.conn, a, "https://remote.test/notes/1")).?;
     try std.testing.expect(st.id < 0);
     try std.testing.expectEqualStrings("<p>Hello</p>", st.content_html);
+    try std.testing.expectEqualStrings("public", st.visibility);
 }
 
 test "POST /users/:name/inbox Delete marks remote status deleted" {

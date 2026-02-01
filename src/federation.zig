@@ -193,7 +193,7 @@ fn parseActorDoc(allocator: std.mem.Allocator, body: []const u8, expected_domain
     };
 }
 
-fn ensureRemoteActorById(app_state: *app.App, allocator: std.mem.Allocator, actor_id: []const u8) Error!remote_actors.RemoteActor {
+pub fn ensureRemoteActorById(app_state: *app.App, allocator: std.mem.Allocator, actor_id: []const u8) Error!remote_actors.RemoteActor {
     if (try remote_actors.lookupById(&app_state.conn, allocator, actor_id)) |existing| return existing;
 
     var client = try initHttpClient(allocator, app_state.cfg.ca_cert_file);
