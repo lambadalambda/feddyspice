@@ -41,6 +41,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Accounts relationships endpoint (`GET /api/v1/accounts/relationships`).
 - Account statuses endpoint (`GET /api/v1/accounts/:id/statuses`).
 - Soft-delete support for local + remote statuses (`deleted_at`).
+- Delete local status endpoint (`DELETE /api/v1/statuses/:id`).
 
 ### Fixed
 

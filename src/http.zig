@@ -446,6 +446,10 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
         return getStatus(app_state, allocator, req, path);
     }
 
+    if (req.method == .DELETE and std.mem.startsWith(u8, path, "/api/v1/statuses/")) {
+        return deleteStatus(app_state, allocator, req, path);
+    }
+
     return .{ .status = .not_found, .body = "not found\n" };
 }
 
@@ -1268,6 +1272,32 @@ fn getStatus(app_state: *app.App, allocator: std.mem.Allocator, req: Request, pa
     const user = users.lookupUserById(&app_state.conn, allocator, info.?.user_id) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
     if (user == null) return unauthorized(allocator);
+
+    return statusResponse(app_state, allocator, user.?, st.?);
+}
+
+fn deleteStatus(app_state: *app.App, allocator: std.mem.Allocator, req: Request, path: []const u8) Response {
+    const token = bearerToken(req.authorization) orelse return unauthorized(allocator);
+    const info = oauth.verifyAccessToken(&app_state.conn, allocator, token) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (info == null) return unauthorized(allocator);
+
+    const id_str = path["/api/v1/statuses/".len..];
+    const id = std.fmt.parseInt(i64, id_str, 10) catch return .{ .status = .not_found, .body = "not found\n" };
+    if (id < 0) return .{ .status = .not_found, .body = "not found\n" };
+
+    const st = statuses.lookup(&app_state.conn, allocator, id) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (st == null) return .{ .status = .not_found, .body = "not found\n" };
+    if (st.?.user_id != info.?.user_id) return .{ .status = .not_found, .body = "not found\n" };
+
+    const user = users.lookupUserById(&app_state.conn, allocator, info.?.user_id) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (user == null) return unauthorized(allocator);
+
+    const ok = statuses.markDeleted(&app_state.conn, id, info.?.user_id) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (!ok) return .{ .status = .not_found, .body = "not found\n" };
 
     return statusResponse(app_state, allocator, user.?, st.?);
 }
@@ -3163,6 +3193,57 @@ test "timelines: public timeline returns local statuses" {
     try std.testing.expect(tl_json.value == .array);
     try std.testing.expectEqual(@as(usize, 1), tl_json.value.array.items.len);
     try std.testing.expectEqualStrings(id, tl_json.value.array.items[0].object.get("id").?.string);
+}
+
+test "statuses: delete" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const app_creds = try oauth.createApp(
+        &app_state.conn,
+        a,
+        "pl-fe",
+        "urn:ietf:wg:oauth:2.0:oob",
+        "read write",
+        "",
+    );
+    const token = try oauth.createAccessToken(&app_state.conn, a, app_creds.id, user_id, "read write");
+    const auth_header = try std.fmt.allocPrint(a, "Bearer {s}", .{token});
+
+    const create_resp = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/api/v1/statuses",
+        .content_type = "application/x-www-form-urlencoded",
+        .body = "status=bye&visibility=public",
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, create_resp.status);
+
+    var create_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, create_resp.body, .{});
+    defer create_json.deinit();
+    const id = create_json.value.object.get("id").?.string;
+
+    const del_target = try std.fmt.allocPrint(a, "/api/v1/statuses/{s}", .{id});
+    const del_resp = handle(&app_state, a, .{
+        .method = .DELETE,
+        .target = del_target,
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, del_resp.status);
+
+    const get_resp = handle(&app_state, a, .{
+        .method = .GET,
+        .target = del_target,
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.not_found, get_resp.status);
 }
 
 test "remote statuses: appear in home timeline and can be fetched" {

@@ -26,7 +26,7 @@ Target: pl-fe can log in and post/read.
 - [x] Accounts: verify credentials
 - [x] Accounts: profile lookup (`GET /api/v1/accounts/lookup`, `GET /api/v1/accounts/:id`)
 - [x] Posting: create status
-- [ ] Posting: delete status
+- [x] Posting: delete status
 - [x] Timelines: home (minimal)
 - [x] Timelines: public (basic)
 - [ ] Timelines: pagination (Link headers; `since_id`/`min_id`/`max_id`)
@@ -104,7 +104,7 @@ This is the “eventually” list. We should keep it scoped to what pl-fe needs,
 
 ### Statuses
 
-- [ ] `DELETE /api/v1/statuses/:id` (delete local status)
+- [x] `DELETE /api/v1/statuses/:id` (delete local status)
 - [ ] `GET /api/v1/statuses/:id/context`
 - [ ] `POST /api/v1/statuses/:id/favourite` + `POST /api/v1/statuses/:id/unfavourite`
 - [ ] `POST /api/v1/statuses/:id/reblog` + `POST /api/v1/statuses/:id/unreblog`
