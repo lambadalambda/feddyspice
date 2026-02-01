@@ -371,11 +371,36 @@ def feddyspice_home_timeline(feddyspice_base_url: str, access_token: str) -> lis
     return data
 
 
+def feddyspice_public_timeline(feddyspice_base_url: str) -> list[dict]:
+    resp = requests.get(
+        f"{feddyspice_base_url}/api/v1/timelines/public",
+        verify=verify_arg(),
+        timeout=10,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if not isinstance(data, list):
+        raise TypeError("expected list timeline")
+    return data
+
+
 def pleroma_post(pleroma_base_url: str, access_token: str, text: str) -> None:
     resp = requests.post(
         f"{pleroma_base_url}/api/v1/statuses",
         headers={"authorization": f"Bearer {access_token}"},
         data={"status": text, "visibility": "public"},
+        verify=verify_arg(),
+        timeout=10,
+    )
+    resp.raise_for_status()
+
+
+def pleroma_post_direct(pleroma_base_url: str, access_token: str, to_handle: str, text: str) -> None:
+    full_text = f"{to_handle} {text}"
+    resp = requests.post(
+        f"{pleroma_base_url}/api/v1/statuses",
+        headers={"authorization": f"Bearer {access_token}"},
+        data={"status": full_text, "visibility": "direct"},
         verify=verify_arg(),
         timeout=10,
     )
@@ -563,4 +588,92 @@ def test_feddyspice_post_reaches_pleroma_follower():
         desc="pleroma received remote post from feddyspice",
         timeout_s=240,
         interval_s=2.0,
+    )
+
+
+def test_pleroma_direct_to_feddyspice_is_received_and_not_public():
+    c = cfg()
+
+    feddy_user, feddy_domain = parse_handle(c.feddyspice_handle)
+    pleroma_user, pleroma_domain = parse_handle(c.pleroma_handle)
+
+    feddy_base_url = base_url_for(feddy_domain)
+    pleroma_base_url = base_url_for(pleroma_domain)
+    scopes = "read write follow"
+
+    feddy_token = create_feddyspice_token(feddy_base_url, feddy_user, c.password, scopes)
+
+    # Ensure the follow is established (reproduces real usage; DMs often happen after a follow).
+    feddyspice_follow(feddy_base_url, feddy_token, c.pleroma_handle)
+
+    feddy_actor_id = webfinger_self_href(feddy_user, feddy_domain)
+    pleroma_actor_id = webfinger_self_href(pleroma_user, pleroma_domain)
+
+    assert feddy_actor_id
+    assert pleroma_actor_id
+
+    pleroma_actor_id_variants = id_variants(pleroma_actor_id)
+
+    wait_until(
+        lambda: any(v in following_id_set(feddy_actor_id) for v in pleroma_actor_id_variants),
+        desc=f"follow accepted {c.feddyspice_handle} -> {c.pleroma_handle}",
+        timeout_s=240,
+    )
+
+    marker = f"[fedbox] pleroma -> feddyspice direct {time.time()}"
+
+    # Note: the Pleroma build used by this fedbox does not create remote mentions
+    # from plain `@user@domain` text, so `visibility=direct` via Mastodon API
+    # does not federate to remote inboxes. We simulate the direct delivery by
+    # posting an ActivityPub `Create` to the feddyspice inbox, using the Pleroma
+    # actor as the sender.
+    actor = fetch_ap_json(feddy_actor_id)
+    inbox = actor.get("inbox")
+    assert isinstance(inbox, str) and inbox
+
+    note_id = f"{pleroma_base_url}/objects/{time.time()}"
+    activity_id = f"{pleroma_base_url}/activities/{time.time()}"
+
+    create = {
+        "@context": "https://www.w3.org/ns/activitystreams",
+        "id": activity_id,
+        "type": "Create",
+        "actor": pleroma_actor_id,
+        "to": [feddy_actor_id],
+        "object": {
+            "id": note_id,
+            "type": "Note",
+            "content": f"<p>{marker}</p>",
+            "published": "2020-01-01T00:00:00.000Z",
+            "to": [feddy_actor_id],
+        },
+    }
+
+    deliver = requests.post(
+        inbox,
+        headers={"content-type": "application/activity+json"},
+        json=create,
+        verify=verify_arg(),
+        timeout=10,
+    )
+    # feddyspice returns 202 Accepted for async inbox processing.
+    assert deliver.status_code in (200, 202)
+
+    wait_until(
+        lambda: any(
+            marker in html.unescape(item.get("content", ""))
+            for item in feddyspice_home_timeline(feddy_base_url, feddy_token)
+        ),
+        desc="feddyspice received direct message from pleroma",
+        timeout_s=240,
+        interval_s=2.0,
+    )
+
+    home = feddyspice_home_timeline(feddy_base_url, feddy_token)
+    dm = next(item for item in home if marker in html.unescape(item.get("content", "")))
+    assert dm.get("visibility") == "direct"
+
+    assert not any(
+        marker in html.unescape(item.get("content", ""))
+        for item in feddyspice_public_timeline(feddy_base_url)
     )
