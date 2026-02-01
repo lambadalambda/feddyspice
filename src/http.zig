@@ -1364,6 +1364,10 @@ fn oauthAuthorizeGet(app_state: *app.App, allocator: std.mem.Allocator, req: Req
     }
 
     const app_name = htmlEscapeAlloc(allocator, app_row.?.name) catch app_row.?.name;
+    const client_id_html = htmlEscapeAlloc(allocator, client_id) catch client_id;
+    const redirect_uri_html = htmlEscapeAlloc(allocator, redirect_uri) catch redirect_uri;
+    const scope_html = htmlEscapeAlloc(allocator, scope) catch scope;
+    const state_html = htmlEscapeAlloc(allocator, state) catch state;
 
     const page = std.fmt.allocPrint(
         allocator,
@@ -1378,7 +1382,7 @@ fn oauthAuthorizeGet(app_state: *app.App, allocator: std.mem.Allocator, req: Req
         \\  <button type="submit" name="deny" value="1">Deny</button>
         \\</form>
     ,
-        .{ app_name, client_id, redirect_uri, scope, state },
+        .{ app_name, client_id_html, redirect_uri_html, scope_html, state_html },
     ) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
 
     return htmlPage(allocator, "Authorize", page);
@@ -1435,34 +1439,52 @@ fn oauthAuthorizePost(app_state: *app.App, allocator: std.mem.Allocator, req: Re
 
 fn oauthToken(app_state: *app.App, allocator: std.mem.Allocator, req: Request) Response {
     var parsed = parseBodyParams(allocator, req) catch
-        return .{ .status = .bad_request, .body = "invalid form\n" };
+        return oauthErrorResponse(allocator, .bad_request, "invalid_request", "invalid form");
 
     const grant_type = parsed.get("grant_type") orelse "";
-    if (!std.mem.eql(u8, grant_type, "authorization_code")) {
-        return .{ .status = .bad_request, .body = "unsupported grant_type\n" };
+    if (!std.mem.eql(u8, std.mem.trim(u8, grant_type, " \t\r\n"), "authorization_code")) {
+        return oauthErrorResponse(allocator, .bad_request, "unsupported_grant_type", "unsupported grant_type");
     }
 
-    const code = parsed.get("code") orelse
-        return .{ .status = .bad_request, .body = "missing code\n" };
-    const client_id = parsed.get("client_id") orelse
-        return .{ .status = .bad_request, .body = "missing client_id\n" };
-    const client_secret = parsed.get("client_secret") orelse
-        return .{ .status = .bad_request, .body = "missing client_secret\n" };
-    const redirect_uri = parsed.get("redirect_uri") orelse
-        return .{ .status = .bad_request, .body = "missing redirect_uri\n" };
+    const code = std.mem.trim(u8, parsed.get("code") orelse
+        return oauthErrorResponse(allocator, .bad_request, "invalid_request", "missing code"), " \t\r\n");
+    const client_id = std.mem.trim(u8, parsed.get("client_id") orelse
+        return oauthErrorResponse(allocator, .bad_request, "invalid_request", "missing client_id"), " \t\r\n");
+    const client_secret = std.mem.trim(u8, parsed.get("client_secret") orelse
+        return oauthErrorResponse(allocator, .bad_request, "invalid_request", "missing client_secret"), " \t\r\n");
+    const redirect_uri = std.mem.trim(u8, parsed.get("redirect_uri") orelse
+        return oauthErrorResponse(allocator, .bad_request, "invalid_request", "missing redirect_uri"), " \t\r\n");
 
     const app_row = oauth.lookupAppByClientId(&app_state.conn, allocator, client_id) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
-    if (app_row == null) return .{ .status = .bad_request, .body = "unknown client_id\n" };
+    if (app_row == null) return oauthErrorResponse(allocator, .bad_request, "invalid_client", "unknown client_id");
     if (!std.mem.eql(u8, app_row.?.client_secret, client_secret)) {
-        return .{ .status = .unauthorized, .body = "invalid client_secret\n" };
+        return oauthErrorResponse(allocator, .unauthorized, "invalid_client", "invalid client_secret");
     }
 
     const consumed = oauth.consumeAuthCode(&app_state.conn, allocator, code) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
-    if (consumed == null) return .{ .status = .bad_request, .body = "invalid code\n" };
-    if (consumed.?.app_id != app_row.?.id) return .{ .status = .bad_request, .body = "invalid code\n" };
-    if (!std.mem.eql(u8, consumed.?.redirect_uri, redirect_uri)) return .{ .status = .bad_request, .body = "invalid code\n" };
+    if (consumed == null) {
+        app_state.logger.warn(
+            "oauth token invalid_code reason=not_found client_id={s} redirect_uri={s} code_prefix={s}",
+            .{ client_id, redirect_uri, code[0..@min(code.len, 8)] },
+        );
+        return oauthErrorResponse(allocator, .bad_request, "invalid_grant", "invalid code");
+    }
+    if (consumed.?.app_id != app_row.?.id) {
+        app_state.logger.warn(
+            "oauth token invalid_code reason=app_mismatch client_id={s} redirect_uri={s} code_prefix={s} consumed_app_id={d}",
+            .{ client_id, redirect_uri, code[0..@min(code.len, 8)], consumed.?.app_id },
+        );
+        return oauthErrorResponse(allocator, .bad_request, "invalid_grant", "invalid code");
+    }
+    if (!std.mem.eql(u8, consumed.?.redirect_uri, redirect_uri)) {
+        app_state.logger.warn(
+            "oauth token invalid_code reason=redirect_mismatch client_id={s} code_prefix={s} expected_redirect_uri={s} got_redirect_uri={s}",
+            .{ client_id, code[0..@min(code.len, 8)], consumed.?.redirect_uri, redirect_uri },
+        );
+        return oauthErrorResponse(allocator, .bad_request, "invalid_grant", "invalid code");
+    }
 
     const token = oauth.createAccessToken(&app_state.conn, allocator, app_row.?.id, consumed.?.user_id, consumed.?.scopes) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
@@ -1485,18 +1507,40 @@ fn oauthToken(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
 
 fn oauthCodeRedirect(allocator: std.mem.Allocator, redirect_uri: []const u8, code: []const u8, state: []const u8) ![]u8 {
     const sep: []const u8 = if (std.mem.indexOfScalar(u8, redirect_uri, '?') == null) "?" else "&";
+    const code_enc = try percentEncodeAlloc(allocator, code);
     if (state.len > 0) {
-        return std.fmt.allocPrint(allocator, "{s}{s}code={s}&state={s}", .{ redirect_uri, sep, code, state });
+        const state_enc = try percentEncodeAlloc(allocator, state);
+        return std.fmt.allocPrint(allocator, "{s}{s}code={s}&state={s}", .{ redirect_uri, sep, code_enc, state_enc });
     }
-    return std.fmt.allocPrint(allocator, "{s}{s}code={s}", .{ redirect_uri, sep, code });
+    return std.fmt.allocPrint(allocator, "{s}{s}code={s}", .{ redirect_uri, sep, code_enc });
 }
 
 fn oauthErrorRedirect(allocator: std.mem.Allocator, redirect_uri: []const u8, err: []const u8, state: []const u8) ![]u8 {
     const sep: []const u8 = if (std.mem.indexOfScalar(u8, redirect_uri, '?') == null) "?" else "&";
+    const err_enc = try percentEncodeAlloc(allocator, err);
     if (state.len > 0) {
-        return std.fmt.allocPrint(allocator, "{s}{s}error={s}&state={s}", .{ redirect_uri, sep, err, state });
+        const state_enc = try percentEncodeAlloc(allocator, state);
+        return std.fmt.allocPrint(allocator, "{s}{s}error={s}&state={s}", .{ redirect_uri, sep, err_enc, state_enc });
     }
-    return std.fmt.allocPrint(allocator, "{s}{s}error={s}", .{ redirect_uri, sep, err });
+    return std.fmt.allocPrint(allocator, "{s}{s}error={s}", .{ redirect_uri, sep, err_enc });
+}
+
+fn oauthErrorResponse(
+    allocator: std.mem.Allocator,
+    status: std.http.Status,
+    err_code: []const u8,
+    description: []const u8,
+) Response {
+    const body = std.json.Stringify.valueAlloc(
+        allocator,
+        .{ .@"error" = err_code, .error_description = description },
+        .{},
+    ) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    return .{
+        .status = status,
+        .content_type = "application/json; charset=utf-8",
+        .body = body,
+    };
 }
 
 fn currentUserId(app_state: *app.App, req: Request) !?i64 {
@@ -1925,6 +1969,124 @@ test "oauth: authorization code flow (oob)" {
 
     try std.testing.expect(token_json.value.object.get("access_token") != null);
     try std.testing.expectEqualStrings("Bearer", token_json.value.object.get("token_type").?.string);
+}
+
+test "oauth: authorization code flow (redirect uri)" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const redirect_uri_enc = "https%3A%2F%2Fpl.mkljczk.pl%2Flogin%2Fexternal";
+    const app_body = std.fmt.allocPrint(
+        a,
+        "client_name=pl-fe&redirect_uris={s}&scopes=read+write+follow&website=",
+        .{redirect_uri_enc},
+    ) catch return error.OutOfMemory;
+
+    const app_resp = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/api/v1/apps",
+        .content_type = "application/x-www-form-urlencoded",
+        .body = app_body,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, app_resp.status);
+
+    var app_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, app_resp.body, .{});
+    defer app_json.deinit();
+
+    const client_id = app_json.value.object.get("client_id").?.string;
+    const client_secret = app_json.value.object.get("client_secret").?.string;
+
+    const signup_resp = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/signup",
+        .content_type = "application/x-www-form-urlencoded",
+        .body = "username=alice&password=password",
+    });
+    try std.testing.expectEqual(std.http.Status.see_other, signup_resp.status);
+
+    var set_cookie: ?[]const u8 = null;
+    for (signup_resp.headers) |h| {
+        if (std.ascii.eqlIgnoreCase(h.name, "set-cookie")) set_cookie = h.value;
+    }
+    const token = sessions.parseCookie(set_cookie orelse return error.TestUnexpectedResult) orelse
+        return error.TestUnexpectedResult;
+
+    const cookie_header = std.fmt.allocPrint(a, "{s}={s}", .{ sessions.CookieName, token }) catch
+        return error.OutOfMemory;
+
+    const auth_post_body = std.fmt.allocPrint(
+        a,
+        "response_type=code&client_id={s}&redirect_uri={s}&scope=read+write&state=xyz&approve=1",
+        .{ client_id, redirect_uri_enc },
+    ) catch return error.OutOfMemory;
+
+    const auth_post = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/oauth/authorize",
+        .content_type = "application/x-www-form-urlencoded",
+        .body = auth_post_body,
+        .cookie = cookie_header,
+    });
+    try std.testing.expectEqual(std.http.Status.see_other, auth_post.status);
+
+    var location: ?[]const u8 = null;
+    for (auth_post.headers) |h| {
+        if (std.ascii.eqlIgnoreCase(h.name, "location")) location = h.value;
+    }
+    const loc = location orelse return error.TestUnexpectedResult;
+
+    const qs_idx = std.mem.indexOfScalar(u8, loc, '?') orelse return error.TestUnexpectedResult;
+    var qp = try form.parse(a, loc[qs_idx + 1 ..]);
+    const code = qp.get("code") orelse return error.TestUnexpectedResult;
+
+    const boundary = "----webkitboundary";
+    const token_body = std.fmt.allocPrint(
+        a,
+        "--{s}\r\n" ++
+            "Content-Disposition: form-data; name=\"grant_type\"\r\n" ++
+            "\r\n" ++
+            "authorization_code\r\n" ++
+            "--{s}\r\n" ++
+            "Content-Disposition: form-data; name=\"code\"\r\n" ++
+            "\r\n" ++
+            "{s}\r\n" ++
+            "--{s}\r\n" ++
+            "Content-Disposition: form-data; name=\"client_id\"\r\n" ++
+            "\r\n" ++
+            "{s}\r\n" ++
+            "--{s}\r\n" ++
+            "Content-Disposition: form-data; name=\"client_secret\"\r\n" ++
+            "\r\n" ++
+            "{s}\r\n" ++
+            "--{s}\r\n" ++
+            "Content-Disposition: form-data; name=\"redirect_uri\"\r\n" ++
+            "\r\n" ++
+            "https://pl.mkljczk.pl/login/external\r\n" ++
+            "--{s}--\r\n",
+        .{
+            boundary,
+            boundary,
+            code,
+            boundary,
+            client_id,
+            boundary,
+            client_secret,
+            boundary,
+            boundary,
+        },
+    ) catch return error.OutOfMemory;
+
+    const token_resp = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/oauth/token",
+        .content_type = "multipart/form-data; boundary=----webkitboundary",
+        .body = token_body,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, token_resp.status);
 }
 
 test "oauth: token endpoint accepts json" {

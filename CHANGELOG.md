@@ -41,3 +41,5 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Mastodon-ish API endpoints accept client JSON + multipart form-data bodies (pl-fe/Elk compatibility) and send permissive CORS headers.
 - Fedbox Docker network creation is more reliable via a configurable subnet (`FEDBOX_SUBNET`).
 - Fedbox smoke tests handle API differences between servers (follow fallback + HTML content entity decoding).
+- `/oauth/token` returns OAuth-style JSON errors and logs why auth-code exchange failed (helps debug pl-fe issues).
+- OAuth redirect parameters and hidden form fields are more robust via percent-encoding + HTML escaping.
