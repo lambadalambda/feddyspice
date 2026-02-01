@@ -407,6 +407,17 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
         return verifyCredentials(app_state, allocator, req);
     }
 
+    if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/accounts/lookup")) {
+        return accountLookup(app_state, allocator, req);
+    }
+
+    if (req.method == .GET and std.mem.startsWith(u8, path, "/api/v1/accounts/")) {
+        const rest = path["/api/v1/accounts/".len..];
+        if (std.mem.indexOfScalar(u8, rest, '/') == null) {
+            return accountGet(app_state, allocator, path);
+        }
+    }
+
     if (req.method == .POST and std.mem.eql(u8, path, "/api/v1/follows")) {
         return apiFollow(app_state, allocator, req);
     }
@@ -1442,6 +1453,81 @@ fn verifyCredentials(app_state: *app.App, allocator: std.mem.Allocator, req: Req
         .group = false,
         .discoverable = true,
         .created_at = user.?.created_at,
+        .followers_count = 0,
+        .following_count = 0,
+        .statuses_count = 0,
+        .avatar = avatar_url,
+        .avatar_static = avatar_url,
+        .header = header_url,
+        .header_static = header_url,
+    };
+
+    const body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    return .{
+        .content_type = "application/json; charset=utf-8",
+        .body = body,
+    };
+}
+
+fn accountLookup(app_state: *app.App, allocator: std.mem.Allocator, req: Request) Response {
+    const q = queryString(req.target);
+    const acct_param = parseQueryParam(allocator, q, "acct") catch
+        return .{ .status = .bad_request, .body = "invalid query\n" };
+    if (acct_param == null) return .{ .status = .bad_request, .body = "missing acct\n" };
+
+    var username = acct_param.?;
+    if (std.mem.indexOfScalar(u8, username, '@')) |at| {
+        const domain = username[at + 1 ..];
+        if (domain.len == 0) return .{ .status = .not_found, .body = "not found\n" };
+        if (!std.mem.eql(u8, domain, app_state.cfg.domain)) return .{ .status = .not_found, .body = "not found\n" };
+        username = username[0..at];
+    }
+    if (username.len == 0) return .{ .status = .not_found, .body = "not found\n" };
+
+    const user = users.lookupUserByUsername(&app_state.conn, allocator, username) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (user == null) return .{ .status = .not_found, .body = "not found\n" };
+
+    return accountByUser(app_state, allocator, user.?);
+}
+
+fn accountGet(app_state: *app.App, allocator: std.mem.Allocator, path: []const u8) Response {
+    const prefix = "/api/v1/accounts/";
+    if (!std.mem.startsWith(u8, path, prefix)) return .{ .status = .not_found, .body = "not found\n" };
+
+    const id_str = path[prefix.len..];
+    const id = std.fmt.parseInt(i64, id_str, 10) catch
+        return .{ .status = .not_found, .body = "not found\n" };
+
+    const user = users.lookupUserById(&app_state.conn, allocator, id) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (user == null) return .{ .status = .not_found, .body = "not found\n" };
+
+    return accountByUser(app_state, allocator, user.?);
+}
+
+fn accountByUser(app_state: *app.App, allocator: std.mem.Allocator, user: users.User) Response {
+    const id_str = std.fmt.allocPrint(allocator, "{d}", .{user.id}) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    const user_url = userUrlAlloc(app_state, allocator, user.username) catch "";
+    const avatar_url = defaultAvatarUrlAlloc(app_state, allocator) catch "";
+    const header_url = defaultHeaderUrlAlloc(app_state, allocator) catch "";
+
+    const payload: AccountPayload = .{
+        .id = id_str,
+        .username = user.username,
+        .acct = user.username,
+        .display_name = "",
+        .note = "",
+        .url = user_url,
+        .locked = false,
+        .bot = false,
+        .group = false,
+        .discoverable = true,
+        .created_at = user.created_at,
         .followers_count = 0,
         .following_count = 0,
         .statuses_count = 0,
@@ -2663,6 +2749,46 @@ test "GET /api/v1/accounts/verify_credentials works with bearer token" {
     try std.testing.expectEqualStrings("http://example.test/static/avatar.png", parsed.value.object.get("avatar_static").?.string);
     try std.testing.expectEqualStrings("http://example.test/static/header.png", parsed.value.object.get("header").?.string);
     try std.testing.expectEqualStrings("http://example.test/static/header.png", parsed.value.object.get("header_static").?.string);
+}
+
+test "accounts: lookup + get account" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const id_str = try std.fmt.allocPrint(a, "{d}", .{user_id});
+
+    const lookup_resp = handle(&app_state, a, .{
+        .method = .GET,
+        .target = "/api/v1/accounts/lookup?acct=alice",
+    });
+    try std.testing.expectEqual(std.http.Status.ok, lookup_resp.status);
+
+    var lookup_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, lookup_resp.body, .{});
+    defer lookup_json.deinit();
+
+    try std.testing.expectEqualStrings(id_str, lookup_json.value.object.get("id").?.string);
+    try std.testing.expectEqualStrings("alice", lookup_json.value.object.get("username").?.string);
+    try std.testing.expectEqualStrings("alice", lookup_json.value.object.get("acct").?.string);
+    try std.testing.expectEqualStrings("http://example.test/users/alice", lookup_json.value.object.get("url").?.string);
+
+    const get_target = try std.fmt.allocPrint(a, "/api/v1/accounts/{s}", .{id_str});
+    const get_resp = handle(&app_state, a, .{ .method = .GET, .target = get_target });
+    try std.testing.expectEqual(std.http.Status.ok, get_resp.status);
+
+    var get_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, get_resp.body, .{});
+    defer get_json.deinit();
+
+    try std.testing.expectEqualStrings(id_str, get_json.value.object.get("id").?.string);
+    try std.testing.expectEqualStrings("alice", get_json.value.object.get("username").?.string);
+    try std.testing.expectEqualStrings("alice", get_json.value.object.get("acct").?.string);
+    try std.testing.expectEqualStrings("http://example.test/users/alice", get_json.value.object.get("url").?.string);
 }
 
 test "statuses: create + get + home timeline" {
