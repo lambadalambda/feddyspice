@@ -3,6 +3,7 @@ zig-out/
 .zig-global-cache/
 zig-cache/
 *.sqlite3
+*.log
 .env
 .env.*
 !.env.example

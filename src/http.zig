@@ -16,6 +16,14 @@ const statuses = @import("statuses.zig");
 const users = @import("users.zig");
 const version = @import("version.zig");
 
+const transparent_png = [_]u8{
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x04, 0x00, 0x00, 0x00, 0xb5, 0x1c, 0x0c,
+    0x02, 0x00, 0x00, 0x00, 0x0b, 0x49, 0x44, 0x41, 0x54, 0x78, 0xda, 0x63, 0xfc, 0xff, 0x1f, 0x00,
+    0x03, 0x03, 0x02, 0x00, 0xef, 0xa4, 0xbe, 0x95, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44,
+    0xae, 0x42, 0x60, 0x82,
+};
+
 pub const Request = struct {
     method: std.http.Method,
     target: []const u8,
@@ -41,6 +49,20 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
 
     if (req.method == .GET and std.mem.eql(u8, path, "/healthz")) {
         return .{ .body = "ok\n" };
+    }
+
+    if (req.method == .GET and std.mem.eql(u8, path, "/static/avatar.png")) {
+        return .{
+            .content_type = "image/png",
+            .body = transparent_png[0..],
+        };
+    }
+
+    if (req.method == .GET and std.mem.eql(u8, path, "/static/header.png")) {
+        return .{
+            .content_type = "image/png",
+            .body = transparent_png[0..],
+        };
     }
 
     if (req.method == .GET and std.mem.eql(u8, path, "/")) {
@@ -328,6 +350,28 @@ fn baseUrlAlloc(app_state: *app.App, allocator: std.mem.Allocator) ![]u8 {
     return std.fmt.allocPrint(allocator, "{s}://{s}", .{
         @tagName(app_state.cfg.scheme),
         app_state.cfg.domain,
+    });
+}
+
+fn defaultAvatarUrlAlloc(app_state: *app.App, allocator: std.mem.Allocator) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{s}://{s}/static/avatar.png", .{
+        @tagName(app_state.cfg.scheme),
+        app_state.cfg.domain,
+    });
+}
+
+fn defaultHeaderUrlAlloc(app_state: *app.App, allocator: std.mem.Allocator) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{s}://{s}/static/header.png", .{
+        @tagName(app_state.cfg.scheme),
+        app_state.cfg.domain,
+    });
+}
+
+fn userUrlAlloc(app_state: *app.App, allocator: std.mem.Allocator, username: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{s}://{s}/users/{s}", .{
+        @tagName(app_state.cfg.scheme),
+        app_state.cfg.domain,
+        username,
     });
 }
 
@@ -1002,7 +1046,7 @@ fn homeTimeline(app_state: *app.App, allocator: std.mem.Allocator, req: Request)
             return .{ .status = .internal_server_error, .body = "internal server error\n" };
         if (actor == null) continue;
 
-        payloads.append(allocator, makeRemoteStatusPayload(allocator, actor.?, st)) catch return .{
+        payloads.append(allocator, makeRemoteStatusPayload(app_state, allocator, actor.?, st)) catch return .{
             .status = .internal_server_error,
             .body = "internal server error\n",
         };
@@ -1038,7 +1082,7 @@ fn getStatus(app_state: *app.App, allocator: std.mem.Allocator, req: Request, pa
             return .{ .status = .internal_server_error, .body = "internal server error\n" };
         if (actor == null) return .{ .status = .not_found, .body = "not found\n" };
 
-        return remoteStatusResponse(allocator, actor.?, st.?);
+        return remoteStatusResponse(app_state, allocator, actor.?, st.?);
     }
 
     const st = statuses.lookup(&app_state.conn, allocator, id) catch
@@ -1107,13 +1151,17 @@ fn makeStatusPayload(app_state: *app.App, allocator: std.mem.Allocator, user: us
 
     const html_content = textToHtmlAlloc(allocator, st.text) catch st.text;
 
+    const user_url = userUrlAlloc(app_state, allocator, user.username) catch "";
+    const avatar_url = defaultAvatarUrlAlloc(app_state, allocator) catch "";
+    const header_url = defaultHeaderUrlAlloc(app_state, allocator) catch "";
+
     const acct: AccountPayload = .{
         .id = user_id_str,
         .username = user.username,
         .acct = user.username,
         .display_name = "",
         .note = "",
-        .url = "",
+        .url = user_url,
         .locked = false,
         .bot = false,
         .group = false,
@@ -1122,16 +1170,13 @@ fn makeStatusPayload(app_state: *app.App, allocator: std.mem.Allocator, user: us
         .followers_count = 0,
         .following_count = 0,
         .statuses_count = 0,
-        .avatar = "",
-        .avatar_static = "",
-        .header = "",
-        .header_static = "",
+        .avatar = avatar_url,
+        .avatar_static = avatar_url,
+        .header = header_url,
+        .header_static = header_url,
     };
 
-    const base = std.fmt.allocPrint(allocator, "{s}://{s}", .{
-        @tagName(app_state.cfg.scheme),
-        app_state.cfg.domain,
-    }) catch "";
+    const base = baseUrlAlloc(app_state, allocator) catch "";
 
     const uri = std.fmt.allocPrint(allocator, "{s}/api/v1/statuses/{s}", .{ base, id_str }) catch "";
 
@@ -1147,6 +1192,7 @@ fn makeStatusPayload(app_state: *app.App, allocator: std.mem.Allocator, user: us
 }
 
 fn makeRemoteStatusPayload(
+    app_state: *app.App,
     allocator: std.mem.Allocator,
     actor: remote_actors.RemoteActor,
     st: remote_statuses.RemoteStatus,
@@ -1155,6 +1201,9 @@ fn makeRemoteStatusPayload(
 
     const acct_str = std.fmt.allocPrint(allocator, "{s}@{s}", .{ actor.preferred_username, actor.domain }) catch
         actor.preferred_username;
+
+    const avatar_url = defaultAvatarUrlAlloc(app_state, allocator) catch actor.id;
+    const header_url = defaultHeaderUrlAlloc(app_state, allocator) catch actor.id;
 
     const acct: AccountPayload = .{
         .id = actor.id,
@@ -1171,10 +1220,10 @@ fn makeRemoteStatusPayload(
         .followers_count = 0,
         .following_count = 0,
         .statuses_count = 0,
-        .avatar = "",
-        .avatar_static = "",
-        .header = "",
-        .header_static = "",
+        .avatar = avatar_url,
+        .avatar_static = avatar_url,
+        .header = header_url,
+        .header_static = header_url,
     };
 
     return .{
@@ -1188,8 +1237,8 @@ fn makeRemoteStatusPayload(
     };
 }
 
-fn remoteStatusResponse(allocator: std.mem.Allocator, actor: remote_actors.RemoteActor, st: remote_statuses.RemoteStatus) Response {
-    const payload = makeRemoteStatusPayload(allocator, actor, st);
+fn remoteStatusResponse(app_state: *app.App, allocator: std.mem.Allocator, actor: remote_actors.RemoteActor, st: remote_statuses.RemoteStatus) Response {
+    const payload = makeRemoteStatusPayload(app_state, allocator, actor, st);
     const body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
     return .{
@@ -1217,13 +1266,17 @@ fn verifyCredentials(app_state: *app.App, allocator: std.mem.Allocator, req: Req
     const id_str = std.fmt.allocPrint(allocator, "{d}", .{user.?.id}) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
 
+    const user_url = userUrlAlloc(app_state, allocator, user.?.username) catch "";
+    const avatar_url = defaultAvatarUrlAlloc(app_state, allocator) catch "";
+    const header_url = defaultHeaderUrlAlloc(app_state, allocator) catch "";
+
     const payload = .{
         .id = id_str,
         .username = user.?.username,
         .acct = user.?.username,
         .display_name = "",
         .note = "",
-        .url = "",
+        .url = user_url,
         .locked = false,
         .bot = false,
         .group = false,
@@ -1232,10 +1285,10 @@ fn verifyCredentials(app_state: *app.App, allocator: std.mem.Allocator, req: Req
         .followers_count = 0,
         .following_count = 0,
         .statuses_count = 0,
-        .avatar = "",
-        .avatar_static = "",
-        .header = "",
-        .header_static = "",
+        .avatar = avatar_url,
+        .avatar_static = avatar_url,
+        .header = header_url,
+        .header_static = header_url,
     };
 
     const body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch
@@ -1282,6 +1335,8 @@ fn apiFollow(app_state: *app.App, allocator: std.mem.Allocator, req: Request) Re
     background.sendFollow(app_state, allocator, info.?.user_id, actor.id, follow_activity_id);
 
     const acct = std.fmt.allocPrint(allocator, "{s}@{s}", .{ actor.preferred_username, actor.domain }) catch "";
+    const avatar_url = defaultAvatarUrlAlloc(app_state, allocator) catch actor.id;
+    const header_url = defaultHeaderUrlAlloc(app_state, allocator) catch actor.id;
 
     const payload = .{
         .id = actor.id,
@@ -1298,10 +1353,10 @@ fn apiFollow(app_state: *app.App, allocator: std.mem.Allocator, req: Request) Re
         .followers_count = 0,
         .following_count = 0,
         .statuses_count = 0,
-        .avatar = "",
-        .avatar_static = "",
-        .header = "",
-        .header_static = "",
+        .avatar = avatar_url,
+        .avatar_static = avatar_url,
+        .header = header_url,
+        .header_static = header_url,
     };
 
     const body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch
@@ -2351,6 +2406,10 @@ test "GET /api/v1/accounts/verify_credentials works with bearer token" {
     defer parsed.deinit();
 
     try std.testing.expectEqualStrings("alice", parsed.value.object.get("username").?.string);
+    try std.testing.expectEqualStrings("http://example.test/users/alice", parsed.value.object.get("url").?.string);
+    try std.testing.expectEqualStrings("http://example.test/static/avatar.png", parsed.value.object.get("avatar_static").?.string);
+    try std.testing.expectEqualStrings("http://example.test/static/header.png", parsed.value.object.get("header").?.string);
+    try std.testing.expectEqualStrings("http://example.test/static/header.png", parsed.value.object.get("header_static").?.string);
 }
 
 test "statuses: create + get + home timeline" {
@@ -2391,6 +2450,15 @@ test "statuses: create + get + home timeline" {
     const id = create_json.value.object.get("id").?.string;
     try std.testing.expectEqualStrings("<p>hello</p>", create_json.value.object.get("content").?.string);
     try std.testing.expectEqualStrings("alice", create_json.value.object.get("account").?.object.get("username").?.string);
+    try std.testing.expectEqualStrings("http://example.test/users/alice", create_json.value.object.get("account").?.object.get("url").?.string);
+    try std.testing.expectEqualStrings(
+        "http://example.test/static/avatar.png",
+        create_json.value.object.get("account").?.object.get("avatar_static").?.string,
+    );
+    try std.testing.expectEqualStrings(
+        "http://example.test/static/header.png",
+        create_json.value.object.get("account").?.object.get("header_static").?.string,
+    );
 
     const expected_uri = try std.fmt.allocPrint(a, "http://example.test/api/v1/statuses/{s}", .{id});
     try std.testing.expectEqualStrings(expected_uri, create_json.value.object.get("uri").?.string);
