@@ -69,6 +69,43 @@ pub fn lookupById(conn: *db.Db, allocator: std.mem.Allocator, id: []const u8) Er
     };
 }
 
+pub fn lookupRowIdById(conn: *db.Db, id: []const u8) db.Error!?i64 {
+    var stmt = try conn.prepareZ("SELECT rowid FROM remote_actors WHERE id = ?1 LIMIT 1;\x00");
+    defer stmt.finalize();
+    try stmt.bindText(1, id);
+
+    switch (try stmt.step()) {
+        .done => return null,
+        .row => {},
+    }
+
+    return stmt.columnInt64(0);
+}
+
+pub fn lookupByRowId(conn: *db.Db, allocator: std.mem.Allocator, rowid: i64) Error!?RemoteActor {
+    var stmt = try conn.prepareZ(
+        "SELECT id, inbox, shared_inbox, preferred_username, domain, public_key_pem FROM remote_actors WHERE rowid = ?1 LIMIT 1;\x00",
+    );
+    defer stmt.finalize();
+    try stmt.bindInt64(1, rowid);
+
+    switch (try stmt.step()) {
+        .done => return null,
+        .row => {},
+    }
+
+    const shared = if (stmt.columnType(2) == .null) null else try allocator.dupe(u8, stmt.columnText(2));
+
+    return .{
+        .id = try allocator.dupe(u8, stmt.columnText(0)),
+        .inbox = try allocator.dupe(u8, stmt.columnText(1)),
+        .shared_inbox = shared,
+        .preferred_username = try allocator.dupe(u8, stmt.columnText(3)),
+        .domain = try allocator.dupe(u8, stmt.columnText(4)),
+        .public_key_pem = try allocator.dupe(u8, stmt.columnText(5)),
+    };
+}
+
 test "upsert + lookupById" {
     var conn = try db.Db.openZ(":memory:");
     defer conn.close();
@@ -89,4 +126,29 @@ test "upsert + lookupById" {
 
     const got = (try lookupById(&conn, arena.allocator(), "https://remote.test/users/bob")).?;
     try std.testing.expectEqualStrings("bob", got.preferred_username);
+}
+
+test "lookupRowIdById + lookupByRowId" {
+    var conn = try db.Db.openZ(":memory:");
+    defer conn.close();
+
+    try @import("migrations.zig").migrate(&conn);
+
+    try upsert(&conn, .{
+        .id = "https://remote.test/users/bob",
+        .inbox = "https://remote.test/users/bob/inbox",
+        .shared_inbox = null,
+        .preferred_username = "bob",
+        .domain = "remote.test",
+        .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
+    });
+
+    const rowid = (try lookupRowIdById(&conn, "https://remote.test/users/bob")).?;
+    try std.testing.expect(rowid > 0);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const got = (try lookupByRowId(&conn, arena.allocator(), rowid)).?;
+    try std.testing.expectEqualStrings("https://remote.test/users/bob", got.id);
 }
