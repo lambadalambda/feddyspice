@@ -63,5 +63,5 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `GET /api/v2/instance` includes `configuration.urls` and `configuration.polls` to avoid Elk client crashes.
 - `GET /api/v1/markers` includes required `updated_at`, and status payloads include `sensitive` (pl-fe validation).
 - SQLite statements bind text/blob as `SQLITE_TRANSIENT` to avoid pointer lifetime issues.
-- Inbound ActivityPub `Create` no longer silently ignores unknown actors when the activity is addressed to the local actor.
+- Inbound ActivityPub `Create` no longer silently ignores unknown actors (fetches the actor doc on first contact).
 - Inbound ActivityPub `Create` infers `direct` vs `public` visibility based on recipients.

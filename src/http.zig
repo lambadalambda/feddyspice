@@ -1051,19 +1051,6 @@ fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: Request, pa
         };
 
         if (remote_actor == null) {
-            const base = baseUrlAlloc(app_state, allocator) catch
-                return .{ .status = .internal_server_error, .body = "internal server error\n" };
-            const local_actor_id = std.fmt.allocPrint(allocator, "{s}/users/{s}", .{ base, username }) catch
-                return .{ .status = .internal_server_error, .body = "internal server error\n" };
-
-            const addressed =
-                jsonContainsIri(parsed.value.object.get("to"), local_actor_id) or
-                jsonContainsIri(parsed.value.object.get("cc"), local_actor_id) or
-                jsonContainsIri(obj.object.get("to"), local_actor_id) or
-                jsonContainsIri(obj.object.get("cc"), local_actor_id);
-
-            if (!addressed) return .{ .status = .accepted, .body = "ignored\n" };
-
             remote_actor = federation.ensureRemoteActorById(app_state, allocator, actor_val.string) catch null;
             if (remote_actor == null) return .{ .status = .accepted, .body = "ignored\n" };
         }
@@ -5334,6 +5321,116 @@ test "POST /users/:name/inbox Create discovers actor when addressed" {
     try std.testing.expect((try remote_actors.lookupById(&app_state.conn, a, actor_id)) != null);
     const st = (try remote_statuses.lookupByUri(&app_state.conn, a, "https://remote.test/notes/1")).?;
     try std.testing.expectEqualStrings("direct", st.visibility);
+}
+
+test "POST /users/:name/inbox Create discovers actor even when not addressed" {
+    const net = std.net;
+    const http = std.http;
+    const posix = std.posix;
+
+    const listen_address = try net.Address.parseIp("127.0.0.1", 0);
+    var listener = try listen_address.listen(.{ .reuse_address = true });
+    defer listener.deinit();
+
+    const addr = listener.listen_address;
+    const port = addr.in.getPort();
+
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    _ = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    const ServerCtx = struct {
+        listener: *net.Server,
+        port: u16,
+        ok: bool = true,
+
+        fn run(ctx: *@This()) !void {
+            var fds = [_]posix.pollfd{
+                .{ .fd = ctx.listener.stream.handle, .events = posix.POLL.IN, .revents = 0 },
+            };
+            const ready = try posix.poll(&fds, 5000);
+            if (ready == 0) {
+                ctx.ok = false;
+                return;
+            }
+
+            var buf: [16 * 1024]u8 = undefined;
+            var out: [16 * 1024]u8 = undefined;
+
+            var conn = try ctx.listener.accept();
+            defer conn.stream.close();
+
+            var reader = net.Stream.Reader.init(conn.stream, &buf);
+            var writer = net.Stream.Writer.init(conn.stream, &out);
+
+            var server = http.Server.init(reader.interface(), &writer.interface);
+            var request = try server.receiveHead();
+
+            const method = request.head.method;
+            const target = request.head.target;
+
+            var conn_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+            defer conn_arena.deinit();
+            const a = conn_arena.allocator();
+
+            if (method != .GET or !std.mem.eql(u8, target, "/users/bob")) {
+                ctx.ok = false;
+                try request.respond("not found\n", .{
+                    .status = .not_found,
+                    .keep_alive = false,
+                    .extra_headers = &.{
+                        .{ .name = "content-type", .value = "text/plain" },
+                    },
+                });
+                return;
+            }
+
+            const resp_body = try std.fmt.allocPrint(
+                a,
+                "{{\"@context\":\"https://www.w3.org/ns/activitystreams\",\"id\":\"http://127.0.0.1:{d}/users/bob\",\"type\":\"Person\",\"preferredUsername\":\"bob\",\"inbox\":\"http://127.0.0.1:{d}/users/bob/inbox\",\"publicKey\":{{\"id\":\"http://127.0.0.1:{d}/users/bob#main-key\",\"owner\":\"http://127.0.0.1:{d}/users/bob\",\"publicKeyPem\":\"-----BEGIN PUBLIC KEY-----\\\\n...\\\\n-----END PUBLIC KEY-----\\\\n\"}}}}",
+                .{ ctx.port, ctx.port, ctx.port, ctx.port },
+            );
+            try request.respond(resp_body, .{
+                .status = .ok,
+                .keep_alive = false,
+                .extra_headers = &.{
+                    .{ .name = "content-type", .value = "application/activity+json" },
+                },
+            });
+        }
+    };
+
+    var ctx: ServerCtx = .{ .listener = &listener, .port = port };
+    var t = try std.Thread.spawn(.{}, ServerCtx.run, .{&ctx});
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const actor_id = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}/users/bob", .{port});
+
+    const body = try std.fmt.allocPrint(
+        a,
+        "{{\"@context\":\"https://www.w3.org/ns/activitystreams\",\"type\":\"Create\",\"actor\":\"{s}\",\"to\":[\"https://www.w3.org/ns/activitystreams#Public\"],\"object\":{{\"id\":\"https://remote.test/notes/1\",\"type\":\"Note\",\"content\":\"<p>Hello</p>\",\"published\":\"2020-01-01T00:00:00.000Z\"}}}}",
+        .{actor_id},
+    );
+
+    const resp = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/users/alice/inbox",
+        .content_type = "application/activity+json",
+        .body = body,
+    });
+    try std.testing.expectEqual(std.http.Status.accepted, resp.status);
+
+    t.join();
+    try std.testing.expect(ctx.ok);
+
+    try std.testing.expect((try remote_actors.lookupById(&app_state.conn, a, actor_id)) != null);
+    const st = (try remote_statuses.lookupByUri(&app_state.conn, a, "https://remote.test/notes/1")).?;
+    try std.testing.expectEqualStrings("public", st.visibility);
 }
 
 test "POST /users/:name/inbox Create stores remote status" {
