@@ -1,9 +1,17 @@
 zig-out/
 .zig-cache/
 .zig-global-cache/
+.zig-cache-dev/
+.zig-global-cache-dev/
 zig-cache/
 *.sqlite3
 *.log
 .env
 .env.*
 !.env.example
+
+# Scratch/cache dirs created during local Zig runs
+b/
+h/
+o/
+z/
