@@ -19,8 +19,10 @@ pub const remote_statuses = @import("remote_statuses.zig");
 pub const sessions = @import("sessions.zig");
 pub const server = @import("server.zig");
 pub const statuses = @import("statuses.zig");
+pub const transport = @import("transport.zig");
 pub const users = @import("users.zig");
 pub const version = @import("version.zig");
+pub const jobs = @import("jobs.zig");
 
 test {
     std.testing.refAllDecls(@This());

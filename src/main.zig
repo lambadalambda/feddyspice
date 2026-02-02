@@ -7,8 +7,8 @@ pub fn main() !void {
     const allocator = gpa.allocator();
 
     const cfg = try feddyspice.config.Config.load(allocator);
-    var app_state = try feddyspice.app.App.initFromConfig(allocator, cfg);
-    defer app_state.deinit();
+    const app_state = try feddyspice.app.App.initFromConfig(allocator, cfg);
+    defer app_state.deinitAndDestroy();
 
-    try feddyspice.server.serve(&app_state, app_state.cfg.listen_address);
+    try feddyspice.server.serve(app_state, app_state.cfg.listen_address);
 }

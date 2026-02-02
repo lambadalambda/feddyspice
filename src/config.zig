@@ -1,5 +1,6 @@
 const std = @import("std");
 
+const jobs = @import("jobs.zig");
 const log = @import("log.zig");
 const password = @import("password.zig");
 
@@ -14,6 +15,8 @@ pub const Config = struct {
     log_file: ?[]const u8,
     log_level: log.Level,
     password_params: password.Params,
+    http_timeout_ms: u32,
+    jobs_mode: jobs.Mode,
 
     pub fn load(allocator: std.mem.Allocator) !Config {
         const domain_env = std.posix.getenv("FEDDYSPICE_DOMAIN") orelse "localhost";
@@ -23,6 +26,8 @@ pub const Config = struct {
         const ca_cert_env = std.posix.getenv("FEDDYSPICE_CACERTFILE");
         const log_file_env = std.posix.getenv("FEDDYSPICE_LOG_FILE");
         const log_level_env = std.posix.getenv("FEDDYSPICE_LOG_LEVEL") orelse "info";
+        const timeout_env = std.posix.getenv("FEDDYSPICE_HTTP_TIMEOUT_MS") orelse "10000";
+        const jobs_mode_env = std.posix.getenv("FEDDYSPICE_JOBS_MODE") orelse "spawn";
 
         const domain = try allocator.dupe(u8, domain_env);
         errdefer allocator.free(domain);
@@ -48,6 +53,13 @@ pub const Config = struct {
 
         const log_level = log.levelFromString(log_level_env);
 
+        const http_timeout_ms: u32 = blk: {
+            const parsed = std.fmt.parseInt(u32, timeout_env, 10) catch break :blk 10_000;
+            break :blk @max(parsed, 1);
+        };
+
+        const jobs_mode = jobs.modeFromString(jobs_mode_env);
+
         const scheme: Scheme = if (std.mem.eql(u8, scheme_env, "https")) .https else .http;
         const listen_address = try std.net.Address.parseIpAndPort(listen_env);
 
@@ -60,6 +72,8 @@ pub const Config = struct {
             .log_file = log_file,
             .log_level = log_level,
             .password_params = password.Params.owasp_2id,
+            .http_timeout_ms = http_timeout_ms,
+            .jobs_mode = jobs_mode,
         };
     }
 

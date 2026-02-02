@@ -7,10 +7,9 @@ const federation = @import("federation.zig");
 const log = @import("log.zig");
 const statuses = @import("statuses.zig");
 const users = @import("users.zig");
+const transport = @import("transport.zig");
 
-fn isInMemory(app_state: *app.App) bool {
-    return std.mem.eql(u8, app_state.cfg.db_path, ":memory:");
-}
+pub const RunError = federation.Error || statuses.Error;
 
 pub fn sendFollow(
     app_state: *app.App,
@@ -19,9 +18,28 @@ pub fn sendFollow(
     remote_actor_id: []const u8,
     follow_activity_id: []const u8,
 ) void {
-    if (isInMemory(app_state)) {
-        federation.sendFollowActivity(app_state, allocator, user_id, remote_actor_id, follow_activity_id) catch {};
-        return;
+    switch (app_state.jobs_mode) {
+        .sync => {
+            federation.sendFollowActivity(app_state, allocator, user_id, remote_actor_id, follow_activity_id) catch |err| {
+                app_state.logger.err("sendFollow: sync deliver failed remote_actor_id={s} err={any}", .{ remote_actor_id, err });
+            };
+            return;
+        },
+        .disabled => {
+            const remote_actor_id_copy = app_state.allocator.dupe(u8, remote_actor_id) catch return;
+            errdefer app_state.allocator.free(remote_actor_id_copy);
+            const follow_activity_id_copy = app_state.allocator.dupe(u8, follow_activity_id) catch return;
+            errdefer app_state.allocator.free(follow_activity_id_copy);
+            app_state.jobs_queue.push(app_state.allocator, .{
+                .send_follow = .{
+                    .user_id = user_id,
+                    .remote_actor_id = remote_actor_id_copy,
+                    .follow_activity_id = follow_activity_id_copy,
+                },
+            }) catch {};
+            return;
+        },
+        .spawn => {},
     }
 
     const job = std.heap.page_allocator.create(SendFollowJob) catch return;
@@ -41,7 +59,10 @@ pub fn sendFollow(
         .follow_activity_id = follow_activity_id_copy,
     };
 
-    var t = std.Thread.spawn(.{}, SendFollowJob.run, .{job}) catch return;
+    var t = std.Thread.spawn(.{}, SendFollowJob.run, .{job}) catch |err| {
+        app_state.logger.err("sendFollow: thread spawn failed err={any}", .{err});
+        return;
+    };
     t.detach();
 }
 
@@ -53,9 +74,29 @@ pub fn acceptInboundFollow(
     remote_actor_id: []const u8,
     remote_follow_activity_id: []const u8,
 ) void {
-    if (isInMemory(app_state)) {
-        federation.acceptInboundFollow(app_state, allocator, user_id, username, remote_actor_id, remote_follow_activity_id) catch {};
-        return;
+    switch (app_state.jobs_mode) {
+        .sync => {
+            federation.acceptInboundFollow(app_state, allocator, user_id, username, remote_actor_id, remote_follow_activity_id) catch {};
+            return;
+        },
+        .disabled => {
+            const username_copy = app_state.allocator.dupe(u8, username) catch return;
+            errdefer app_state.allocator.free(username_copy);
+            const remote_actor_id_copy = app_state.allocator.dupe(u8, remote_actor_id) catch return;
+            errdefer app_state.allocator.free(remote_actor_id_copy);
+            const follow_id_copy = app_state.allocator.dupe(u8, remote_follow_activity_id) catch return;
+            errdefer app_state.allocator.free(follow_id_copy);
+            app_state.jobs_queue.push(app_state.allocator, .{
+                .accept_inbound_follow = .{
+                    .user_id = user_id,
+                    .username = username_copy,
+                    .remote_actor_id = remote_actor_id_copy,
+                    .remote_follow_activity_id = follow_id_copy,
+                },
+            }) catch {};
+            return;
+        },
+        .spawn => {},
     }
 
     const job = std.heap.page_allocator.create(AcceptInboundFollowJob) catch return;
@@ -79,7 +120,10 @@ pub fn acceptInboundFollow(
         .remote_follow_activity_id = follow_id_copy,
     };
 
-    var t = std.Thread.spawn(.{}, AcceptInboundFollowJob.run, .{job}) catch return;
+    var t = std.Thread.spawn(.{}, AcceptInboundFollowJob.run, .{job}) catch |err| {
+        app_state.logger.err("acceptInboundFollow: thread spawn failed err={any}", .{err});
+        return;
+    };
     t.detach();
 }
 
@@ -89,22 +133,20 @@ pub fn deliverStatusToFollowers(
     user_id: i64,
     status_id: i64,
 ) void {
-    app_state.logger.debug("deliverStatusToFollowers: in_memory={any} user_id={d} status_id={d}", .{ isInMemory(app_state), user_id, status_id });
-    if (isInMemory(app_state)) {
-        const user = users.lookupUserById(&app_state.conn, allocator, user_id) catch |err| {
-            app_state.logger.err("deliverStatusToFollowers: user lookup err={any}", .{err});
+    switch (app_state.jobs_mode) {
+        .sync => {
+            const user = users.lookupUserById(&app_state.conn, allocator, user_id) catch return;
+            if (user == null) return;
+            const st = statuses.lookup(&app_state.conn, allocator, status_id) catch return;
+            if (st == null) return;
+            federation.deliverStatusToFollowers(app_state, allocator, user.?, st.?) catch {};
             return;
-        };
-        if (user == null) return;
-        const st = statuses.lookup(&app_state.conn, allocator, status_id) catch |err| {
-            app_state.logger.err("deliverStatusToFollowers: status lookup err={any}", .{err});
+        },
+        .disabled => {
+            app_state.jobs_queue.push(app_state.allocator, .{ .deliver_status = .{ .user_id = user_id, .status_id = status_id } }) catch {};
             return;
-        };
-        if (st == null) return;
-        federation.deliverStatusToFollowers(app_state, allocator, user.?, st.?) catch |err| {
-            app_state.logger.err("deliverStatusToFollowers: delivery failed err={any}", .{err});
-        };
-        return;
+        },
+        .spawn => {},
     }
 
     const job = std.heap.page_allocator.create(DeliverStatusJob) catch return;
@@ -117,7 +159,10 @@ pub fn deliverStatusToFollowers(
         .status_id = status_id,
     };
 
-    var t = std.Thread.spawn(.{}, DeliverStatusJob.run, .{job}) catch return;
+    var t = std.Thread.spawn(.{}, DeliverStatusJob.run, .{job}) catch |err| {
+        app_state.logger.err("deliverStatusToFollowers: thread spawn failed err={any}", .{err});
+        return;
+    };
     t.detach();
 }
 
@@ -127,16 +172,21 @@ pub fn deliverDeleteToFollowers(
     user_id: i64,
     status_id: i64,
 ) void {
-    if (isInMemory(app_state)) {
-        const user = users.lookupUserById(&app_state.conn, allocator, user_id) catch null;
-        if (user == null) return;
-        const st = statuses.lookupIncludingDeleted(&app_state.conn, allocator, status_id) catch null;
-        if (st == null) return;
-        if (st.?.deleted_at == null) return;
-        federation.deliverDeleteToFollowers(app_state, allocator, user.?, st.?) catch |err| {
-            app_state.logger.err("deliverDeleteToFollowers: delivery failed err={any}", .{err});
-        };
-        return;
+    switch (app_state.jobs_mode) {
+        .sync => {
+            const user = users.lookupUserById(&app_state.conn, allocator, user_id) catch return;
+            if (user == null) return;
+            const st = statuses.lookupIncludingDeleted(&app_state.conn, allocator, status_id) catch return;
+            if (st == null) return;
+            if (st.?.deleted_at == null) return;
+            federation.deliverDeleteToFollowers(app_state, allocator, user.?, st.?) catch {};
+            return;
+        },
+        .disabled => {
+            app_state.jobs_queue.push(app_state.allocator, .{ .deliver_delete = .{ .user_id = user_id, .status_id = status_id } }) catch {};
+            return;
+        },
+        .spawn => {},
     }
 
     const job = std.heap.page_allocator.create(DeliverDeleteJob) catch return;
@@ -149,8 +199,52 @@ pub fn deliverDeleteToFollowers(
         .status_id = status_id,
     };
 
-    var t = std.Thread.spawn(.{}, DeliverDeleteJob.run, .{job}) catch return;
+    var t = std.Thread.spawn(.{}, DeliverDeleteJob.run, .{job}) catch |err| {
+        app_state.logger.err("deliverDeleteToFollowers: thread spawn failed err={any}", .{err});
+        return;
+    };
     t.detach();
+}
+
+pub fn runQueued(app_state: *app.App, allocator: std.mem.Allocator) RunError!void {
+    var list = app_state.jobs_queue.drain();
+    defer {
+        for (list.items) |*j| j.deinit(app_state.allocator);
+        list.deinit(app_state.allocator);
+    }
+
+    for (list.items) |job| {
+        switch (job) {
+            .send_follow => |j| {
+                try federation.sendFollowActivity(app_state, allocator, j.user_id, j.remote_actor_id, j.follow_activity_id);
+            },
+            .accept_inbound_follow => |j| {
+                try federation.acceptInboundFollow(
+                    app_state,
+                    allocator,
+                    j.user_id,
+                    j.username,
+                    j.remote_actor_id,
+                    j.remote_follow_activity_id,
+                );
+            },
+            .deliver_status => |j| {
+                const user = users.lookupUserById(&app_state.conn, allocator, j.user_id) catch continue;
+                if (user == null) continue;
+                const st = statuses.lookup(&app_state.conn, allocator, j.status_id) catch continue;
+                if (st == null) continue;
+                try federation.deliverStatusToFollowers(app_state, allocator, user.?, st.?);
+            },
+            .deliver_delete => |j| {
+                const user = users.lookupUserById(&app_state.conn, allocator, j.user_id) catch continue;
+                if (user == null) continue;
+                const st = statuses.lookupIncludingDeleted(&app_state.conn, allocator, j.status_id) catch continue;
+                if (st == null) continue;
+                if (st.?.deleted_at == null) continue;
+                try federation.deliverDeleteToFollowers(app_state, allocator, user.?, st.?);
+            },
+        }
+    }
 }
 
 const SendFollowJob = struct {
@@ -161,6 +255,7 @@ const SendFollowJob = struct {
     follow_activity_id: []u8,
 
     fn run(job: *@This()) void {
+        job.logger.info("SendFollowJob: start remote_actor_id={s}", .{job.remote_actor_id});
         defer {
             std.heap.page_allocator.free(job.remote_actor_id);
             std.heap.page_allocator.free(job.follow_activity_id);
@@ -179,9 +274,20 @@ const SendFollowJob = struct {
             .cfg = job.cfg,
             .conn = conn,
             .logger = job.logger,
+            .jobs_mode = .sync,
+            .jobs_queue = .{},
+            .transport = undefined,
+            .null_transport = transport.NullTransport.init(),
+            .real_transport = transport.RealTransport.init(a, job.cfg) catch return,
         };
+        thread_app.transport = thread_app.real_transport.transport();
+        defer thread_app.transport.deinit();
 
-        federation.sendFollowActivity(&thread_app, a, job.user_id, job.remote_actor_id, job.follow_activity_id) catch {};
+        federation.sendFollowActivity(&thread_app, a, job.user_id, job.remote_actor_id, job.follow_activity_id) catch |err| {
+            job.logger.err("SendFollowJob: deliver failed remote_actor_id={s} err={any}", .{ job.remote_actor_id, err });
+            return;
+        };
+        job.logger.info("SendFollowJob: delivered remote_actor_id={s}", .{job.remote_actor_id});
     }
 };
 
@@ -213,7 +319,14 @@ const AcceptInboundFollowJob = struct {
             .cfg = job.cfg,
             .conn = conn,
             .logger = job.logger,
+            .jobs_mode = .sync,
+            .jobs_queue = .{},
+            .transport = undefined,
+            .null_transport = transport.NullTransport.init(),
+            .real_transport = transport.RealTransport.init(a, job.cfg) catch return,
         };
+        thread_app.transport = thread_app.real_transport.transport();
+        defer thread_app.transport.deinit();
 
         federation.acceptInboundFollow(
             &thread_app,
@@ -247,7 +360,14 @@ const DeliverStatusJob = struct {
             .cfg = job.cfg,
             .conn = conn,
             .logger = job.logger,
+            .jobs_mode = .sync,
+            .jobs_queue = .{},
+            .transport = undefined,
+            .null_transport = transport.NullTransport.init(),
+            .real_transport = transport.RealTransport.init(a, job.cfg) catch return,
         };
+        thread_app.transport = thread_app.real_transport.transport();
+        defer thread_app.transport.deinit();
 
         const user = users.lookupUserById(&thread_app.conn, a, job.user_id) catch null;
         if (user == null) return;
@@ -279,7 +399,14 @@ const DeliverDeleteJob = struct {
             .cfg = job.cfg,
             .conn = conn,
             .logger = job.logger,
+            .jobs_mode = .sync,
+            .jobs_queue = .{},
+            .transport = undefined,
+            .null_transport = transport.NullTransport.init(),
+            .real_transport = transport.RealTransport.init(a, job.cfg) catch return,
         };
+        thread_app.transport = thread_app.real_transport.transport();
+        defer thread_app.transport.deinit();
 
         const user = users.lookupUserById(&thread_app.conn, a, job.user_id) catch null;
         if (user == null) return;

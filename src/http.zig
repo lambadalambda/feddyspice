@@ -13,6 +13,7 @@ const remote_actors = @import("remote_actors.zig");
 const remote_statuses = @import("remote_statuses.zig");
 const sessions = @import("sessions.zig");
 const statuses = @import("statuses.zig");
+const transport = @import("transport.zig");
 const users = @import("users.zig");
 const version = @import("version.zig");
 
@@ -1263,8 +1264,29 @@ fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: Request, pa
             else => return .{ .status = .bad_request, .body = "invalid object\n" },
         }
 
-        _ = follows.markAcceptedByActivityId(&app_state.conn, follow_activity_id) catch
+        const trimSlash = struct {
+            fn f(s: []const u8) []const u8 {
+                if (s.len == 0) return s;
+                if (s[s.len - 1] == '/') return s[0 .. s.len - 1];
+                return s;
+            }
+        }.f;
+
+        const changed = follows.markAcceptedByActivityId(&app_state.conn, follow_activity_id) catch
             return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        if (!changed) {
+            const trimmed = trimSlash(follow_activity_id);
+            if (!std.mem.eql(u8, trimmed, follow_activity_id)) {
+                _ = follows.markAcceptedByActivityId(&app_state.conn, trimmed) catch
+                    return .{ .status = .internal_server_error, .body = "internal server error\n" };
+            } else {
+                const with_slash = std.fmt.allocPrint(allocator, "{s}/", .{follow_activity_id}) catch null;
+                if (with_slash) |alt_id| {
+                    _ = follows.markAcceptedByActivityId(&app_state.conn, alt_id) catch
+                        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+                }
+            }
+        }
 
         return .{ .status = .accepted, .body = "ok\n" };
     }
@@ -4081,116 +4103,30 @@ test "POST /api/v1/follows requires bearer token" {
 }
 
 test "GET /api/v2/search resolves acct handle into an account" {
-    const net = std.net;
-    const http = std.http;
-    const posix = std.posix;
-
-    const listen_address = try net.Address.parseIp("127.0.0.1", 0);
-    var listener = try listen_address.listen(.{ .reuse_address = true });
-    defer listener.deinit();
-
-    const addr = listener.listen_address;
-    const port = addr.in.getPort();
-
     var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
     defer app_state.deinit();
 
-    const ServerCtx = struct {
-        listener: *net.Server,
-        port: u16,
-        ok: bool = true,
-
-        fn run(ctx: *@This()) !void {
-            var buf: [16 * 1024]u8 = undefined;
-            var out: [16 * 1024]u8 = undefined;
-
-            var seen_webfinger = false;
-            var seen_actor = false;
-
-            while (!(seen_webfinger and seen_actor)) {
-                var fds = [_]posix.pollfd{
-                    .{ .fd = ctx.listener.stream.handle, .events = posix.POLL.IN, .revents = 0 },
-                };
-                const ready = try posix.poll(&fds, 5000);
-                if (ready == 0) {
-                    ctx.ok = false;
-                    return;
-                }
-
-                var conn = try ctx.listener.accept();
-                defer conn.stream.close();
-
-                var reader = net.Stream.Reader.init(conn.stream, &buf);
-                var writer = net.Stream.Writer.init(conn.stream, &out);
-
-                var server = http.Server.init(reader.interface(), &writer.interface);
-                var request = try server.receiveHead();
-
-                const method = request.head.method;
-                const target = request.head.target;
-
-                var conn_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-                defer conn_arena.deinit();
-                const a = conn_arena.allocator();
-
-                if (method == .GET and std.mem.startsWith(u8, target, "/.well-known/webfinger")) {
-                    seen_webfinger = true;
-
-                    const actor_id = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}/users/bob", .{ctx.port});
-                    const resp_body = try std.fmt.allocPrint(
-                        a,
-                        "{{\"subject\":\"acct:bob@127.0.0.1\",\"links\":[{{\"rel\":\"self\",\"type\":\"application/activity+json\",\"href\":\"{s}\"}}]}}",
-                        .{actor_id},
-                    );
-
-                    try request.respond(resp_body, .{
-                        .status = .ok,
-                        .keep_alive = false,
-                        .extra_headers = &.{
-                            .{ .name = "content-type", .value = "application/jrd+json" },
-                        },
-                    });
-                    continue;
-                }
-
-                if (method == .GET and std.mem.eql(u8, target, "/users/bob")) {
-                    seen_actor = true;
-                    const resp_body = try std.fmt.allocPrint(
-                        a,
-                        "{{\"@context\":\"https://www.w3.org/ns/activitystreams\",\"id\":\"http://127.0.0.1:{d}/users/bob\",\"type\":\"Person\",\"preferredUsername\":\"bob\",\"inbox\":\"http://127.0.0.1:{d}/users/bob/inbox\",\"publicKey\":{{\"id\":\"http://127.0.0.1:{d}/users/bob#main-key\",\"owner\":\"http://127.0.0.1:{d}/users/bob\",\"publicKeyPem\":\"-----BEGIN PUBLIC KEY-----\\\\n...\\\\n-----END PUBLIC KEY-----\\\\n\"}}}}",
-                        .{ ctx.port, ctx.port, ctx.port, ctx.port },
-                    );
-                    try request.respond(resp_body, .{
-                        .status = .ok,
-                        .keep_alive = false,
-                        .extra_headers = &.{
-                            .{ .name = "content-type", .value = "application/activity+json" },
-                        },
-                    });
-                    continue;
-                }
-
-                ctx.ok = false;
-                try request.respond("not found\n", .{
-                    .status = .not_found,
-                    .keep_alive = false,
-                    .extra_headers = &.{
-                        .{ .name = "content-type", .value = "text/plain" },
-                    },
-                });
-                return;
-            }
-        }
-    };
-
-    var ctx: ServerCtx = .{ .listener = &listener, .port = port };
-    var t = try std.Thread.spawn(.{}, ServerCtx.run, .{&ctx});
+    var mock = transport.MockTransport.init(std.testing.allocator);
+    app_state.transport = mock.transport();
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
 
-    const handle_str = try std.fmt.allocPrint(a, "@bob@127.0.0.1:{d}", .{port});
+    try mock.pushExpected(.{
+        .method = .GET,
+        .url = "http://remote.test/.well-known/webfinger?resource=acct:bob@remote.test",
+        .response_status = .ok,
+        .response_body = "{\"subject\":\"acct:bob@remote.test\",\"links\":[{\"rel\":\"self\",\"type\":\"application/activity+json\",\"href\":\"http://remote.test/users/bob\"}]}",
+    });
+    try mock.pushExpected(.{
+        .method = .GET,
+        .url = "http://remote.test/users/bob",
+        .response_status = .ok,
+        .response_body = "{\"@context\":\"https://www.w3.org/ns/activitystreams\",\"id\":\"http://remote.test/users/bob\",\"type\":\"Person\",\"preferredUsername\":\"bob\",\"inbox\":\"http://remote.test/users/bob/inbox\",\"publicKey\":{\"id\":\"http://remote.test/users/bob#main-key\",\"owner\":\"http://remote.test/users/bob\",\"publicKeyPem\":\"-----BEGIN PUBLIC KEY-----\\n...\\n-----END PUBLIC KEY-----\\n\"}}",
+    });
+
+    const handle_str = "@bob@remote.test";
     const q_enc = try percentEncodeAlloc(a, handle_str);
 
     const target = try std.fmt.allocPrint(a, "/api/v2/search?q={s}&resolve=true&limit=1", .{q_enc});
@@ -4203,32 +4139,21 @@ test "GET /api/v2/search resolves acct handle into an account" {
     const accounts = parsed.value.object.get("accounts").?.array.items;
     try std.testing.expectEqual(@as(usize, 1), accounts.len);
 
-    const actor_id = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}/users/bob", .{port});
+    const actor_id = "http://remote.test/users/bob";
     const rowid = (try remote_actors.lookupRowIdById(&app_state.conn, actor_id)).?;
     const expected_id = try std.fmt.allocPrint(a, "{d}", .{remote_actor_id_base + rowid});
 
     try std.testing.expectEqualStrings(expected_id, accounts[0].object.get("id").?.string);
-    try std.testing.expectEqualStrings("bob@127.0.0.1", accounts[0].object.get("acct").?.string);
+    try std.testing.expectEqualStrings("bob@remote.test", accounts[0].object.get("acct").?.string);
     try std.testing.expectEqualStrings(actor_id, accounts[0].object.get("url").?.string);
-
-    t.join();
-    try std.testing.expect(ctx.ok);
 }
 
 test "POST /api/v1/accounts/:id/follow creates pending follow and delivers Follow" {
-    const net = std.net;
-    const http = std.http;
-    const posix = std.posix;
-
-    const listen_address = try net.Address.parseIp("127.0.0.1", 0);
-    var listener = try listen_address.listen(.{ .reuse_address = true });
-    defer listener.deinit();
-
-    const addr = listener.listen_address;
-    const port = addr.in.getPort();
-
     var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
     defer app_state.deinit();
+
+    var mock = transport.MockTransport.init(std.testing.allocator);
+    app_state.transport = mock.transport();
 
     const params = app_state.cfg.password_params;
     const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
@@ -4237,15 +4162,15 @@ test "POST /api/v1/accounts/:id/follow creates pending follow and delivers Follo
     defer arena.deinit();
     const a = arena.allocator();
 
-    const remote_actor_id = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}/users/bob", .{port});
-    const remote_inbox = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}/users/bob/inbox", .{port});
+    const remote_actor_id = "http://remote.test/users/bob";
+    const remote_inbox = "http://remote.test/users/bob/inbox";
 
     try remote_actors.upsert(&app_state.conn, .{
         .id = remote_actor_id,
         .inbox = remote_inbox,
         .shared_inbox = null,
         .preferred_username = "bob",
-        .domain = "127.0.0.1",
+        .domain = "remote.test",
         .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
     });
 
@@ -4263,92 +4188,7 @@ test "POST /api/v1/accounts/:id/follow creates pending follow and delivers Follo
     const token = try oauth.createAccessToken(&app_state.conn, a, app_creds.id, user_id, "read follow");
     const auth_header = try std.fmt.allocPrint(a, "Bearer {s}", .{token});
 
-    const ServerCtx = struct {
-        listener: *net.Server,
-        expected_target: []const u8,
-        ok: bool = true,
-        seen: bool = false,
-
-        fn run(ctx: *@This()) !void {
-            var buf: [16 * 1024]u8 = undefined;
-            var out: [16 * 1024]u8 = undefined;
-            var body_buf: [16 * 1024]u8 = undefined;
-
-            while (!ctx.seen) {
-                var fds = [_]posix.pollfd{
-                    .{ .fd = ctx.listener.stream.handle, .events = posix.POLL.IN, .revents = 0 },
-                };
-                const ready = try posix.poll(&fds, 5000);
-                if (ready == 0) {
-                    ctx.ok = false;
-                    return;
-                }
-
-                var conn = try ctx.listener.accept();
-                defer conn.stream.close();
-
-                var reader = net.Stream.Reader.init(conn.stream, &buf);
-                var writer = net.Stream.Writer.init(conn.stream, &out);
-
-                var server = http.Server.init(reader.interface(), &writer.interface);
-                var request = try server.receiveHead();
-
-                const method = request.head.method;
-                const target = request.head.target;
-
-                if (method != .POST or !std.mem.eql(u8, target, ctx.expected_target)) {
-                    ctx.ok = false;
-                }
-
-                var conn_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-                defer conn_arena.deinit();
-                const conn_alloc = conn_arena.allocator();
-
-                var body: []const u8 = "";
-                if (method.requestHasBody()) {
-                    const content_length: usize = @intCast(request.head.content_length orelse 0);
-                    request.head.expect = null;
-                    const br = request.readerExpectNone(&body_buf);
-                    body = try br.readAlloc(conn_alloc, content_length);
-                }
-
-                var parsed = std.json.parseFromSlice(std.json.Value, conn_alloc, body, .{}) catch {
-                    ctx.ok = false;
-                    ctx.seen = true;
-                    try request.respond("ok\n", .{
-                        .status = .accepted,
-                        .keep_alive = false,
-                        .extra_headers = &.{
-                            .{ .name = "content-type", .value = "text/plain" },
-                        },
-                    });
-                    continue;
-                };
-                defer parsed.deinit();
-
-                const typ = parsed.value.object.get("type");
-                if (typ == null or typ.? != .string or !std.mem.eql(u8, typ.?.string, "Follow")) ctx.ok = false;
-
-                ctx.seen = true;
-
-                try request.respond("ok\n", .{
-                    .status = .accepted,
-                    .keep_alive = false,
-                    .extra_headers = &.{
-                        .{ .name = "content-type", .value = "text/plain" },
-                    },
-                });
-            }
-        }
-    };
-
-    const expected_target = "/users/bob/inbox";
-    var ctx: ServerCtx = .{
-        .listener = &listener,
-        .expected_target = expected_target,
-    };
-
-    var t = try std.Thread.spawn(.{}, ServerCtx.run, .{&ctx});
+    try mock.pushExpected(.{ .method = .POST, .url = remote_inbox, .response_status = .accepted, .response_body = "" });
 
     const follow_target = try std.fmt.allocPrint(a, "/api/v1/accounts/{s}/follow", .{account_id_str});
     const follow_resp = handle(&app_state, a, .{
@@ -4367,8 +4207,17 @@ test "POST /api/v1/accounts/:id/follow creates pending follow and delivers Follo
     const f = (try follows.lookupByUserAndRemoteActorId(&app_state.conn, a, user_id, remote_actor_id)).?;
     try std.testing.expectEqual(follows.FollowState.pending, f.state);
 
-    t.join();
-    try std.testing.expect(ctx.ok);
+    try background.runQueued(&app_state, a);
+
+    try std.testing.expectEqual(@as(usize, 1), mock.requests.items.len);
+    const delivered = mock.requests.items[0];
+    try std.testing.expectEqual(std.http.Method.POST, delivered.method);
+    try std.testing.expectEqualStrings(remote_inbox, delivered.url);
+
+    const delivered_body = delivered.payload orelse return error.TestUnexpectedResult;
+    var delivered_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, delivered_body, .{});
+    defer delivered_json.deinit();
+    try std.testing.expectEqualStrings("Follow", delivered_json.value.object.get("type").?.string);
 }
 
 test "GET /.well-known/webfinger returns actor self link" {
@@ -4489,186 +4338,32 @@ test "GET /users/:name returns ActivityPub actor" {
 }
 
 test "POST /users/:name/inbox Follow stores follower and sends Accept" {
-    const net = std.net;
-    const http = std.http;
-    const posix = std.posix;
-
-    const listen_address = try net.Address.parseIp("127.0.0.1", 0);
-    var listener = try listen_address.listen(.{ .reuse_address = true });
-    defer listener.deinit();
-
-    const addr = listener.listen_address;
-    const port = addr.in.getPort();
-
     var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
     defer app_state.deinit();
+
+    var mock = transport.MockTransport.init(std.testing.allocator);
+    app_state.transport = mock.transport();
 
     const params = app_state.cfg.password_params;
     const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
 
-    var test_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer test_arena.deinit();
-    const a = test_arena.allocator();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
 
-    const keys = try actor_keys.ensureForUser(&app_state.conn, a, user_id);
+    _ = try actor_keys.ensureForUser(&app_state.conn, a, user_id);
 
-    const ServerCtx = struct {
-        listener: *net.Server,
-        port: u16,
-        local_public_key_pem: []const u8,
-        ok: bool = true,
+    const remote_actor_id = "https://remote.test/users/bob";
+    const remote_inbox = "https://remote.test/users/bob/inbox";
+    const follow_id = "https://remote.test/follows/1";
 
-        fn run(ctx: *@This()) !void {
-            var buf: [16 * 1024]u8 = undefined;
-            var out: [16 * 1024]u8 = undefined;
-            var body_buf: [16 * 1024]u8 = undefined;
-
-            var seen_actor = false;
-            var seen_inbox = false;
-
-            while (!(seen_actor and seen_inbox)) {
-                var fds = [_]posix.pollfd{
-                    .{ .fd = ctx.listener.stream.handle, .events = posix.POLL.IN, .revents = 0 },
-                };
-                const ready = try posix.poll(&fds, 5000);
-                if (ready == 0) {
-                    ctx.ok = false;
-                    return;
-                }
-
-                var conn = try ctx.listener.accept();
-                defer conn.stream.close();
-
-                var reader = net.Stream.Reader.init(conn.stream, &buf);
-                var writer = net.Stream.Writer.init(conn.stream, &out);
-
-                var server = http.Server.init(reader.interface(), &writer.interface);
-                var request = try server.receiveHead();
-
-                const method = request.head.method;
-                const target = request.head.target;
-
-                var host: ?[]const u8 = null;
-                var date: ?[]const u8 = null;
-                var digest: ?[]const u8 = null;
-                var signature: ?[]const u8 = null;
-
-                var header_it = request.iterateHeaders();
-                while (header_it.next()) |h| {
-                    if (std.ascii.eqlIgnoreCase(h.name, "host")) host = h.value;
-                    if (std.ascii.eqlIgnoreCase(h.name, "date")) date = h.value;
-                    if (std.ascii.eqlIgnoreCase(h.name, "digest")) digest = h.value;
-                    if (std.ascii.eqlIgnoreCase(h.name, "signature")) signature = h.value;
-                }
-
-                var conn_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-                defer conn_arena.deinit();
-                const conn_alloc = conn_arena.allocator();
-
-                var body: []const u8 = "";
-                if (method.requestHasBody()) {
-                    const content_length: usize = @intCast(request.head.content_length orelse 0);
-                    request.head.expect = null;
-                    const br = request.readerExpectNone(&body_buf);
-                    body = try br.readAlloc(conn_alloc, content_length);
-                }
-
-                if (method == .GET and std.mem.eql(u8, target, "/users/bob")) {
-                    seen_actor = true;
-                    const resp_body = try std.fmt.allocPrint(
-                        conn_alloc,
-                        "{{\"@context\":\"https://www.w3.org/ns/activitystreams\",\"id\":\"http://127.0.0.1:{d}/users/bob\",\"type\":\"Person\",\"preferredUsername\":\"bob\",\"inbox\":\"http://127.0.0.1:{d}/users/bob/inbox\",\"publicKey\":{{\"id\":\"http://127.0.0.1:{d}/users/bob#main-key\",\"owner\":\"http://127.0.0.1:{d}/users/bob\",\"publicKeyPem\":\"-----BEGIN PUBLIC KEY-----\\\\n...\\\\n-----END PUBLIC KEY-----\\\\n\"}}}}",
-                        .{ ctx.port, ctx.port, ctx.port, ctx.port },
-                    );
-                    try request.respond(resp_body, .{
-                        .status = .ok,
-                        .keep_alive = false,
-                        .extra_headers = &.{
-                            .{ .name = "content-type", .value = "application/activity+json" },
-                        },
-                    });
-                    continue;
-                }
-
-                if (method == .POST and std.mem.eql(u8, target, "/users/bob/inbox")) {
-                    seen_inbox = true;
-
-                    if (host == null or date == null or digest == null or signature == null) {
-                        ctx.ok = false;
-                    } else {
-                        const expected_digest = try @import("http_signatures.zig").digestHeaderValueAlloc(conn_alloc, body);
-                        if (!std.mem.eql(u8, expected_digest, digest.?)) ctx.ok = false;
-
-                        const signing_string = try @import("http_signatures.zig").signingStringAlloc(
-                            conn_alloc,
-                            .POST,
-                            "/users/bob/inbox",
-                            host.?,
-                            date.?,
-                            digest.?,
-                        );
-
-                        const sig_prefix = "signature=\"";
-                        const sig_b64_i = std.mem.indexOf(u8, signature.?, sig_prefix) orelse {
-                            ctx.ok = false;
-                            break;
-                        };
-                        const sig_b64_start = sig_b64_i + sig_prefix.len;
-                        const sig_b64_end = std.mem.indexOfPos(u8, signature.?, sig_b64_start, "\"") orelse {
-                            ctx.ok = false;
-                            break;
-                        };
-
-                        const sig_b64 = signature.?[sig_b64_start..sig_b64_end];
-                        const sig_len = std.base64.standard.Decoder.calcSizeForSlice(sig_b64) catch {
-                            ctx.ok = false;
-                            break;
-                        };
-                        const sig_bytes = try conn_alloc.alloc(u8, sig_len);
-                        std.base64.standard.Decoder.decode(sig_bytes, sig_b64) catch {
-                            ctx.ok = false;
-                            break;
-                        };
-
-                        if (!(try @import("crypto_rsa.zig").verifyRsaSha256Pem(
-                            ctx.local_public_key_pem,
-                            signing_string,
-                            sig_bytes,
-                        ))) ctx.ok = false;
-                    }
-
-                    try request.respond("ok\n", .{
-                        .status = .accepted,
-                        .keep_alive = false,
-                        .extra_headers = &.{
-                            .{ .name = "content-type", .value = "text/plain" },
-                        },
-                    });
-                    continue;
-                }
-
-                ctx.ok = false;
-                try request.respond("not found\n", .{
-                    .status = .not_found,
-                    .keep_alive = false,
-                    .extra_headers = &.{
-                        .{ .name = "content-type", .value = "text/plain" },
-                    },
-                });
-            }
-        }
-    };
-
-    var ctx: ServerCtx = .{
-        .listener = &listener,
-        .port = port,
-        .local_public_key_pem = keys.public_key_pem,
-    };
-
-    var t = try std.Thread.spawn(.{}, ServerCtx.run, .{&ctx});
-
-    const remote_actor_id = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}/users/bob", .{port});
-    const follow_id = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}/follows/1", .{port});
+    try mock.pushExpected(.{
+        .method = .GET,
+        .url = remote_actor_id,
+        .response_status = .ok,
+        .response_body = "{\"@context\":\"https://www.w3.org/ns/activitystreams\",\"id\":\"https://remote.test/users/bob\",\"type\":\"Person\",\"preferredUsername\":\"bob\",\"inbox\":\"https://remote.test/users/bob/inbox\",\"publicKey\":{\"id\":\"https://remote.test/users/bob#main-key\",\"owner\":\"https://remote.test/users/bob\",\"publicKeyPem\":\"-----BEGIN PUBLIC KEY-----\\n...\\n-----END PUBLIC KEY-----\\n\"}}",
+    });
+    try mock.pushExpected(.{ .method = .POST, .url = remote_inbox, .response_status = .accepted, .response_body = "" });
 
     const follow_body = try std.fmt.allocPrint(
         a,
@@ -4683,8 +4378,26 @@ test "POST /users/:name/inbox Follow stores follower and sends Accept" {
         .body = follow_body,
     });
     try std.testing.expectEqual(std.http.Status.accepted, resp.status);
-    t.join();
-    try std.testing.expect(ctx.ok);
+
+    try background.runQueued(&app_state, a);
+
+    try std.testing.expectEqual(@as(usize, 2), mock.requests.items.len);
+    const accept_req = mock.requests.items[1];
+    try std.testing.expectEqual(std.http.Method.POST, accept_req.method);
+    try std.testing.expectEqualStrings(remote_inbox, accept_req.url);
+
+    const accept_body = accept_req.payload orelse return error.TestUnexpectedResult;
+    var accept_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, accept_body, .{});
+    defer accept_json.deinit();
+
+    try std.testing.expectEqualStrings("Accept", accept_json.value.object.get("type").?.string);
+    try std.testing.expectEqualStrings("http://example.test/users/alice", accept_json.value.object.get("actor").?.string);
+
+    const obj = accept_json.value.object.get("object").?.object;
+    try std.testing.expectEqualStrings("Follow", obj.get("type").?.string);
+    try std.testing.expectEqualStrings(follow_id, obj.get("id").?.string);
+    try std.testing.expectEqualStrings(remote_actor_id, obj.get("actor").?.string);
+    try std.testing.expectEqualStrings("http://example.test/users/alice", obj.get("object").?.string);
 
     const follower = (try followers.lookupByRemoteActorId(&app_state.conn, a, user_id, remote_actor_id)).?;
     try std.testing.expectEqual(followers.FollowerState.accepted, follower.state);
@@ -4767,19 +4480,11 @@ test "GET /users/:name/outbox and /users/:name/statuses/:id return ActivityPub o
 }
 
 test "POST /api/v1/statuses delivers Create to followers" {
-    const net = std.net;
-    const http = std.http;
-    const posix = std.posix;
-
-    const listen_address = try net.Address.parseIp("127.0.0.1", 0);
-    var listener = try listen_address.listen(.{ .reuse_address = true });
-    defer listener.deinit();
-
-    const addr = listener.listen_address;
-    const port = addr.in.getPort();
-
     var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
     defer app_state.deinit();
+
+    var mock = transport.MockTransport.init(std.testing.allocator);
+    app_state.transport = mock.transport();
 
     const params = app_state.cfg.password_params;
     const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
@@ -4790,19 +4495,19 @@ test "POST /api/v1/statuses delivers Create to followers" {
 
     const keys = try actor_keys.ensureForUser(&app_state.conn, a, user_id);
 
-    const remote_actor_id = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}/users/bob", .{port});
-    const remote_inbox = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}/users/bob/inbox", .{port});
+    const remote_actor_id = "http://remote.test/users/bob";
+    const remote_inbox = "http://remote.test/users/bob/inbox";
 
     try remote_actors.upsert(&app_state.conn, .{
         .id = remote_actor_id,
         .inbox = remote_inbox,
         .shared_inbox = null,
         .preferred_username = "bob",
-        .domain = "127.0.0.1",
+        .domain = "remote.test",
         .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
     });
 
-    const follow_id = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}/follows/1", .{port});
+    const follow_id = "http://remote.test/follows/1";
     try followers.upsertPending(&app_state.conn, user_id, remote_actor_id, follow_id);
     try std.testing.expect(try followers.markAcceptedByRemoteActorId(&app_state.conn, user_id, remote_actor_id));
 
@@ -4817,162 +4522,7 @@ test "POST /api/v1/statuses delivers Create to followers" {
 
     const token = try oauth.createAccessToken(&app_state.conn, a, app_creds.id, user_id, "read write");
     const auth_header = try std.fmt.allocPrint(a, "Bearer {s}", .{token});
-
-    const ServerCtx = struct {
-        listener: *net.Server,
-        local_public_key_pem: []const u8,
-        ok: bool = true,
-        fail: u8 = 0,
-
-        fn setFail(ctx: *@This(), code: u8) void {
-            if (ctx.fail == 0) ctx.fail = code;
-            ctx.ok = false;
-        }
-
-        fn run(ctx: *@This()) !void {
-            var fds = [_]posix.pollfd{
-                .{ .fd = ctx.listener.stream.handle, .events = posix.POLL.IN, .revents = 0 },
-            };
-            const ready = try posix.poll(&fds, 5000);
-            if (ready == 0) {
-                ctx.setFail(1);
-                return;
-            }
-
-            var buf: [16 * 1024]u8 = undefined;
-            var out: [16 * 1024]u8 = undefined;
-            var body_buf: [16 * 1024]u8 = undefined;
-
-            var conn = try ctx.listener.accept();
-            defer conn.stream.close();
-
-            var reader = net.Stream.Reader.init(conn.stream, &buf);
-            var writer = net.Stream.Writer.init(conn.stream, &out);
-
-            var server = http.Server.init(reader.interface(), &writer.interface);
-            var request = try server.receiveHead();
-
-            const method = request.head.method;
-            const target = request.head.target;
-
-            var host: ?[]const u8 = null;
-            var date: ?[]const u8 = null;
-            var digest: ?[]const u8 = null;
-            var signature: ?[]const u8 = null;
-
-            var header_it = request.iterateHeaders();
-            while (header_it.next()) |h| {
-                if (std.ascii.eqlIgnoreCase(h.name, "host")) host = h.value;
-                if (std.ascii.eqlIgnoreCase(h.name, "date")) date = h.value;
-                if (std.ascii.eqlIgnoreCase(h.name, "digest")) digest = h.value;
-                if (std.ascii.eqlIgnoreCase(h.name, "signature")) signature = h.value;
-            }
-
-            var conn_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-            defer conn_arena.deinit();
-            const conn_alloc = conn_arena.allocator();
-
-            var body: []const u8 = "";
-            if (method.requestHasBody()) {
-                const content_length: usize = @intCast(request.head.content_length orelse 0);
-                request.head.expect = null;
-                const br = request.readerExpectNone(&body_buf);
-                body = try br.readAlloc(conn_alloc, content_length);
-            }
-
-            if (method != .POST or !std.mem.eql(u8, target, "/users/bob/inbox")) {
-                ctx.setFail(2);
-                try request.respond("not found\n", .{
-                    .status = .not_found,
-                    .keep_alive = false,
-                    .extra_headers = &.{
-                        .{ .name = "content-type", .value = "text/plain" },
-                    },
-                });
-                return;
-            }
-
-            if (host == null or date == null or digest == null or signature == null) {
-                ctx.setFail(3);
-            } else {
-                const expected_digest = try @import("http_signatures.zig").digestHeaderValueAlloc(conn_alloc, body);
-                if (!std.mem.eql(u8, expected_digest, digest.?)) ctx.setFail(4);
-
-                const signing_string = try @import("http_signatures.zig").signingStringAlloc(
-                    conn_alloc,
-                    .POST,
-                    "/users/bob/inbox",
-                    host.?,
-                    date.?,
-                    digest.?,
-                );
-
-                const sig_prefix = "signature=\"";
-                const sig_b64_i = std.mem.indexOf(u8, signature.?, sig_prefix) orelse {
-                    ctx.setFail(5);
-                    return;
-                };
-                const sig_b64_start = sig_b64_i + sig_prefix.len;
-                const sig_b64_end = std.mem.indexOfPos(u8, signature.?, sig_b64_start, "\"") orelse {
-                    ctx.setFail(5);
-                    return;
-                };
-
-                const sig_b64 = signature.?[sig_b64_start..sig_b64_end];
-                const sig_len = std.base64.standard.Decoder.calcSizeForSlice(sig_b64) catch {
-                    ctx.setFail(5);
-                    return;
-                };
-                const sig_bytes = try conn_alloc.alloc(u8, sig_len);
-                std.base64.standard.Decoder.decode(sig_bytes, sig_b64) catch {
-                    ctx.setFail(5);
-                    return;
-                };
-
-                if (!(try @import("crypto_rsa.zig").verifyRsaSha256Pem(
-                    ctx.local_public_key_pem,
-                    signing_string,
-                    sig_bytes,
-                ))) ctx.setFail(6);
-
-                var parsed = std.json.parseFromSlice(std.json.Value, conn_alloc, body, .{}) catch {
-                    ctx.setFail(7);
-                    return;
-                };
-                defer parsed.deinit();
-
-                if (parsed.value == .object) {
-                    const typ = parsed.value.object.get("type");
-                    if (typ == null or typ.? != .string or !std.mem.eql(u8, typ.?.string, "Create")) ctx.setFail(8);
-
-                    const obj = parsed.value.object.get("object");
-                    if (obj == null or obj.? != .object) ctx.setFail(9);
-
-                    const content = obj.?.object.get("content");
-                    if (content == null or content.? != .string or !std.mem.eql(u8, content.?.string, "<p>federated</p>")) {
-                        ctx.setFail(10);
-                    }
-                } else {
-                    ctx.setFail(11);
-                }
-            }
-
-            try request.respond("ok\n", .{
-                .status = .accepted,
-                .keep_alive = false,
-                .extra_headers = &.{
-                    .{ .name = "content-type", .value = "text/plain" },
-                },
-            });
-        }
-    };
-
-    var ctx: ServerCtx = .{
-        .listener = &listener,
-        .local_public_key_pem = keys.public_key_pem,
-    };
-
-    var t = try std.Thread.spawn(.{}, ServerCtx.run, .{&ctx});
+    try mock.pushExpected(.{ .method = .POST, .url = remote_inbox, .response_status = .accepted, .response_body = "" });
 
     const create_resp = handle(&app_state, a, .{
         .method = .POST,
@@ -4983,24 +4533,50 @@ test "POST /api/v1/statuses delivers Create to followers" {
     });
     try std.testing.expectEqual(std.http.Status.ok, create_resp.status);
 
-    t.join();
-    try std.testing.expectEqual(@as(u8, 0), ctx.fail);
+    try background.runQueued(&app_state, a);
+
+    try std.testing.expectEqual(@as(usize, 1), mock.requests.items.len);
+    const delivered = mock.requests.items[0];
+    try std.testing.expectEqual(std.http.Method.POST, delivered.method);
+    try std.testing.expectEqualStrings(remote_inbox, delivered.url);
+
+    const delivered_body = delivered.payload orelse return error.TestUnexpectedResult;
+
+    var delivered_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, delivered_body, .{});
+    defer delivered_json.deinit();
+
+    try std.testing.expectEqualStrings("Create", delivered_json.value.object.get("type").?.string);
+    const obj = delivered_json.value.object.get("object").?.object;
+    try std.testing.expectEqualStrings("<p>federated</p>", obj.get("content").?.string);
+
+    const date = headerValue(delivered.extra_headers, "date") orelse return error.TestUnexpectedResult;
+    const digest = headerValue(delivered.extra_headers, "digest") orelse return error.TestUnexpectedResult;
+    const signature = headerValue(delivered.extra_headers, "signature") orelse return error.TestUnexpectedResult;
+
+    const expected_digest = try @import("http_signatures.zig").digestHeaderValueAlloc(a, delivered_body);
+    try std.testing.expectEqualStrings(expected_digest, digest);
+
+    const signing_string = try @import("http_signatures.zig").signingStringAlloc(a, .POST, "/users/bob/inbox", "remote.test", date, digest);
+
+    const sig_prefix = "signature=\"";
+    const sig_b64_i = std.mem.indexOf(u8, signature, sig_prefix) orelse return error.TestUnexpectedResult;
+    const sig_b64_start = sig_b64_i + sig_prefix.len;
+    const sig_b64_end = std.mem.indexOfPos(u8, signature, sig_b64_start, "\"") orelse return error.TestUnexpectedResult;
+    const sig_b64 = signature[sig_b64_start..sig_b64_end];
+
+    const sig_len = std.base64.standard.Decoder.calcSizeForSlice(sig_b64) catch return error.TestUnexpectedResult;
+    const sig_bytes = try a.alloc(u8, sig_len);
+    std.base64.standard.Decoder.decode(sig_bytes, sig_b64) catch return error.TestUnexpectedResult;
+
+    try std.testing.expect(try @import("crypto_rsa.zig").verifyRsaSha256Pem(keys.public_key_pem, signing_string, sig_bytes));
 }
 
 test "DELETE /api/v1/statuses delivers Delete to followers" {
-    const net = std.net;
-    const http = std.http;
-    const posix = std.posix;
-
-    const listen_address = try net.Address.parseIp("127.0.0.1", 0);
-    var listener = try listen_address.listen(.{ .reuse_address = true });
-    defer listener.deinit();
-
-    const addr = listener.listen_address;
-    const port = addr.in.getPort();
-
     var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
     defer app_state.deinit();
+
+    var mock = transport.MockTransport.init(std.testing.allocator);
+    app_state.transport = mock.transport();
 
     const params = app_state.cfg.password_params;
     const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
@@ -5011,19 +4587,19 @@ test "DELETE /api/v1/statuses delivers Delete to followers" {
 
     const keys = try actor_keys.ensureForUser(&app_state.conn, a, user_id);
 
-    const remote_actor_id = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}/users/bob", .{port});
-    const remote_inbox = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}/users/bob/inbox", .{port});
+    const remote_actor_id = "http://remote.test/users/bob";
+    const remote_inbox = "http://remote.test/users/bob/inbox";
 
     try remote_actors.upsert(&app_state.conn, .{
         .id = remote_actor_id,
         .inbox = remote_inbox,
         .shared_inbox = null,
         .preferred_username = "bob",
-        .domain = "127.0.0.1",
+        .domain = "remote.test",
         .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
     });
 
-    const follow_id = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}/follows/1", .{port});
+    const follow_id = "http://remote.test/follows/1";
     try followers.upsertPending(&app_state.conn, user_id, remote_actor_id, follow_id);
     try std.testing.expectEqual(@as(usize, 0), (try followers.listAcceptedRemoteActorIds(&app_state.conn, a, user_id, 10)).len);
 
@@ -5052,162 +4628,13 @@ test "DELETE /api/v1/statuses delivers Delete to followers" {
     defer create_json.deinit();
     const id_str = create_json.value.object.get("id").?.string;
 
+    try background.runQueued(&app_state, a);
+
     try std.testing.expect(try followers.markAcceptedByRemoteActorId(&app_state.conn, user_id, remote_actor_id));
     try std.testing.expectEqual(@as(usize, 1), (try followers.listAcceptedRemoteActorIds(&app_state.conn, a, user_id, 10)).len);
 
-    const ServerCtx = struct {
-        listener: *net.Server,
-        local_public_key_pem: []const u8,
-        expected_object_id: []const u8,
-        ok: bool = true,
-
-        fn run(ctx: *@This()) !void {
-            var fds = [_]posix.pollfd{
-                .{ .fd = ctx.listener.stream.handle, .events = posix.POLL.IN, .revents = 0 },
-            };
-            const ready = try posix.poll(&fds, 5000);
-            if (ready == 0) {
-                ctx.ok = false;
-                return;
-            }
-
-            var buf: [16 * 1024]u8 = undefined;
-            var out: [16 * 1024]u8 = undefined;
-            var body_buf: [16 * 1024]u8 = undefined;
-
-            var conn = try ctx.listener.accept();
-            defer conn.stream.close();
-
-            var reader = net.Stream.Reader.init(conn.stream, &buf);
-            var writer = net.Stream.Writer.init(conn.stream, &out);
-
-            var server = http.Server.init(reader.interface(), &writer.interface);
-            var request = try server.receiveHead();
-
-            const method = request.head.method;
-            const target = request.head.target;
-
-            var host: ?[]const u8 = null;
-            var date: ?[]const u8 = null;
-            var digest: ?[]const u8 = null;
-            var signature: ?[]const u8 = null;
-
-            var header_it = request.iterateHeaders();
-            while (header_it.next()) |h| {
-                if (std.ascii.eqlIgnoreCase(h.name, "host")) host = h.value;
-                if (std.ascii.eqlIgnoreCase(h.name, "date")) date = h.value;
-                if (std.ascii.eqlIgnoreCase(h.name, "digest")) digest = h.value;
-                if (std.ascii.eqlIgnoreCase(h.name, "signature")) signature = h.value;
-            }
-
-            var conn_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-            defer conn_arena.deinit();
-            const conn_alloc = conn_arena.allocator();
-
-            var body: []const u8 = "";
-            if (method.requestHasBody()) {
-                const content_length: usize = @intCast(request.head.content_length orelse 0);
-                request.head.expect = null;
-                const br = request.readerExpectNone(&body_buf);
-                body = try br.readAlloc(conn_alloc, content_length);
-            }
-
-            if (method != .POST or !std.mem.eql(u8, target, "/users/bob/inbox")) {
-                ctx.ok = false;
-                try request.respond("not found\n", .{
-                    .status = .not_found,
-                    .keep_alive = false,
-                    .extra_headers = &.{
-                        .{ .name = "content-type", .value = "text/plain" },
-                    },
-                });
-                return;
-            }
-
-            if (host == null or date == null or digest == null or signature == null) {
-                ctx.ok = false;
-            } else {
-                const expected_digest = try @import("http_signatures.zig").digestHeaderValueAlloc(conn_alloc, body);
-                if (!std.mem.eql(u8, expected_digest, digest.?)) ctx.ok = false;
-
-                const signing_string = try @import("http_signatures.zig").signingStringAlloc(
-                    conn_alloc,
-                    .POST,
-                    "/users/bob/inbox",
-                    host.?,
-                    date.?,
-                    digest.?,
-                );
-
-                const sig_prefix = "signature=\"";
-                const sig_b64_i = std.mem.indexOf(u8, signature.?, sig_prefix) orelse {
-                    ctx.ok = false;
-                    return;
-                };
-                const sig_b64_start = sig_b64_i + sig_prefix.len;
-                const sig_b64_end = std.mem.indexOfPos(u8, signature.?, sig_b64_start, "\"") orelse {
-                    ctx.ok = false;
-                    return;
-                };
-
-                const sig_b64 = signature.?[sig_b64_start..sig_b64_end];
-                const sig_len = std.base64.standard.Decoder.calcSizeForSlice(sig_b64) catch {
-                    ctx.ok = false;
-                    return;
-                };
-                const sig_bytes = try conn_alloc.alloc(u8, sig_len);
-                std.base64.standard.Decoder.decode(sig_bytes, sig_b64) catch {
-                    ctx.ok = false;
-                    return;
-                };
-
-                if (!(try @import("crypto_rsa.zig").verifyRsaSha256Pem(
-                    ctx.local_public_key_pem,
-                    signing_string,
-                    sig_bytes,
-                ))) ctx.ok = false;
-
-                var parsed = std.json.parseFromSlice(std.json.Value, conn_alloc, body, .{}) catch {
-                    ctx.ok = false;
-                    return;
-                };
-                defer parsed.deinit();
-
-                if (parsed.value == .object) {
-                    const typ = parsed.value.object.get("type");
-                    if (typ == null or typ.? != .string or !std.mem.eql(u8, typ.?.string, "Delete")) ctx.ok = false;
-
-                    const obj = parsed.value.object.get("object");
-                    if (obj == null or obj.? != .object) ctx.ok = false;
-
-                    const obj_id = obj.?.object.get("id");
-                    if (obj_id == null or obj_id.? != .string or !std.mem.eql(u8, obj_id.?.string, ctx.expected_object_id)) {
-                        ctx.ok = false;
-                    }
-                } else {
-                    ctx.ok = false;
-                }
-            }
-
-            try request.respond("ok\n", .{
-                .status = .accepted,
-                .keep_alive = false,
-                .extra_headers = &.{
-                    .{ .name = "content-type", .value = "text/plain" },
-                },
-            });
-        }
-    };
-
     const expected_object_id = try std.fmt.allocPrint(a, "http://example.test/users/alice/statuses/{s}", .{id_str});
-
-    var ctx: ServerCtx = .{
-        .listener = &listener,
-        .local_public_key_pem = keys.public_key_pem,
-        .expected_object_id = expected_object_id,
-    };
-
-    var t = try std.Thread.spawn(.{}, ServerCtx.run, .{&ctx});
+    try mock.pushExpected(.{ .method = .POST, .url = remote_inbox, .response_status = .accepted, .response_body = "" });
 
     const del_target = try std.fmt.allocPrint(a, "/api/v1/statuses/{s}", .{id_str});
     const del_resp = handle(&app_state, a, .{
@@ -5217,8 +4644,41 @@ test "DELETE /api/v1/statuses delivers Delete to followers" {
     });
     try std.testing.expectEqual(std.http.Status.ok, del_resp.status);
 
-    t.join();
-    try std.testing.expect(ctx.ok);
+    try background.runQueued(&app_state, a);
+
+    try std.testing.expectEqual(@as(usize, 1), mock.requests.items.len);
+    const delivered = mock.requests.items[0];
+    try std.testing.expectEqual(std.http.Method.POST, delivered.method);
+    try std.testing.expectEqualStrings(remote_inbox, delivered.url);
+
+    const delivered_body = delivered.payload orelse return error.TestUnexpectedResult;
+    var delivered_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, delivered_body, .{});
+    defer delivered_json.deinit();
+
+    try std.testing.expectEqualStrings("Delete", delivered_json.value.object.get("type").?.string);
+    const obj = delivered_json.value.object.get("object").?.object;
+    try std.testing.expectEqualStrings(expected_object_id, obj.get("id").?.string);
+
+    const date = headerValue(delivered.extra_headers, "date") orelse return error.TestUnexpectedResult;
+    const digest = headerValue(delivered.extra_headers, "digest") orelse return error.TestUnexpectedResult;
+    const signature = headerValue(delivered.extra_headers, "signature") orelse return error.TestUnexpectedResult;
+
+    const expected_digest = try @import("http_signatures.zig").digestHeaderValueAlloc(a, delivered_body);
+    try std.testing.expectEqualStrings(expected_digest, digest);
+
+    const signing_string = try @import("http_signatures.zig").signingStringAlloc(a, .POST, "/users/bob/inbox", "remote.test", date, digest);
+
+    const sig_prefix = "signature=\"";
+    const sig_b64_i = std.mem.indexOf(u8, signature, sig_prefix) orelse return error.TestUnexpectedResult;
+    const sig_b64_start = sig_b64_i + sig_prefix.len;
+    const sig_b64_end = std.mem.indexOfPos(u8, signature, sig_b64_start, "\"") orelse return error.TestUnexpectedResult;
+    const sig_b64 = signature[sig_b64_start..sig_b64_end];
+
+    const sig_len = std.base64.standard.Decoder.calcSizeForSlice(sig_b64) catch return error.TestUnexpectedResult;
+    const sig_bytes = try a.alloc(u8, sig_len);
+    std.base64.standard.Decoder.decode(sig_bytes, sig_b64) catch return error.TestUnexpectedResult;
+
+    try std.testing.expect(try @import("crypto_rsa.zig").verifyRsaSha256Pem(keys.public_key_pem, signing_string, sig_bytes));
 }
 
 test "POST /users/:name/inbox Accept marks follow accepted" {
@@ -5266,93 +4726,73 @@ test "POST /users/:name/inbox Accept marks follow accepted" {
     try std.testing.expectEqual(follows.FollowState.accepted, follow.state);
 }
 
-test "POST /users/:name/inbox Create discovers actor when addressed" {
-    const net = std.net;
-    const http = std.http;
-    const posix = std.posix;
-
-    const listen_address = try net.Address.parseIp("127.0.0.1", 0);
-    var listener = try listen_address.listen(.{ .reuse_address = true });
-    defer listener.deinit();
-
-    const addr = listener.listen_address;
-    const port = addr.in.getPort();
-
+test "POST /users/:name/inbox Accept marks follow accepted with trailing slash variant" {
     var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
     defer app_state.deinit();
 
     const params = app_state.cfg.password_params;
-    _ = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
 
-    const ServerCtx = struct {
-        listener: *net.Server,
-        port: u16,
-        ok: bool = true,
+    try remote_actors.upsert(&app_state.conn, .{
+        .id = "https://remote.test/users/bob",
+        .inbox = "https://remote.test/users/bob/inbox",
+        .shared_inbox = null,
+        .preferred_username = "bob",
+        .domain = "remote.test",
+        .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
+    });
 
-        fn run(ctx: *@This()) !void {
-            var fds = [_]posix.pollfd{
-                .{ .fd = ctx.listener.stream.handle, .events = posix.POLL.IN, .revents = 0 },
-            };
-            const ready = try posix.poll(&fds, 5000);
-            if (ready == 0) {
-                ctx.ok = false;
-                return;
-            }
-
-            var buf: [16 * 1024]u8 = undefined;
-            var out: [16 * 1024]u8 = undefined;
-
-            var conn = try ctx.listener.accept();
-            defer conn.stream.close();
-
-            var reader = net.Stream.Reader.init(conn.stream, &buf);
-            var writer = net.Stream.Writer.init(conn.stream, &out);
-
-            var server = http.Server.init(reader.interface(), &writer.interface);
-            var request = try server.receiveHead();
-
-            const method = request.head.method;
-            const target = request.head.target;
-
-            var conn_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-            defer conn_arena.deinit();
-            const a = conn_arena.allocator();
-
-            if (method != .GET or !std.mem.eql(u8, target, "/users/bob")) {
-                ctx.ok = false;
-                try request.respond("not found\n", .{
-                    .status = .not_found,
-                    .keep_alive = false,
-                    .extra_headers = &.{
-                        .{ .name = "content-type", .value = "text/plain" },
-                    },
-                });
-                return;
-            }
-
-            const resp_body = try std.fmt.allocPrint(
-                a,
-                "{{\"@context\":\"https://www.w3.org/ns/activitystreams\",\"id\":\"http://127.0.0.1:{d}/users/bob\",\"type\":\"Person\",\"preferredUsername\":\"bob\",\"inbox\":\"http://127.0.0.1:{d}/users/bob/inbox\",\"publicKey\":{{\"id\":\"http://127.0.0.1:{d}/users/bob#main-key\",\"owner\":\"http://127.0.0.1:{d}/users/bob\",\"publicKeyPem\":\"-----BEGIN PUBLIC KEY-----\\\\n...\\\\n-----END PUBLIC KEY-----\\\\n\"}}}}",
-                .{ ctx.port, ctx.port, ctx.port, ctx.port },
-            );
-            try request.respond(resp_body, .{
-                .status = .ok,
-                .keep_alive = false,
-                .extra_headers = &.{
-                    .{ .name = "content-type", .value = "application/activity+json" },
-                },
-            });
-        }
-    };
-
-    var ctx: ServerCtx = .{ .listener = &listener, .port = port };
-    var t = try std.Thread.spawn(.{}, ServerCtx.run, .{&ctx});
+    _ = try follows.createPending(
+        &app_state.conn,
+        user_id,
+        "https://remote.test/users/bob",
+        "http://example.test/follows/1",
+    );
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
 
-    const actor_id = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}/users/bob", .{port});
+    const body = try std.fmt.allocPrint(
+        a,
+        "{{\"@context\":\"https://www.w3.org/ns/activitystreams\",\"type\":\"Accept\",\"actor\":\"https://remote.test/users/bob\",\"object\":\"http://example.test/follows/1/\"}}",
+        .{},
+    );
+
+    const resp = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/users/alice/inbox",
+        .content_type = "application/activity+json",
+        .body = body,
+    });
+    try std.testing.expectEqual(std.http.Status.accepted, resp.status);
+
+    const follow = (try follows.lookupByActivityId(&app_state.conn, a, "http://example.test/follows/1")).?;
+    try std.testing.expectEqual(follows.FollowState.accepted, follow.state);
+}
+
+test "POST /users/:name/inbox Create discovers actor when addressed" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    var mock = transport.MockTransport.init(std.testing.allocator);
+    app_state.transport = mock.transport();
+
+    const params = app_state.cfg.password_params;
+    _ = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const actor_id = "https://remote.test/users/bob";
+
+    try mock.pushExpected(.{
+        .method = .GET,
+        .url = actor_id,
+        .response_status = .ok,
+        .response_body = "{\"@context\":\"https://www.w3.org/ns/activitystreams\",\"id\":\"https://remote.test/users/bob\",\"type\":\"Person\",\"preferredUsername\":\"bob\",\"inbox\":\"https://remote.test/users/bob/inbox\",\"publicKey\":{\"id\":\"https://remote.test/users/bob#main-key\",\"owner\":\"https://remote.test/users/bob\",\"publicKeyPem\":\"-----BEGIN PUBLIC KEY-----\\n...\\n-----END PUBLIC KEY-----\\n\"}}",
+    });
 
     const body = try std.fmt.allocPrint(
         a,
@@ -5367,9 +4807,7 @@ test "POST /users/:name/inbox Create discovers actor when addressed" {
         .body = body,
     });
     try std.testing.expectEqual(std.http.Status.accepted, resp.status);
-
-    t.join();
-    try std.testing.expect(ctx.ok);
+    try std.testing.expectEqual(@as(usize, 1), mock.requests.items.len);
 
     try std.testing.expect((try remote_actors.lookupById(&app_state.conn, a, actor_id)) != null);
     const st = (try remote_statuses.lookupByUri(&app_state.conn, a, "https://remote.test/notes/1")).?;
@@ -5377,92 +4815,27 @@ test "POST /users/:name/inbox Create discovers actor when addressed" {
 }
 
 test "POST /users/:name/inbox Create discovers actor even when not addressed" {
-    const net = std.net;
-    const http = std.http;
-    const posix = std.posix;
-
-    const listen_address = try net.Address.parseIp("127.0.0.1", 0);
-    var listener = try listen_address.listen(.{ .reuse_address = true });
-    defer listener.deinit();
-
-    const addr = listener.listen_address;
-    const port = addr.in.getPort();
-
     var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
     defer app_state.deinit();
 
+    var mock = transport.MockTransport.init(std.testing.allocator);
+    app_state.transport = mock.transport();
+
     const params = app_state.cfg.password_params;
     _ = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
-
-    const ServerCtx = struct {
-        listener: *net.Server,
-        port: u16,
-        ok: bool = true,
-
-        fn run(ctx: *@This()) !void {
-            var fds = [_]posix.pollfd{
-                .{ .fd = ctx.listener.stream.handle, .events = posix.POLL.IN, .revents = 0 },
-            };
-            const ready = try posix.poll(&fds, 5000);
-            if (ready == 0) {
-                ctx.ok = false;
-                return;
-            }
-
-            var buf: [16 * 1024]u8 = undefined;
-            var out: [16 * 1024]u8 = undefined;
-
-            var conn = try ctx.listener.accept();
-            defer conn.stream.close();
-
-            var reader = net.Stream.Reader.init(conn.stream, &buf);
-            var writer = net.Stream.Writer.init(conn.stream, &out);
-
-            var server = http.Server.init(reader.interface(), &writer.interface);
-            var request = try server.receiveHead();
-
-            const method = request.head.method;
-            const target = request.head.target;
-
-            var conn_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-            defer conn_arena.deinit();
-            const a = conn_arena.allocator();
-
-            if (method != .GET or !std.mem.eql(u8, target, "/users/bob")) {
-                ctx.ok = false;
-                try request.respond("not found\n", .{
-                    .status = .not_found,
-                    .keep_alive = false,
-                    .extra_headers = &.{
-                        .{ .name = "content-type", .value = "text/plain" },
-                    },
-                });
-                return;
-            }
-
-            const resp_body = try std.fmt.allocPrint(
-                a,
-                "{{\"@context\":\"https://www.w3.org/ns/activitystreams\",\"id\":\"http://127.0.0.1:{d}/users/bob\",\"type\":\"Person\",\"preferredUsername\":\"bob\",\"inbox\":\"http://127.0.0.1:{d}/users/bob/inbox\",\"publicKey\":{{\"id\":\"http://127.0.0.1:{d}/users/bob#main-key\",\"owner\":\"http://127.0.0.1:{d}/users/bob\",\"publicKeyPem\":\"-----BEGIN PUBLIC KEY-----\\\\n...\\\\n-----END PUBLIC KEY-----\\\\n\"}}}}",
-                .{ ctx.port, ctx.port, ctx.port, ctx.port },
-            );
-            try request.respond(resp_body, .{
-                .status = .ok,
-                .keep_alive = false,
-                .extra_headers = &.{
-                    .{ .name = "content-type", .value = "application/activity+json" },
-                },
-            });
-        }
-    };
-
-    var ctx: ServerCtx = .{ .listener = &listener, .port = port };
-    var t = try std.Thread.spawn(.{}, ServerCtx.run, .{&ctx});
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
 
-    const actor_id = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}/users/bob", .{port});
+    const actor_id = "https://remote.test/users/bob";
+
+    try mock.pushExpected(.{
+        .method = .GET,
+        .url = actor_id,
+        .response_status = .ok,
+        .response_body = "{\"@context\":\"https://www.w3.org/ns/activitystreams\",\"id\":\"https://remote.test/users/bob\",\"type\":\"Person\",\"preferredUsername\":\"bob\",\"inbox\":\"https://remote.test/users/bob/inbox\",\"publicKey\":{\"id\":\"https://remote.test/users/bob#main-key\",\"owner\":\"https://remote.test/users/bob\",\"publicKeyPem\":\"-----BEGIN PUBLIC KEY-----\\n...\\n-----END PUBLIC KEY-----\\n\"}}",
+    });
 
     const body = try std.fmt.allocPrint(
         a,
@@ -5477,9 +4850,7 @@ test "POST /users/:name/inbox Create discovers actor even when not addressed" {
         .body = body,
     });
     try std.testing.expectEqual(std.http.Status.accepted, resp.status);
-
-    t.join();
-    try std.testing.expect(ctx.ok);
+    try std.testing.expectEqual(@as(usize, 1), mock.requests.items.len);
 
     try std.testing.expect((try remote_actors.lookupById(&app_state.conn, a, actor_id)) != null);
     const st = (try remote_statuses.lookupByUri(&app_state.conn, a, "https://remote.test/notes/1")).?;
@@ -5573,6 +4944,13 @@ test "POST /users/:name/inbox Delete marks remote status deleted" {
     try std.testing.expect((try remote_statuses.lookupByUri(&app_state.conn, a, "https://remote.test/notes/1")) == null);
     const st2 = (try remote_statuses.lookupByUriIncludingDeleted(&app_state.conn, a, "https://remote.test/notes/1")).?;
     try std.testing.expectEqualStrings(deleted_ts, st2.deleted_at.?);
+}
+
+fn headerValue(headers: []const std.http.Header, name: []const u8) ?[]const u8 {
+    for (headers) |h| {
+        if (std.ascii.eqlIgnoreCase(h.name, name)) return h.value;
+    }
+    return null;
 }
 
 fn extractBetween(haystack: []const u8, start: []const u8, end: []const u8) ?[]const u8 {
