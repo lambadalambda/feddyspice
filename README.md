@@ -49,6 +49,18 @@ export FEDDYSPICE_LOG_FILE=./feddyspice.log
 export FEDDYSPICE_LOG_LEVEL=info # debug|info|warn|error
 ```
 
+## Background jobs
+
+Outbound federation deliveries can be controlled via `FEDDYSPICE_JOBS_MODE`:
+
+- `spawn` (default): run deliveries in background threads
+- `sync`: run deliveries inline (useful for debugging)
+- `disabled`: queue jobs but do not execute automatically (useful for tests)
+
+## Outbound HTTP timeouts
+
+Outbound HTTP requests use a socket-level timeout controlled by `FEDDYSPICE_HTTP_TIMEOUT_MS` (default: `10000`).
+
 ## Running behind ngrok (practical)
 
 If you're exposing a local instance to the internet via ngrok, make sure the **external** domain is what feddyspice uses when generating ActivityPub URLs.

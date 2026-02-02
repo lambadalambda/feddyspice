@@ -52,6 +52,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `POST /api/v1/accounts/:id/follow` and `POST /api/v1/accounts/:id/unfollow` for client follow UX.
 - Stable, path-safe numeric IDs for remote accounts (SQLite `rowid`-based offset).
 - `zig build test -Dtest-filter="..."` support for faster test iteration.
+- Pluggable HTTP transport layer (`RealTransport`, `NullTransport`, `MockTransport`) to enable networkless unit tests.
+- Configurable outbound HTTP timeout (`FEDDYSPICE_HTTP_TIMEOUT_MS`).
+- Configurable background job execution mode (`FEDDYSPICE_JOBS_MODE`) and an in-memory job queue for deterministic tests.
+- Background follow delivery logs (`SendFollowJob`) and thread-spawn failure logs for background jobs.
 
 ### Fixed
 
@@ -69,3 +73,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Inbound ActivityPub `Create` infers `direct` vs `public` visibility based on recipients.
 - `POST /api/v1/follows` is idempotent when the follow already exists.
 - Actor key generation tolerates concurrent requests (avoids transient failures when multiple requests race to create keys).
+- Unit tests no longer spin up local HTTP servers for federation flows; they use `MockTransport` + queued jobs instead.
+- `App.initFromConfig` no longer returns an `App` with a dangling transport pointer (prevents HTTPS outbound segfaults).
+- HTTPS outbound requests with a body flush the underlying connection correctly (fixes federation POST failures like `Follow` deliveries).
+- Outbound ActivityPub deliveries prefer the remote actor's `sharedInbox` when available.
+- Inbox `Accept` handling tolerates trailing-slash variants of the follow activity ID.
