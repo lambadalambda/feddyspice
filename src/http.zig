@@ -27,6 +27,8 @@ const http_types = @import("http_types.zig");
 const common = @import("http/common.zig");
 const discovery = @import("http/discovery.zig");
 const instance = @import("http/instance.zig");
+const pages = @import("http/pages.zig");
+const session = @import("http/session.zig");
 
 const transparent_png = [_]u8{
     0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
@@ -307,121 +309,19 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
     }
 
     if (req.method == .GET and std.mem.eql(u8, path, "/signup")) {
-        const existing = users.count(&app_state.conn) catch 0;
-        if (existing > 0) {
-            return htmlPage(
-                allocator,
-                "Already set up",
-                "<p>This instance already has a user. <a href=\"/login\">Log in</a>.</p>",
-            );
-        }
-
-        const body =
-            \\<form method="POST" action="/signup">
-            \\  <label>Username <input name="username" autocomplete="username"></label><br>
-            \\  <label>Password <input type="password" name="password" autocomplete="new-password"></label><br>
-            \\  <button type="submit">Create account</button>
-            \\</form>
-        ;
-
-        return htmlPage(allocator, "Sign up", body);
+        return pages.signupGet(app_state, allocator);
     }
 
     if (req.method == .POST and std.mem.eql(u8, path, "/signup")) {
-        if (!isForm(req.content_type)) {
-            return .{ .status = .bad_request, .body = "invalid content-type\n" };
-        }
-
-        var parsed = form.parse(allocator, req.body) catch
-            return .{ .status = .bad_request, .body = "invalid form\n" };
-
-        const username = parsed.get("username") orelse
-            return .{ .status = .bad_request, .body = "missing username\n" };
-        const password_plain = parsed.get("password") orelse
-            return .{ .status = .bad_request, .body = "missing password\n" };
-
-        const user_id = users.create(
-            &app_state.conn,
-            allocator,
-            username,
-            password_plain,
-            app_state.cfg.password_params,
-        ) catch |err| switch (err) {
-            error.SingleUserOnly => return htmlPage(allocator, "Already set up", "<p>User already exists.</p>"),
-            else => return .{ .status = .internal_server_error, .body = "internal server error\n" },
-        };
-
-        const token = sessions.create(&app_state.conn, allocator, user_id) catch
-            return .{ .status = .internal_server_error, .body = "internal server error\n" };
-
-        return redirectWithSession(allocator, app_state.cfg.scheme == .https, token, "/");
+        return pages.signupPost(app_state, allocator, req);
     }
 
     if (req.method == .GET and std.mem.eql(u8, path, "/login")) {
-        const q = queryString(req.target);
-        const return_to = parseQueryParam(allocator, q, "return_to") catch null;
-
-        const extra = if (return_to) |rt| blk: {
-            const escaped = htmlEscapeAlloc(allocator, rt) catch break :blk "";
-            break :blk std.fmt.allocPrint(
-                allocator,
-                "<input type=\"hidden\" name=\"return_to\" value=\"{s}\">",
-                .{escaped},
-            ) catch "";
-        } else "";
-
-        const full = std.fmt.allocPrint(
-            allocator,
-            \\<form method="POST" action="/login">
-            \\  <label>Username <input name="username" autocomplete="username"></label><br>
-            \\  <label>Password <input type="password" name="password" autocomplete="current-password"></label><br>
-            \\  {s}
-            \\  <button type="submit">Log in</button>
-            \\</form>
-        ,
-            .{extra},
-        ) catch
-            \\<form method="POST" action="/login">
-            \\  <label>Username <input name="username" autocomplete="username"></label><br>
-            \\  <label>Password <input type="password" name="password" autocomplete="current-password"></label><br>
-            \\  <button type="submit">Log in</button>
-            \\</form>
-        ;
-
-        return htmlPage(allocator, "Log in", full);
+        return pages.loginGet(app_state, allocator, req);
     }
 
     if (req.method == .POST and std.mem.eql(u8, path, "/login")) {
-        if (!isForm(req.content_type)) {
-            return .{ .status = .bad_request, .body = "invalid content-type\n" };
-        }
-
-        var parsed = form.parse(allocator, req.body) catch
-            return .{ .status = .bad_request, .body = "invalid form\n" };
-
-        const username = parsed.get("username") orelse
-            return .{ .status = .bad_request, .body = "missing username\n" };
-        const password_plain = parsed.get("password") orelse
-            return .{ .status = .bad_request, .body = "missing password\n" };
-        const return_to = parsed.get("return_to");
-
-        const user_id = users.authenticate(
-            &app_state.conn,
-            allocator,
-            username,
-            password_plain,
-            app_state.cfg.password_params,
-        ) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
-
-        if (user_id == null) {
-            return htmlPage(allocator, "Log in", "<p>Invalid username or password.</p>");
-        }
-
-        const token = sessions.create(&app_state.conn, allocator, user_id.?) catch
-            return .{ .status = .internal_server_error, .body = "internal server error\n" };
-
-        const location = safeReturnTo(return_to) orelse "/";
-        return redirectWithSession(allocator, app_state.cfg.scheme == .https, token, location);
+        return pages.loginPost(app_state, allocator, req);
     }
 
     if (std.mem.eql(u8, path, "/oauth/authorize")) {
@@ -3687,9 +3587,7 @@ fn oauthErrorResponse(
 }
 
 fn currentUserId(app_state: *app.App, req: Request) !?i64 {
-    const cookie_header = req.cookie orelse return null;
-    const token = sessions.parseCookie(cookie_header) orelse return null;
-    return try sessions.lookupUserId(&app_state.conn, token);
+    return session.currentUserId(app_state, req);
 }
 
 fn redirect(allocator: std.mem.Allocator, location: []const u8) Response {
@@ -3748,20 +3646,7 @@ fn redirectWithSession(
     token: []const u8,
     location: []const u8,
 ) Response {
-    const cookie = cookieValue(allocator, secure_cookie, token) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-
-    const headers = allocator.alloc(std.http.Header, 2) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-
-    headers[0] = .{ .name = "location", .value = location };
-    headers[1] = .{ .name = "set-cookie", .value = cookie };
-
-    return .{
-        .status = .see_other,
-        .body = "redirecting\n",
-        .headers = headers,
-    };
+    return session.redirectWithSession(allocator, secure_cookie, token, location);
 }
 
 fn cookieValue(allocator: std.mem.Allocator, secure_cookie: bool, token: []const u8) ![]u8 {
