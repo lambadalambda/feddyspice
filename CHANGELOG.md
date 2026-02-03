@@ -77,6 +77,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Remote account profile media (avatars/headers) are parsed from ActivityPub actor documents and exposed via the Mastodon API.
 - Remote status attachments are parsed from inbound ActivityPub notes and exposed via `media_attachments` in the Mastodon API.
 - Implemented Mastodon media v2 upload endpoint (`POST /api/v2/media`) and media metadata fetch (`GET /api/v1/media/:id`) for pl-fe compatibility.
+- User profile fields stored in SQLite (`display_name`, `note`, `avatar_media_id`, `header_media_id`).
+- Profile updates via `PATCH /api/v1/accounts/update_credentials` (display name, bio, avatar, header).
+- ActivityPub actor documents include `name`, `summary`, `icon`, and `image` when profile fields are set.
 
 ### Fixed
 
@@ -109,3 +112,4 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `mise run fed:test` is more reliable by bringing up the fedbox stack explicitly before running the test runner.
 - Outbound HTTP requests enforce basic SSRF protections (DNS-based) by blocking private/loopback/link-local/multicast ranges by default; fedbox enables private ranges via `FEDDYSPICE_ALLOW_PRIVATE_NETWORKS=true`.
 - `POST /api/v1/statuses` now allows an empty `status` when at least one `media_ids[]` attachment is present.
+- Orphan media pruning no longer deletes profile avatar/header media.

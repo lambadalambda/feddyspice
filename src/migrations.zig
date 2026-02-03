@@ -129,6 +129,11 @@ const migrations = [_]Migration{
         .name = "remote_status_attachments",
         .sql = remote_status_attachments_v16_sql,
     },
+    .{
+        .version = 17,
+        .name = "user_profile_fields",
+        .sql = user_profile_fields_v17_sql,
+    },
 };
 
 const schema_migrations_sql: [:0]const u8 =
@@ -363,6 +368,13 @@ const remote_status_attachments_v16_sql: [:0]const u8 =
     \\ALTER TABLE remote_statuses ADD COLUMN attachments_json TEXT;
 ++ "\x00";
 
+const user_profile_fields_v17_sql: [:0]const u8 =
+    \\ALTER TABLE users ADD COLUMN display_name TEXT NOT NULL DEFAULT '';
+    \\ALTER TABLE users ADD COLUMN note TEXT NOT NULL DEFAULT '';
+    \\ALTER TABLE users ADD COLUMN avatar_media_id INTEGER;
+    \\ALTER TABLE users ADD COLUMN header_media_id INTEGER;
+++ "\x00";
+
 test "migrate: creates users table and records version" {
     var conn = try db.Db.openZ(":memory:");
     defer conn.close();
@@ -411,6 +423,8 @@ test "migrate: creates users table and records version" {
     try std.testing.expectEqual(@as(i64, 15), v_stmt.columnInt64(0));
     try std.testing.expectEqual(db.Stmt.Step.row, try v_stmt.step());
     try std.testing.expectEqual(@as(i64, 16), v_stmt.columnInt64(0));
+    try std.testing.expectEqual(db.Stmt.Step.row, try v_stmt.step());
+    try std.testing.expectEqual(@as(i64, 17), v_stmt.columnInt64(0));
     try std.testing.expectEqual(db.Stmt.Step.done, try v_stmt.step());
 }
 
@@ -425,6 +439,6 @@ test "migrate: is idempotent" {
     defer stmt.finalize();
 
     try std.testing.expectEqual(db.Stmt.Step.row, try stmt.step());
-    try std.testing.expectEqual(@as(i64, 16), stmt.columnInt64(0));
+    try std.testing.expectEqual(@as(i64, 17), stmt.columnInt64(0));
     try std.testing.expectEqual(db.Stmt.Step.done, try stmt.step());
 }

@@ -439,6 +439,10 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
         return verifyCredentials(app_state, allocator, req);
     }
 
+    if ((req.method == .PATCH or req.method == .POST) and std.mem.eql(u8, path, "/api/v1/accounts/update_credentials")) {
+        return updateCredentials(app_state, allocator, req);
+    }
+
     if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/accounts/lookup")) {
         return accountLookup(app_state, allocator, req);
     }
@@ -666,6 +670,29 @@ fn defaultHeaderUrlAlloc(app_state: *app.App, allocator: std.mem.Allocator) ![]u
     });
 }
 
+fn mediaUrlAlloc(app_state: *app.App, allocator: std.mem.Allocator, media_id: i64) ?[]u8 {
+    var meta = media.lookupMeta(&app_state.conn, allocator, media_id) catch return null;
+    if (meta == null) return null;
+    defer meta.?.deinit(allocator);
+
+    const base = baseUrlAlloc(app_state, allocator) catch return null;
+    return std.fmt.allocPrint(allocator, "{s}/media/{s}", .{ base, meta.?.public_token }) catch null;
+}
+
+fn userAvatarUrlAlloc(app_state: *app.App, allocator: std.mem.Allocator, user: users.User) []const u8 {
+    if (user.avatar_media_id) |id| {
+        if (mediaUrlAlloc(app_state, allocator, id)) |url| return url;
+    }
+    return defaultAvatarUrlAlloc(app_state, allocator) catch "";
+}
+
+fn userHeaderUrlAlloc(app_state: *app.App, allocator: std.mem.Allocator, user: users.User) []const u8 {
+    if (user.header_media_id) |id| {
+        if (mediaUrlAlloc(app_state, allocator, id)) |url| return url;
+    }
+    return defaultHeaderUrlAlloc(app_state, allocator) catch "";
+}
+
 fn userUrlAlloc(app_state: *app.App, allocator: std.mem.Allocator, username: []const u8) ![]u8 {
     return std.fmt.allocPrint(allocator, "{s}://{s}/users/{s}", .{
         @tagName(app_state.cfg.scheme),
@@ -810,6 +837,10 @@ fn actorGet(app_state: *app.App, allocator: std.mem.Allocator, path: []const u8)
     const key_id = std.fmt.allocPrint(allocator, "{s}#main-key", .{actor_id}) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
 
+    const avatar_url = userAvatarUrlAlloc(app_state, allocator, user.?);
+    const header_url = userHeaderUrlAlloc(app_state, allocator, user.?);
+    const note_html = textToHtmlAlloc(allocator, user.?.note) catch user.?.note;
+
     const payload = .{
         .@"@context" = [_][]const u8{
             "https://www.w3.org/ns/activitystreams",
@@ -817,7 +848,11 @@ fn actorGet(app_state: *app.App, allocator: std.mem.Allocator, path: []const u8)
         },
         .id = actor_id,
         .type = "Person",
+        .name = user.?.display_name,
         .preferredUsername = user.?.username,
+        .summary = note_html,
+        .icon = .{ .type = "Image", .url = avatar_url },
+        .image = .{ .type = "Image", .url = header_url },
         .inbox = inbox,
         .outbox = outbox,
         .followers = followers_url,
@@ -2442,15 +2477,16 @@ fn makeStatusPayload(app_state: *app.App, allocator: std.mem.Allocator, user: us
     const html_content = textToHtmlAlloc(allocator, st.text) catch st.text;
 
     const user_url = userUrlAlloc(app_state, allocator, user.username) catch "";
-    const avatar_url = defaultAvatarUrlAlloc(app_state, allocator) catch "";
-    const header_url = defaultHeaderUrlAlloc(app_state, allocator) catch "";
+    const avatar_url = userAvatarUrlAlloc(app_state, allocator, user);
+    const header_url = userHeaderUrlAlloc(app_state, allocator, user);
+    const note_html = textToHtmlAlloc(allocator, user.note) catch user.note;
 
     const acct: AccountPayload = .{
         .id = user_id_str,
         .username = user.username,
         .acct = user.username,
-        .display_name = "",
-        .note = "",
+        .display_name = user.display_name,
+        .note = note_html,
         .url = user_url,
         .locked = false,
         .bot = false,
@@ -2635,15 +2671,16 @@ fn verifyCredentials(app_state: *app.App, allocator: std.mem.Allocator, req: Req
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
 
     const user_url = userUrlAlloc(app_state, allocator, user.?.username) catch "";
-    const avatar_url = defaultAvatarUrlAlloc(app_state, allocator) catch "";
-    const header_url = defaultHeaderUrlAlloc(app_state, allocator) catch "";
+    const avatar_url = userAvatarUrlAlloc(app_state, allocator, user.?);
+    const header_url = userHeaderUrlAlloc(app_state, allocator, user.?);
+    const note_html = textToHtmlAlloc(allocator, user.?.note) catch user.?.note;
 
     const payload = .{
         .id = id_str,
         .username = user.?.username,
         .acct = user.?.username,
-        .display_name = "",
-        .note = "",
+        .display_name = user.?.display_name,
+        .note = note_html,
         .url = user_url,
         .locked = false,
         .bot = false,
@@ -2666,6 +2703,131 @@ fn verifyCredentials(app_state: *app.App, allocator: std.mem.Allocator, req: Req
         .content_type = "application/json; charset=utf-8",
         .body = body,
     };
+}
+
+fn updateCredentials(app_state: *app.App, allocator: std.mem.Allocator, req: Request) Response {
+    const token = bearerToken(req.authorization) orelse return unauthorized(allocator);
+
+    const info = oauth.verifyAccessToken(&app_state.conn, allocator, token) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (info == null) return unauthorized(allocator);
+
+    const user = users.lookupUserById(&app_state.conn, allocator, info.?.user_id) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (user == null) return unauthorized(allocator);
+
+    var display_name = user.?.display_name;
+    var note = user.?.note;
+    var avatar_media_id = user.?.avatar_media_id;
+    var header_media_id = user.?.header_media_id;
+
+    var avatar_file: ?form.MultipartFilePart = null;
+    var header_file: ?form.MultipartFilePart = null;
+
+    var clear_avatar = false;
+    var clear_header = false;
+
+    if (isMultipart(req.content_type)) {
+        var parsed = form.parseMultipartWithFiles(allocator, req.content_type.?, req.body) catch
+            return .{ .status = .bad_request, .body = "invalid form\n" };
+        defer parsed.deinit(allocator);
+
+        if (parsed.form.get("display_name")) |v| {
+            display_name = allocator.dupe(u8, v) catch
+                return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        }
+        if (parsed.form.get("note")) |v| {
+            note = allocator.dupe(u8, v) catch
+                return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        }
+
+        if (parsed.form.get("avatar")) |v| clear_avatar = v.len == 0;
+        if (parsed.form.get("header")) |v| clear_header = v.len == 0;
+
+        for (parsed.files) |f| {
+            if (std.mem.eql(u8, f.name, "avatar")) avatar_file = f;
+            if (std.mem.eql(u8, f.name, "header")) header_file = f;
+        }
+    } else {
+        var parsed = parseBodyParams(allocator, req) catch
+            return .{ .status = .bad_request, .body = "invalid form\n" };
+        defer parsed.deinit(allocator);
+
+        if (parsed.get("display_name")) |v| {
+            display_name = allocator.dupe(u8, v) catch
+                return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        }
+        if (parsed.get("note")) |v| {
+            note = allocator.dupe(u8, v) catch
+                return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        }
+
+        if (parsed.get("avatar")) |v| clear_avatar = v.len == 0;
+        if (parsed.get("header")) |v| clear_header = v.len == 0;
+    }
+
+    if (clear_avatar) avatar_media_id = null;
+    if (clear_header) header_media_id = null;
+
+    app_state.conn.execZ("BEGIN IMMEDIATE;\x00") catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    var committed = false;
+    defer if (!committed) {
+        app_state.conn.execZ("ROLLBACK;\x00") catch {};
+    };
+
+    const now_ms: i64 = std.time.milliTimestamp();
+
+    if (avatar_file) |f| {
+        var meta = media.create(
+            &app_state.conn,
+            allocator,
+            info.?.user_id,
+            f.content_type orelse "application/octet-stream",
+            f.data,
+            null,
+            now_ms,
+        ) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        defer meta.deinit(allocator);
+        avatar_media_id = meta.id;
+    }
+
+    if (header_file) |f| {
+        var meta = media.create(
+            &app_state.conn,
+            allocator,
+            info.?.user_id,
+            f.content_type orelse "application/octet-stream",
+            f.data,
+            null,
+            now_ms,
+        ) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        defer meta.deinit(allocator);
+        header_media_id = meta.id;
+    }
+
+    const updated = users.updateProfile(
+        &app_state.conn,
+        info.?.user_id,
+        display_name,
+        note,
+        avatar_media_id,
+        header_media_id,
+    ) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (!updated) return unauthorized(allocator);
+
+    app_state.conn.execZ("COMMIT;\x00") catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    committed = true;
+
+    const one_day_ms: i64 = 24 * 60 * 60 * 1000;
+    _ = media.pruneOrphansOlderThan(&app_state.conn, now_ms - one_day_ms) catch 0;
+
+    const updated_user = users.lookupUserById(&app_state.conn, allocator, info.?.user_id) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (updated_user == null) return unauthorized(allocator);
+
+    return accountByUser(app_state, allocator, updated_user.?);
 }
 
 fn accountLookup(app_state: *app.App, allocator: std.mem.Allocator, req: Request) Response {
@@ -3112,15 +3274,16 @@ fn accountByUser(app_state: *app.App, allocator: std.mem.Allocator, user: users.
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
 
     const user_url = userUrlAlloc(app_state, allocator, user.username) catch "";
-    const avatar_url = defaultAvatarUrlAlloc(app_state, allocator) catch "";
-    const header_url = defaultHeaderUrlAlloc(app_state, allocator) catch "";
+    const avatar_url = userAvatarUrlAlloc(app_state, allocator, user);
+    const header_url = userHeaderUrlAlloc(app_state, allocator, user);
+    const note_html = textToHtmlAlloc(allocator, user.note) catch user.note;
 
     const payload: AccountPayload = .{
         .id = id_str,
         .username = user.username,
         .acct = user.username,
-        .display_name = "",
-        .note = "",
+        .display_name = user.display_name,
+        .note = note_html,
         .url = user_url,
         .locked = false,
         .bot = false,
@@ -4549,6 +4712,133 @@ test "GET /api/v1/accounts/verify_credentials works with bearer token" {
     try std.testing.expectEqualStrings("http://example.test/static/avatar.png", parsed.value.object.get("avatar_static").?.string);
     try std.testing.expectEqualStrings("http://example.test/static/header.png", parsed.value.object.get("header").?.string);
     try std.testing.expectEqualStrings("http://example.test/static/header.png", parsed.value.object.get("header_static").?.string);
+}
+
+test "PATCH /api/v1/accounts/update_credentials updates display_name and note" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const app_creds = try oauth.createApp(
+        &app_state.conn,
+        a,
+        "pl-fe",
+        "urn:ietf:wg:oauth:2.0:oob",
+        "read write",
+        "",
+    );
+    const token = try oauth.createAccessToken(&app_state.conn, a, app_creds.id, user_id, "read write");
+    const auth_header = try std.fmt.allocPrint(a, "Bearer {s}", .{token});
+
+    const update_resp = handle(&app_state, a, .{
+        .method = .PATCH,
+        .target = "/api/v1/accounts/update_credentials",
+        .content_type = "application/x-www-form-urlencoded",
+        .body = "display_name=Alice&note=Hello",
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, update_resp.status);
+
+    var update_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, update_resp.body, .{});
+    defer update_json.deinit();
+    try std.testing.expectEqualStrings("Alice", update_json.value.object.get("display_name").?.string);
+    try std.testing.expectEqualStrings("<p>Hello</p>", update_json.value.object.get("note").?.string);
+
+    const verify_resp = handle(&app_state, a, .{
+        .method = .GET,
+        .target = "/api/v1/accounts/verify_credentials",
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, verify_resp.status);
+
+    var verify_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, verify_resp.body, .{});
+    defer verify_json.deinit();
+    try std.testing.expectEqualStrings("Alice", verify_json.value.object.get("display_name").?.string);
+    try std.testing.expectEqualStrings("<p>Hello</p>", verify_json.value.object.get("note").?.string);
+}
+
+test "PATCH /api/v1/accounts/update_credentials accepts avatar and header uploads" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const app_creds = try oauth.createApp(
+        &app_state.conn,
+        a,
+        "pl-fe",
+        "urn:ietf:wg:oauth:2.0:oob",
+        "read write",
+        "",
+    );
+    const token = try oauth.createAccessToken(&app_state.conn, a, app_creds.id, user_id, "read write");
+    const auth_header = try std.fmt.allocPrint(a, "Bearer {s}", .{token});
+
+    const ct = "multipart/form-data; boundary=abc";
+    const body =
+        "--abc\r\n" ++
+        "Content-Disposition: form-data; name=\"display_name\"\r\n" ++
+        "\r\n" ++
+        "Alice\r\n" ++
+        "--abc\r\n" ++
+        "Content-Disposition: form-data; name=\"note\"\r\n" ++
+        "\r\n" ++
+        "Hello\r\n" ++
+        "--abc\r\n" ++
+        "Content-Disposition: form-data; name=\"avatar\"; filename=\"a.png\"\r\n" ++
+        "Content-Type: image/png\r\n" ++
+        "\r\n" ++
+        "AVATAR\r\n" ++
+        "--abc\r\n" ++
+        "Content-Disposition: form-data; name=\"header\"; filename=\"h.png\"\r\n" ++
+        "Content-Type: image/png\r\n" ++
+        "\r\n" ++
+        "HEADER\r\n" ++
+        "--abc--\r\n";
+
+    const update_resp = handle(&app_state, a, .{
+        .method = .PATCH,
+        .target = "/api/v1/accounts/update_credentials",
+        .content_type = ct,
+        .body = body,
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, update_resp.status);
+
+    var update_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, update_resp.body, .{});
+    defer update_json.deinit();
+
+    const avatar_url = update_json.value.object.get("avatar_static").?.string;
+    const header_url = update_json.value.object.get("header_static").?.string;
+    try std.testing.expect(std.mem.startsWith(u8, avatar_url, "http://example.test/media/"));
+    try std.testing.expect(std.mem.startsWith(u8, header_url, "http://example.test/media/"));
+
+    const avatar_token = avatar_url["http://example.test/media/".len..];
+    const header_token = header_url["http://example.test/media/".len..];
+
+    const avatar_target = try std.fmt.allocPrint(a, "/media/{s}", .{avatar_token});
+    const header_target = try std.fmt.allocPrint(a, "/media/{s}", .{header_token});
+
+    const avatar_resp = handle(&app_state, a, .{ .method = .GET, .target = avatar_target });
+    try std.testing.expectEqual(std.http.Status.ok, avatar_resp.status);
+    try std.testing.expectEqualStrings("image/png", avatar_resp.content_type);
+    try std.testing.expectEqualStrings("AVATAR", avatar_resp.body);
+
+    const header_resp = handle(&app_state, a, .{ .method = .GET, .target = header_target });
+    try std.testing.expectEqual(std.http.Status.ok, header_resp.status);
+    try std.testing.expectEqualStrings("image/png", header_resp.content_type);
+    try std.testing.expectEqualStrings("HEADER", header_resp.body);
 }
 
 test "accounts: lookup + get account" {

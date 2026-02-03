@@ -244,7 +244,8 @@ pub fn pruneOrphansOlderThan(conn: *db.Db, cutoff_ms: i64) db.Error!i64 {
             "  SELECT m.id\n" ++
             "  FROM media_attachments m\n" ++
             "  LEFT JOIN status_media_attachments sma ON sma.media_id = m.id\n" ++
-            "  WHERE sma.media_id IS NULL AND m.created_at_ms < ?1\n" ++
+            "  LEFT JOIN users u ON u.avatar_media_id = m.id OR u.header_media_id = m.id\n" ++
+            "  WHERE sma.media_id IS NULL AND u.id IS NULL AND m.created_at_ms < ?1\n" ++
             ");\x00",
     );
     defer stmt.finalize();
@@ -331,6 +332,10 @@ test "media: pruneOrphansOlderThan deletes unattached only" {
     var orphan = try createWithToken(&conn, std.testing.allocator, user_id, "orph", "image/png", "x", null, 1000);
     defer orphan.deinit(std.testing.allocator);
 
+    var profile = try createWithToken(&conn, std.testing.allocator, user_id, "prof", "image/png", "z", null, 1000);
+    defer profile.deinit(std.testing.allocator);
+    try std.testing.expect(try @import("users.zig").updateProfile(&conn, user_id, "", "", profile.id, null));
+
     var attached = try createWithToken(&conn, std.testing.allocator, user_id, "att", "image/png", "y", null, 1000);
     defer attached.deinit(std.testing.allocator);
 
@@ -348,6 +353,10 @@ test "media: pruneOrphansOlderThan deletes unattached only" {
     var still = (try lookupMeta(&conn, std.testing.allocator, attached.id)).?;
     defer still.deinit(std.testing.allocator);
     try std.testing.expectEqual(attached.id, still.id);
+
+    var still_profile = (try lookupMeta(&conn, std.testing.allocator, profile.id)).?;
+    defer still_profile.deinit(std.testing.allocator);
+    try std.testing.expectEqual(profile.id, still_profile.id);
 }
 
 fn generatePublicTokenHexAlloc(allocator: std.mem.Allocator) std.mem.Allocator.Error![]u8 {

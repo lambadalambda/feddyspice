@@ -20,6 +20,10 @@ pub const User = struct {
     id: i64,
     username: []const u8,
     created_at: []const u8,
+    display_name: []const u8,
+    note: []const u8,
+    avatar_media_id: ?i64,
+    header_media_id: ?i64,
 };
 
 pub fn count(conn: *db.Db) db.Error!i64 {
@@ -121,7 +125,7 @@ pub fn lookupUserById(
     id: i64,
 ) (db.Error || std.mem.Allocator.Error)!?User {
     var stmt = try conn.prepareZ(
-        "SELECT id, username, created_at FROM users WHERE id = ?1 LIMIT 1;\x00",
+        "SELECT id, username, created_at, display_name, note, avatar_media_id, header_media_id FROM users WHERE id = ?1 LIMIT 1;\x00",
     );
     defer stmt.finalize();
 
@@ -136,6 +140,10 @@ pub fn lookupUserById(
         .id = stmt.columnInt64(0),
         .username = try allocator.dupe(u8, stmt.columnText(1)),
         .created_at = try allocator.dupe(u8, stmt.columnText(2)),
+        .display_name = try allocator.dupe(u8, stmt.columnText(3)),
+        .note = try allocator.dupe(u8, stmt.columnText(4)),
+        .avatar_media_id = if (stmt.columnType(5) == .null) null else stmt.columnInt64(5),
+        .header_media_id = if (stmt.columnType(6) == .null) null else stmt.columnInt64(6),
     };
 }
 
@@ -145,7 +153,7 @@ pub fn lookupUserByUsername(
     username: []const u8,
 ) (db.Error || std.mem.Allocator.Error)!?User {
     var stmt = try conn.prepareZ(
-        "SELECT id, username, created_at FROM users WHERE username = ?1 LIMIT 1;\x00",
+        "SELECT id, username, created_at, display_name, note, avatar_media_id, header_media_id FROM users WHERE username = ?1 LIMIT 1;\x00",
     );
     defer stmt.finalize();
     try stmt.bindText(1, username);
@@ -159,11 +167,17 @@ pub fn lookupUserByUsername(
         .id = stmt.columnInt64(0),
         .username = try allocator.dupe(u8, stmt.columnText(1)),
         .created_at = try allocator.dupe(u8, stmt.columnText(2)),
+        .display_name = try allocator.dupe(u8, stmt.columnText(3)),
+        .note = try allocator.dupe(u8, stmt.columnText(4)),
+        .avatar_media_id = if (stmt.columnType(5) == .null) null else stmt.columnInt64(5),
+        .header_media_id = if (stmt.columnType(6) == .null) null else stmt.columnInt64(6),
     };
 }
 
 pub fn lookupFirstUser(conn: *db.Db, allocator: std.mem.Allocator) (db.Error || std.mem.Allocator.Error)!?User {
-    var stmt = try conn.prepareZ("SELECT id, username, created_at FROM users ORDER BY id ASC LIMIT 1;\x00");
+    var stmt = try conn.prepareZ(
+        "SELECT id, username, created_at, display_name, note, avatar_media_id, header_media_id FROM users ORDER BY id ASC LIMIT 1;\x00",
+    );
     defer stmt.finalize();
 
     switch (try stmt.step()) {
@@ -175,7 +189,41 @@ pub fn lookupFirstUser(conn: *db.Db, allocator: std.mem.Allocator) (db.Error || 
         .id = stmt.columnInt64(0),
         .username = try allocator.dupe(u8, stmt.columnText(1)),
         .created_at = try allocator.dupe(u8, stmt.columnText(2)),
+        .display_name = try allocator.dupe(u8, stmt.columnText(3)),
+        .note = try allocator.dupe(u8, stmt.columnText(4)),
+        .avatar_media_id = if (stmt.columnType(5) == .null) null else stmt.columnInt64(5),
+        .header_media_id = if (stmt.columnType(6) == .null) null else stmt.columnInt64(6),
     };
+}
+
+pub fn updateProfile(
+    conn: *db.Db,
+    user_id: i64,
+    display_name: []const u8,
+    note: []const u8,
+    avatar_media_id: ?i64,
+    header_media_id: ?i64,
+) db.Error!bool {
+    var stmt = try conn.prepareZ(
+        "UPDATE users SET display_name=?1, note=?2, avatar_media_id=?3, header_media_id=?4 WHERE id=?5;\x00",
+    );
+    defer stmt.finalize();
+
+    try stmt.bindText(1, display_name);
+    try stmt.bindText(2, note);
+    if (avatar_media_id) |id| {
+        try stmt.bindInt64(3, id);
+    } else {
+        try stmt.bindNull(3);
+    }
+    if (header_media_id) |id| {
+        try stmt.bindInt64(4, id);
+    } else {
+        try stmt.bindNull(4);
+    }
+    try stmt.bindInt64(5, user_id);
+    _ = try stmt.step();
+    return conn.changes() > 0;
 }
 
 pub fn freeCredentials(allocator: std.mem.Allocator, creds: *Credentials) void {

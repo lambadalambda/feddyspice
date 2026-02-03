@@ -170,6 +170,17 @@ pub const MultipartWithFile = struct {
     }
 };
 
+pub const MultipartWithFiles = struct {
+    form: Form,
+    files: []const MultipartFilePart,
+
+    pub fn deinit(self: *MultipartWithFiles, allocator: std.mem.Allocator) void {
+        self.form.deinit(allocator);
+        if (self.files.len > 0) allocator.free(@constCast(self.files));
+        self.* = undefined;
+    }
+};
+
 pub fn parseMultipartWithFile(
     allocator: std.mem.Allocator,
     content_type: []const u8,
@@ -251,6 +262,91 @@ pub fn parseMultipartWithFile(
     return .{
         .form = .{ .map = map },
         .file = file,
+    };
+}
+
+pub fn parseMultipartWithFiles(
+    allocator: std.mem.Allocator,
+    content_type: []const u8,
+    body: []const u8,
+) !MultipartWithFiles {
+    var map: std.StringHashMapUnmanaged([]const u8) = .empty;
+    errdefer map.deinit(allocator);
+
+    const boundary = boundaryFromContentType(content_type) orelse return error.MissingBoundary;
+
+    const delim = try std.fmt.allocPrint(allocator, "--{s}", .{boundary});
+    const delim_with_lf = try std.fmt.allocPrint(allocator, "\n--{s}", .{boundary});
+    defer allocator.free(delim);
+    defer allocator.free(delim_with_lf);
+
+    var files: std.ArrayListUnmanaged(MultipartFilePart) = .empty;
+    errdefer files.deinit(allocator);
+
+    var pos: usize = std.mem.indexOf(u8, body, delim) orelse return error.InvalidMultipart;
+
+    while (true) {
+        const boundary_pos = std.mem.indexOfPos(u8, body, pos, delim) orelse break;
+        pos = boundary_pos + delim.len;
+
+        if (pos + 2 <= body.len and std.mem.eql(u8, body[pos .. pos + 2], "--")) break; // final boundary
+
+        if (pos < body.len and body[pos] == '\r') pos += 1;
+        if (pos < body.len and body[pos] == '\n') pos += 1;
+
+        const headers_end_crlf = std.mem.indexOfPos(u8, body, pos, "\r\n\r\n");
+        const headers_end_lf = std.mem.indexOfPos(u8, body, pos, "\n\n");
+
+        var headers_end: usize = undefined;
+        var sep_len: usize = undefined;
+        if (headers_end_crlf) |idx| {
+            headers_end = idx;
+            sep_len = 4;
+        } else if (headers_end_lf) |idx| {
+            headers_end = idx;
+            sep_len = 2;
+        } else {
+            return error.InvalidMultipart;
+        }
+
+        const headers = body[pos..headers_end];
+        const content_start = headers_end + sep_len;
+
+        const next_marker = std.mem.indexOfPos(u8, body, content_start, delim_with_lf) orelse
+            return error.InvalidMultipart;
+
+        var content_end: usize = next_marker;
+        if (content_end > content_start and body[content_end - 1] == '\r') content_end -= 1;
+        const content = body[content_start..content_end];
+
+        const name = multipartPartName(headers) orelse {
+            pos = next_marker + 1;
+            continue;
+        };
+
+        if (std.mem.indexOf(u8, headers, "filename=") != null) {
+            try files.append(allocator, .{
+                .name = name,
+                .filename = multipartPartFilename(headers),
+                .content_type = multipartPartContentType(headers),
+                .data = content,
+            });
+            pos = next_marker + 1;
+            continue;
+        }
+
+        const key_copy = try allocator.dupe(u8, name);
+        const val_copy = try allocator.dupe(u8, content);
+        try putOrAppend(allocator, &map, key_copy, val_copy);
+
+        pos = next_marker + 1;
+    }
+
+    const files_slice = if (files.items.len == 0) &[_]MultipartFilePart{} else try files.toOwnedSlice(allocator);
+
+    return .{
+        .form = .{ .map = map },
+        .files = files_slice,
     };
 }
 
