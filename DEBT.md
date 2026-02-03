@@ -5,11 +5,10 @@ This file tracks “good future refactors” and known risks. Add items whenever
 ## Architecture / DRY
 
 - `src/http.zig` (~8k LOC) should be split into a small router + feature modules (e.g. `oauth`, `accounts`, `statuses`, `timelines`, `activitypub`) for maintainability and faster iteration.
-- Shared helpers are duplicated across `src/http.zig` and `src/federation.zig`:
-  - `htmlEscapeAlloc` / `textToHtmlAlloc`
-  - `baseUrlAlloc` + related URL helpers
-  - `remote_actor_id_base` constant + remote account ID helpers
-  - Consider extracting to `src/util/*.zig` and importing from both.
+- Progress:
+  - Shared helpers extracted to `src/util/*` (`htmlEscapeAlloc`/`textToHtmlAlloc`, URL builders, remote account API ID mapping).
+  - HTTP `Request`/`Response` types moved to `src/http_types.zig` to avoid import cycles while splitting handlers.
+  - Started splitting HTTP handlers into `src/http/*` (discovery + instance endpoints) and `src/http/common.zig` for shared helper functions.
 - Federation delivery code has repeated “sign + POST” loops (Create/Delete, public/private/direct variants). Extract a single helper like:
   - `deliverSignedActivity(activity_json, recipients)` where recipients map to inbox URLs + host headers.
   - Goal: federation behavior depends on computed **addressing** (`to`/`cc`), not the activity type.
@@ -33,4 +32,3 @@ This file tracks “good future refactors” and known risks. Add items whenever
   - Risk: XSS if clients render unsanitized HTML. Consider server-side sanitization (or store both sanitized HTML + plain text fallback).
 - Header-injection hardening:
   - Any user-controlled header values (e.g. redirects, content types) should be validated/stripped for control characters (`\r`, `\n`, etc.) before being used in response headers.
-
