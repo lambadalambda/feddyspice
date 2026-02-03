@@ -55,6 +55,12 @@ pub const Hub = struct {
         }
     }
 
+    pub fn subscriberCount(self: *Hub) usize {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.subscribers.items.len;
+    }
+
     pub fn publishUpdate(self: *Hub, user_id: i64, status_json: []const u8) void {
         self.publish(user_id, .user, "update", status_json);
     }

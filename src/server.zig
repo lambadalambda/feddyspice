@@ -5,6 +5,11 @@ const net = std.net;
 
 const routes = @import("http.zig");
 const app = @import("app.zig");
+const form = @import("form.zig");
+const log = @import("log.zig");
+const oauth = @import("oauth.zig");
+const streaming_hub = @import("streaming_hub.zig");
+const websocket = @import("websocket.zig");
 
 pub fn serve(app_state: *app.App, listen_address: net.Address) !void {
     var listener = try listen_address.listen(.{ .reuse_address = true });
@@ -17,7 +22,8 @@ pub fn serve(app_state: *app.App, listen_address: net.Address) !void {
 
 pub fn serveOnce(app_state: *app.App, listener: *net.Server) !void {
     var conn = try listener.accept();
-    defer conn.stream.close();
+    var close_conn = true;
+    defer if (close_conn) conn.stream.close();
 
     var read_buffer: [16 * 1024]u8 = undefined;
     var write_buffer: [16 * 1024]u8 = undefined;
@@ -38,16 +44,86 @@ pub fn serveOnce(app_state: *app.App, listener: *net.Server) !void {
 
     var cookie: ?[]const u8 = null;
     var authorization: ?[]const u8 = null;
+    var connection_hdr: ?[]const u8 = null;
+    var upgrade_hdr: ?[]const u8 = null;
+    var sec_ws_key: ?[]const u8 = null;
+    var sec_ws_version: ?[]const u8 = null;
 
     var it = request.iterateHeaders();
     while (it.next()) |h| {
         if (std.ascii.eqlIgnoreCase(h.name, "cookie")) cookie = h.value;
         if (std.ascii.eqlIgnoreCase(h.name, "authorization")) authorization = h.value;
+        if (std.ascii.eqlIgnoreCase(h.name, "connection")) connection_hdr = h.value;
+        if (std.ascii.eqlIgnoreCase(h.name, "upgrade")) upgrade_hdr = h.value;
+        if (std.ascii.eqlIgnoreCase(h.name, "sec-websocket-key")) sec_ws_key = h.value;
+        if (std.ascii.eqlIgnoreCase(h.name, "sec-websocket-version")) sec_ws_version = h.value;
     }
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
+
+    if (isStreamingWebSocketRequest(method, path, upgrade_hdr, connection_hdr, sec_ws_key, sec_ws_version)) {
+        const q = targetQuery(target);
+        var params = form.parse(alloc, q) catch form.Form{ .map = .empty };
+        const stream_raw = params.get("stream") orelse "user";
+
+        const token_q = params.get("access_token") orelse params.get("token");
+        const token = token_q orelse bearerToken(authorization) orelse "";
+        if (token.len == 0) {
+            const resp: routes.Response = .{ .status = .unauthorized, .body = "unauthorized\n" };
+            try writeResponse(&request, resp);
+            logAccess(app_state, conn.address, method, target, resp.status, start_ms);
+            return;
+        }
+
+        const info = oauth.verifyAccessToken(&app_state.conn, alloc, token) catch null;
+        if (info == null) {
+            const resp: routes.Response = .{ .status = .unauthorized, .body = "unauthorized\n" };
+            try writeResponse(&request, resp);
+            logAccess(app_state, conn.address, method, target, resp.status, start_ms);
+            return;
+        }
+
+        const streams: []const streaming_hub.Stream = blk: {
+            if (std.mem.eql(u8, stream_raw, "user")) break :blk &.{.user};
+            if (std.mem.eql(u8, stream_raw, "public")) break :blk &.{.public};
+            if (std.mem.eql(u8, stream_raw, "public:local")) break :blk &.{.public};
+            // Minimal: ignore unknown streams but keep the connection.
+            break :blk &.{.user};
+        };
+
+        const sub = app_state.streaming.subscribe(info.?.user_id, streams) catch {
+            const resp: routes.Response = .{ .status = .internal_server_error, .body = "internal server error\n" };
+            try writeResponse(&request, resp);
+            logAccess(app_state, conn.address, method, target, resp.status, start_ms);
+            return;
+        };
+        errdefer app_state.streaming.unsubscribe(sub);
+
+        try writeWebSocketHandshake(conn.stream.handle, sec_ws_key.?);
+        logAccess(app_state, conn.address, method, target, .switching_protocols, start_ms);
+
+        const handler = try std.heap.page_allocator.create(StreamingHandler);
+        handler.* = .{
+            .logger = app_state.logger,
+            .hub = &app_state.streaming,
+            .sub = sub,
+            .stream = conn.stream,
+        };
+
+        close_conn = false;
+
+        var t = std.Thread.spawn(.{}, StreamingHandler.run, .{handler}) catch |err| {
+            app_state.logger.err("streaming: thread spawn failed err={any}", .{err});
+            app_state.streaming.unsubscribe(sub);
+            close_conn = true;
+            std.heap.page_allocator.destroy(handler);
+            return;
+        };
+        t.detach();
+        return;
+    }
 
     var body: []const u8 = "";
     if (request.head.method.requestHasBody()) {
@@ -86,6 +162,164 @@ pub fn serveOnce(app_state: *app.App, listener: *net.Server) !void {
 fn targetPath(target: []const u8) []const u8 {
     if (std.mem.indexOfScalar(u8, target, '?')) |idx| return target[0..idx];
     return target;
+}
+
+fn targetQuery(target: []const u8) []const u8 {
+    const idx = std.mem.indexOfScalar(u8, target, '?') orelse return "";
+    return target[idx + 1 ..];
+}
+
+fn bearerToken(authorization: ?[]const u8) ?[]const u8 {
+    const hdr = authorization orelse return null;
+    if (!std.mem.startsWith(u8, hdr, "Bearer ")) return null;
+    return hdr["Bearer ".len..];
+}
+
+fn isStreamingWebSocketRequest(
+    method: http.Method,
+    path: []const u8,
+    upgrade_hdr: ?[]const u8,
+    connection_hdr: ?[]const u8,
+    sec_ws_key: ?[]const u8,
+    sec_ws_version: ?[]const u8,
+) bool {
+    if (method != .GET) return false;
+    if (!std.mem.startsWith(u8, path, "/api/v1/streaming")) return false;
+
+    const upgrade = upgrade_hdr orelse return false;
+    if (!std.ascii.eqlIgnoreCase(upgrade, "websocket")) return false;
+
+    const connection = connection_hdr orelse return false;
+    if (!headerHasToken(connection, "upgrade")) return false;
+
+    if (sec_ws_key == null) return false;
+
+    const ver = sec_ws_version orelse return false;
+    return std.mem.eql(u8, ver, "13");
+}
+
+fn headerHasToken(hdr_value: []const u8, token: []const u8) bool {
+    var it = std.mem.tokenizeAny(u8, hdr_value, ", \t");
+    while (it.next()) |part| {
+        if (std.ascii.eqlIgnoreCase(part, token)) return true;
+    }
+    return false;
+}
+
+fn writeWebSocketHandshake(fd: std.posix.fd_t, sec_ws_key: []const u8) !void {
+    const accept = websocket.computeAcceptKey(sec_ws_key);
+    var buf: [256]u8 = undefined;
+    const resp = try std.fmt.bufPrint(
+        &buf,
+        "HTTP/1.1 101 Switching Protocols\r\n" ++
+            "Upgrade: websocket\r\n" ++
+            "Connection: Upgrade\r\n" ++
+            "Sec-WebSocket-Accept: {s}\r\n" ++
+            "\r\n",
+        .{accept[0..]},
+    );
+    try writeAll(fd, resp);
+}
+
+fn writeAll(fd: std.posix.fd_t, data: []const u8) !void {
+    var written: usize = 0;
+    while (written < data.len) {
+        written += try std.posix.write(fd, data[written..]);
+    }
+}
+
+const StreamingHandler = struct {
+    logger: *log.Logger,
+    hub: *streaming_hub.Hub,
+    sub: *streaming_hub.Subscriber,
+    stream: net.Stream,
+
+    fn run(self: *@This()) void {
+        defer {
+            self.hub.unsubscribe(self.sub);
+            self.stream.close();
+            std.heap.page_allocator.destroy(self);
+        }
+
+        // Best-effort: enable non-blocking reads so we can respond to pings while waiting for messages.
+        const flags = std.posix.fcntl(self.stream.handle, std.posix.F.GETFL, 0) catch 0;
+        var oflags: std.posix.O = @bitCast(@as(u32, @intCast(flags)));
+        oflags.NONBLOCK = true;
+        const oflags_u32: u32 = @bitCast(oflags);
+        _ = std.posix.fcntl(self.stream.handle, std.posix.F.SETFL, @intCast(oflags_u32)) catch {};
+
+        var recv_buf: [16 * 1024]u8 = undefined;
+        var recv_used: usize = 0;
+
+        var write_buf: [16 * 1024]u8 = undefined;
+        var writer = self.stream.writer(&write_buf);
+
+        while (true) {
+            if (self.sub.waitPop(250 * std.time.ns_per_ms)) |msg| {
+                defer self.hub.allocator.free(msg);
+                websocket.writeText(&writer.interface, msg) catch |err| {
+                    self.logger.info("streaming: write failed err={any}", .{err});
+                    return;
+                };
+                writer.interface.flush() catch {};
+            }
+
+            if (drainIncoming(&self.stream, &writer.interface, &recv_buf, &recv_used)) |stop| {
+                if (stop) return;
+            } else |_| {
+                return;
+            }
+        }
+    }
+};
+
+fn drainIncoming(stream: *net.Stream, writer: anytype, buf: []u8, used: *usize) !bool {
+    while (true) {
+        if (websocket.tryParseFrame(buf[0..used.*])) |maybe| {
+            if (maybe == null) break;
+            const res = maybe.?;
+            const frame = res.frame;
+
+            switch (frame.opcode) {
+                .ping => {
+                    websocket.writePong(writer, frame.payload) catch {};
+                    writer.flush() catch {};
+                },
+                .close => {
+                    websocket.writeClose(writer, "") catch {};
+                    writer.flush() catch {};
+                    return true;
+                },
+                else => {},
+            }
+
+            const remaining = used.* - res.consumed;
+            if (remaining > 0) {
+                std.mem.copyForwards(u8, buf[0..remaining], buf[res.consumed..used.*]);
+            }
+            used.* = remaining;
+            continue;
+        } else |err| {
+            return err;
+        }
+
+        if (used.* >= buf.len) return error.FrameTooLarge;
+
+        const n = std.posix.read(stream.handle, buf[used.*..]) catch |err| switch (err) {
+            error.WouldBlock => return false,
+            else => return err,
+        };
+        if (n == 0) return true;
+        used.* += n;
+    }
+
+    const n = std.posix.read(stream.handle, buf[used.*..]) catch |err| switch (err) {
+        error.WouldBlock => return false,
+        else => return err,
+    };
+    if (n == 0) return true;
+    used.* += n;
+    return false;
 }
 
 fn writeResponse(request: *http.Server.Request, resp: routes.Response) !void {
@@ -181,4 +415,97 @@ test "serveOnce: GET /healthz -> 200" {
     t.join();
 
     try std.testing.expect(ctx.ok);
+}
+
+test "serveOnce: WebSocket /api/v1/streaming upgrade receives update" {
+    const listen_address = try net.Address.parseIp("127.0.0.1", 0);
+    var listener = try listen_address.listen(.{ .reuse_address = true });
+    defer listener.deinit();
+
+    const addr = listener.listen_address;
+
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params: @import("password.zig").Params = .{ .t = 1, .m = 8, .p = 1 };
+    const user_id = try @import("users.zig").create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const creds = try oauth.createApp(&app_state.conn, a, "pl-fe", "urn:ietf:wg:oauth:2.0:oob", "read write follow", "");
+    const token = try oauth.createAccessToken(&app_state.conn, a, creds.id, user_id, "read write follow");
+
+    var ctx: struct {
+        addr: net.Address,
+        token: []const u8,
+        got_101: bool = false,
+        got_update: bool = false,
+    } = .{ .addr = addr, .token = token };
+
+    const Client = struct {
+        fn run(c: *@TypeOf(ctx)) !void {
+            var stream = try net.tcpConnectToAddress(c.addr);
+            defer stream.close();
+
+            const req = try std.fmt.allocPrint(
+                std.testing.allocator,
+                "GET /api/v1/streaming/?stream=user&access_token={s} HTTP/1.1\r\n" ++
+                    "Host: example.test\r\n" ++
+                    "Upgrade: websocket\r\n" ++
+                    "Connection: Upgrade\r\n" ++
+                    "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" ++
+                    "Sec-WebSocket-Version: 13\r\n" ++
+                    "\r\n",
+                .{c.token},
+            );
+            defer std.testing.allocator.free(req);
+
+            try writeAll(stream.handle, req);
+
+            var buf: [4096]u8 = undefined;
+            var used: usize = 0;
+            while (used < buf.len) {
+                const n = try std.posix.read(stream.handle, buf[used..]);
+                if (n == 0) break;
+                used += n;
+                if (std.mem.indexOf(u8, buf[0..used], "\r\n\r\n") != null) break;
+            }
+
+            const head = buf[0..used];
+            c.got_101 = std.mem.startsWith(u8, head, "HTTP/1.1 101");
+
+            // Read a single text frame.
+            used = 0;
+            while (used < buf.len) {
+                const n = try std.posix.read(stream.handle, buf[used..]);
+                if (n == 0) break;
+                used += n;
+                const res = try websocket.tryParseFrame(buf[0..used]);
+                if (res) |r| {
+                    c.got_update = (r.frame.opcode == .text) and (std.mem.indexOf(u8, r.frame.payload, "\"event\":\"update\"") != null);
+                    break;
+                }
+            }
+        }
+    };
+
+    var t = try std.Thread.spawn(.{}, Client.run, .{&ctx});
+
+    try serveOnce(&app_state, &listener);
+    // Publish after the subscriber has been registered (during handshake handling).
+    app_state.streaming.publishUpdate(user_id, "{\"id\":\"1\"}");
+
+    t.join();
+
+    try std.testing.expect(ctx.got_101);
+    try std.testing.expect(ctx.got_update);
+
+    // The streaming handler thread is detached; wait for it to notice the client disconnect and unsubscribe.
+    var attempts: usize = 0;
+    while (attempts < 50 and app_state.streaming.subscriberCount() != 0) : (attempts += 1) {
+        std.Thread.sleep(10 * std.time.ns_per_ms);
+    }
+    try std.testing.expectEqual(@as(usize, 0), app_state.streaming.subscriberCount());
 }
