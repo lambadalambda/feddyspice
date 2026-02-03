@@ -60,9 +60,9 @@ Target: automated federation smoke tests against multiple real servers.
 
 ## 5) Hardening (still single-user)
 
-- [ ] Background queue for deliveries + retries (SQLite-backed)
-- [ ] Idempotency + dedupe for inbound activities
-- [ ] SSRF protections + allowlist for fedbox-only private networking
+- [x] Background queue for deliveries + retries (SQLite-backed)
+- [x] Idempotency + dedupe for inbound activities
+- [x] SSRF protections + allowlist for fedbox-only private networking
 - [ ] Media storage + cleanup
 - [ ] Minimal observability (structured logs, basic metrics)
 
