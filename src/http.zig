@@ -29,6 +29,7 @@ const discovery = @import("http/discovery.zig");
 const instance = @import("http/instance.zig");
 const pages = @import("http/pages.zig");
 const oauth_api = @import("http/oauth_api.zig");
+const http_urls = @import("http/urls.zig");
 
 const transparent_png = [_]u8{
     0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
@@ -503,34 +504,19 @@ fn defaultHeaderUrlAlloc(app_state: *app.App, allocator: std.mem.Allocator) ![]u
 }
 
 fn mediaUrlAlloc(app_state: *app.App, allocator: std.mem.Allocator, media_id: i64) ?[]u8 {
-    var meta = media.lookupMeta(&app_state.conn, allocator, media_id) catch return null;
-    if (meta == null) return null;
-    defer meta.?.deinit(allocator);
-
-    const base = baseUrlAlloc(app_state, allocator) catch return null;
-    return std.fmt.allocPrint(allocator, "{s}/media/{s}", .{ base, meta.?.public_token }) catch null;
+    return http_urls.mediaUrlAlloc(app_state, allocator, media_id);
 }
 
 fn userAvatarUrlAlloc(app_state: *app.App, allocator: std.mem.Allocator, user: users.User) []const u8 {
-    if (user.avatar_media_id) |id| {
-        if (mediaUrlAlloc(app_state, allocator, id)) |url| return url;
-    }
-    return defaultAvatarUrlAlloc(app_state, allocator) catch "";
+    return http_urls.userAvatarUrlAlloc(app_state, allocator, user);
 }
 
 fn userHeaderUrlAlloc(app_state: *app.App, allocator: std.mem.Allocator, user: users.User) []const u8 {
-    if (user.header_media_id) |id| {
-        if (mediaUrlAlloc(app_state, allocator, id)) |url| return url;
-    }
-    return defaultHeaderUrlAlloc(app_state, allocator) catch "";
+    return http_urls.userHeaderUrlAlloc(app_state, allocator, user);
 }
 
 fn userUrlAlloc(app_state: *app.App, allocator: std.mem.Allocator, username: []const u8) ![]u8 {
-    return std.fmt.allocPrint(allocator, "{s}://{s}/users/{s}", .{
-        @tagName(app_state.cfg.scheme),
-        app_state.cfg.domain,
-        username,
-    });
+    return http_urls.userUrlAlloc(app_state, allocator, username);
 }
 
 fn actorGet(app_state: *app.App, allocator: std.mem.Allocator, path: []const u8) Response {

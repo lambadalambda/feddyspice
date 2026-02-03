@@ -96,6 +96,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Moved `/signup` and `/login` handlers into `src/http/pages.zig`.
 - Added `src/http/session.zig` for cookie/session helpers shared by OAuth and HTML auth pages.
 - Moved OAuth app registration + authorization-code flow handlers into `src/http/oauth_api.zig`.
+- Added `src/http/urls.zig` to share URL-building helpers across HTTP modules.
 
 ### Fixed
 
