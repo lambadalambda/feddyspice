@@ -430,6 +430,14 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
         return accountStatuses(app_state, allocator, req, path);
     }
 
+    if (req.method == .GET and std.mem.startsWith(u8, path, "/api/v1/accounts/") and std.mem.endsWith(u8, path, "/followers")) {
+        return accountFollowers(app_state, allocator, req, path);
+    }
+
+    if (req.method == .GET and std.mem.startsWith(u8, path, "/api/v1/accounts/") and std.mem.endsWith(u8, path, "/following")) {
+        return accountFollowing(app_state, allocator, req, path);
+    }
+
     if (req.method == .POST and std.mem.startsWith(u8, path, "/api/v1/accounts/") and std.mem.endsWith(u8, path, "/follow")) {
         return accountFollow(app_state, allocator, req, path);
     }
@@ -2651,6 +2659,102 @@ fn accountStatuses(app_state: *app.App, allocator: std.mem.Allocator, req: Reque
     };
 }
 
+fn accountFollowers(app_state: *app.App, allocator: std.mem.Allocator, req: Request, path: []const u8) Response {
+    const prefix = "/api/v1/accounts/";
+    const suffix = "/followers";
+    if (!std.mem.startsWith(u8, path, prefix)) return .{ .status = .not_found, .body = "not found\n" };
+    if (!std.mem.endsWith(u8, path, suffix)) return .{ .status = .not_found, .body = "not found\n" };
+
+    const id_part = path[prefix.len .. path.len - suffix.len];
+    if (id_part.len == 0) return .{ .status = .not_found, .body = "not found\n" };
+    if (std.mem.indexOfScalar(u8, id_part, '/') != null) return .{ .status = .not_found, .body = "not found\n" };
+
+    const account_id = std.fmt.parseInt(i64, id_part, 10) catch
+        return .{ .status = .not_found, .body = "not found\n" };
+
+    if (account_id >= remote_actor_id_base) {
+        return jsonOk(allocator, [_]i32{});
+    }
+
+    const user = users.lookupUserById(&app_state.conn, allocator, account_id) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (user == null) return .{ .status = .not_found, .body = "not found\n" };
+
+    const q = queryString(req.target);
+    var params = form.parse(allocator, q) catch form.Form{ .map = .empty };
+    const limit: usize = blk: {
+        const lim_str = params.get("limit") orelse break :blk 40;
+        const parsed = std.fmt.parseInt(usize, lim_str, 10) catch 40;
+        break :blk @min(parsed, 200);
+    };
+
+    const ids = followers.listAcceptedRemoteActorIds(&app_state.conn, allocator, user.?.id, limit) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    var accounts: std.ArrayListUnmanaged(AccountPayload) = .empty;
+    defer accounts.deinit(allocator);
+
+    for (ids) |actor_id| {
+        const actor = remote_actors.lookupById(&app_state.conn, allocator, actor_id) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        if (actor == null) continue;
+
+        const api_id = remoteAccountApiIdAlloc(app_state, allocator, actor.?.id);
+        accounts.append(allocator, makeRemoteAccountPayload(app_state, allocator, api_id, actor.?)) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    }
+
+    return jsonOk(allocator, accounts.items);
+}
+
+fn accountFollowing(app_state: *app.App, allocator: std.mem.Allocator, req: Request, path: []const u8) Response {
+    const prefix = "/api/v1/accounts/";
+    const suffix = "/following";
+    if (!std.mem.startsWith(u8, path, prefix)) return .{ .status = .not_found, .body = "not found\n" };
+    if (!std.mem.endsWith(u8, path, suffix)) return .{ .status = .not_found, .body = "not found\n" };
+
+    const id_part = path[prefix.len .. path.len - suffix.len];
+    if (id_part.len == 0) return .{ .status = .not_found, .body = "not found\n" };
+    if (std.mem.indexOfScalar(u8, id_part, '/') != null) return .{ .status = .not_found, .body = "not found\n" };
+
+    const account_id = std.fmt.parseInt(i64, id_part, 10) catch
+        return .{ .status = .not_found, .body = "not found\n" };
+
+    if (account_id >= remote_actor_id_base) {
+        return jsonOk(allocator, [_]i32{});
+    }
+
+    const user = users.lookupUserById(&app_state.conn, allocator, account_id) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (user == null) return .{ .status = .not_found, .body = "not found\n" };
+
+    const q = queryString(req.target);
+    var params = form.parse(allocator, q) catch form.Form{ .map = .empty };
+    const limit: usize = blk: {
+        const lim_str = params.get("limit") orelse break :blk 40;
+        const parsed = std.fmt.parseInt(usize, lim_str, 10) catch 40;
+        break :blk @min(parsed, 200);
+    };
+
+    const ids = follows.listAcceptedRemoteActorIds(&app_state.conn, allocator, user.?.id, limit) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    var accounts: std.ArrayListUnmanaged(AccountPayload) = .empty;
+    defer accounts.deinit(allocator);
+
+    for (ids) |actor_id| {
+        const actor = remote_actors.lookupById(&app_state.conn, allocator, actor_id) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        if (actor == null) continue;
+
+        const api_id = remoteAccountApiIdAlloc(app_state, allocator, actor.?.id);
+        accounts.append(allocator, makeRemoteAccountPayload(app_state, allocator, api_id, actor.?)) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    }
+
+    return jsonOk(allocator, accounts.items);
+}
+
 fn accountByUser(app_state: *app.App, allocator: std.mem.Allocator, user: users.User) Response {
     const id_str = std.fmt.allocPrint(allocator, "{d}", .{user.id}) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
@@ -4054,6 +4158,57 @@ test "accounts: statuses list (public vs authed)" {
     defer pinned_json.deinit();
     try std.testing.expect(pinned_json.value == .array);
     try std.testing.expectEqual(@as(usize, 0), pinned_json.value.array.items.len);
+}
+
+test "accounts: followers + following lists" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    try remote_actors.upsert(&app_state.conn, .{
+        .id = "https://remote.test/users/bob",
+        .inbox = "https://remote.test/users/bob/inbox",
+        .shared_inbox = null,
+        .preferred_username = "bob",
+        .domain = "remote.test",
+        .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
+    });
+
+    try followers.upsertPending(&app_state.conn, user_id, "https://remote.test/users/bob", "https://remote.test/follows/1");
+    try std.testing.expect(try followers.markAcceptedByRemoteActorId(&app_state.conn, user_id, "https://remote.test/users/bob"));
+
+    _ = try follows.createPending(&app_state.conn, user_id, "https://remote.test/users/bob", "http://example.test/follows/1");
+    try std.testing.expect(try follows.markAcceptedByActivityId(&app_state.conn, "http://example.test/follows/1"));
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const id_str = try std.fmt.allocPrint(a, "{d}", .{user_id});
+
+    const followers_target = try std.fmt.allocPrint(a, "/api/v1/accounts/{s}/followers", .{id_str});
+    const followers_resp = handle(&app_state, a, .{ .method = .GET, .target = followers_target });
+    try std.testing.expectEqual(std.http.Status.ok, followers_resp.status);
+
+    var followers_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, followers_resp.body, .{});
+    defer followers_json.deinit();
+    try std.testing.expect(followers_json.value == .array);
+    try std.testing.expectEqual(@as(usize, 1), followers_json.value.array.items.len);
+    try std.testing.expectEqualStrings("bob", followers_json.value.array.items[0].object.get("username").?.string);
+    try std.testing.expectEqualStrings("bob@remote.test", followers_json.value.array.items[0].object.get("acct").?.string);
+
+    const following_target = try std.fmt.allocPrint(a, "/api/v1/accounts/{s}/following", .{id_str});
+    const following_resp = handle(&app_state, a, .{ .method = .GET, .target = following_target });
+    try std.testing.expectEqual(std.http.Status.ok, following_resp.status);
+
+    var following_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, following_resp.body, .{});
+    defer following_json.deinit();
+    try std.testing.expect(following_json.value == .array);
+    try std.testing.expectEqual(@as(usize, 1), following_json.value.array.items.len);
+    try std.testing.expectEqualStrings("bob", following_json.value.array.items[0].object.get("username").?.string);
+    try std.testing.expectEqualStrings("bob@remote.test", following_json.value.array.items[0].object.get("acct").?.string);
 }
 
 test "statuses: create + get + home timeline" {

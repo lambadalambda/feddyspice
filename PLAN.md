@@ -95,11 +95,11 @@ This is the “eventually” list. We should keep it scoped to what pl-fe needs,
 
 ### Accounts
 
- - [x] `GET /api/v1/accounts/:id` (profile view)
+- [x] `GET /api/v1/accounts/:id` (profile view)
 - [x] `GET /api/v1/accounts/:id/statuses` (profile timeline; filters + pagination)
-- [ ] `GET /api/v1/accounts/:id/followers`
-- [ ] `GET /api/v1/accounts/:id/following`
-- [ ] `POST /api/v1/accounts/:id/follow` + `POST /api/v1/accounts/:id/unfollow` (or document why we only support `POST /api/v1/follows`)
+- [x] `GET /api/v1/accounts/:id/followers`
+- [x] `GET /api/v1/accounts/:id/following`
+- [x] `POST /api/v1/accounts/:id/follow` + `POST /api/v1/accounts/:id/unfollow` (or document why we only support `POST /api/v1/follows`)
 - [x] `GET /api/v1/accounts/relationships` (Relationship entity)
 
 ### Statuses
