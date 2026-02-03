@@ -8,6 +8,11 @@ pub const Form = struct {
     }
 
     pub fn deinit(form: *Form, allocator: std.mem.Allocator) void {
+        var it = form.map.iterator();
+        while (it.next()) |entry| {
+            allocator.free(@constCast(entry.key_ptr.*));
+            allocator.free(@constCast(entry.value_ptr.*));
+        }
         form.map.deinit(allocator);
         form.* = undefined;
     }
@@ -90,6 +95,8 @@ pub fn parseMultipart(allocator: std.mem.Allocator, content_type: []const u8, bo
 
     const delim = try std.fmt.allocPrint(allocator, "--{s}", .{boundary});
     const delim_with_lf = try std.fmt.allocPrint(allocator, "\n--{s}", .{boundary});
+    defer allocator.free(delim);
+    defer allocator.free(delim_with_lf);
 
     var pos: usize = std.mem.indexOf(u8, body, delim) orelse return error.InvalidMultipart;
 
@@ -146,6 +153,107 @@ pub fn parseMultipart(allocator: std.mem.Allocator, content_type: []const u8, bo
     return .{ .map = map };
 }
 
+pub const MultipartFilePart = struct {
+    name: []const u8,
+    filename: ?[]const u8,
+    content_type: ?[]const u8,
+    data: []const u8,
+};
+
+pub const MultipartWithFile = struct {
+    form: Form,
+    file: ?MultipartFilePart,
+
+    pub fn deinit(self: *MultipartWithFile, allocator: std.mem.Allocator) void {
+        self.form.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+pub fn parseMultipartWithFile(
+    allocator: std.mem.Allocator,
+    content_type: []const u8,
+    body: []const u8,
+) !MultipartWithFile {
+    var map: std.StringHashMapUnmanaged([]const u8) = .empty;
+    errdefer map.deinit(allocator);
+
+    const boundary = boundaryFromContentType(content_type) orelse return error.MissingBoundary;
+
+    const delim = try std.fmt.allocPrint(allocator, "--{s}", .{boundary});
+    const delim_with_lf = try std.fmt.allocPrint(allocator, "\n--{s}", .{boundary});
+    defer allocator.free(delim);
+    defer allocator.free(delim_with_lf);
+
+    var file: ?MultipartFilePart = null;
+
+    var pos: usize = std.mem.indexOf(u8, body, delim) orelse return error.InvalidMultipart;
+
+    while (true) {
+        const boundary_pos = std.mem.indexOfPos(u8, body, pos, delim) orelse break;
+        pos = boundary_pos + delim.len;
+
+        if (pos + 2 <= body.len and std.mem.eql(u8, body[pos .. pos + 2], "--")) break; // final boundary
+
+        if (pos < body.len and body[pos] == '\r') pos += 1;
+        if (pos < body.len and body[pos] == '\n') pos += 1;
+
+        const headers_end_crlf = std.mem.indexOfPos(u8, body, pos, "\r\n\r\n");
+        const headers_end_lf = std.mem.indexOfPos(u8, body, pos, "\n\n");
+
+        var headers_end: usize = undefined;
+        var sep_len: usize = undefined;
+        if (headers_end_crlf) |idx| {
+            headers_end = idx;
+            sep_len = 4;
+        } else if (headers_end_lf) |idx| {
+            headers_end = idx;
+            sep_len = 2;
+        } else {
+            return error.InvalidMultipart;
+        }
+
+        const headers = body[pos..headers_end];
+        const content_start = headers_end + sep_len;
+
+        const next_marker = std.mem.indexOfPos(u8, body, content_start, delim_with_lf) orelse
+            return error.InvalidMultipart;
+
+        var content_end: usize = next_marker;
+        if (content_end > content_start and body[content_end - 1] == '\r') content_end -= 1;
+        const content = body[content_start..content_end];
+
+        const name = multipartPartName(headers) orelse {
+            pos = next_marker + 1;
+            continue;
+        };
+
+        if (std.mem.indexOf(u8, headers, "filename=") != null) {
+            if (file == null) {
+                file = .{
+                    .name = name,
+                    .filename = multipartPartFilename(headers),
+                    .content_type = multipartPartContentType(headers),
+                    .data = content,
+                };
+            }
+            pos = next_marker + 1;
+            continue;
+        }
+
+        const key_copy = try allocator.dupe(u8, name);
+        const val_copy = try allocator.dupe(u8, content);
+        try map.put(allocator, key_copy, val_copy);
+
+        pos = next_marker + 1;
+    }
+
+    return .{
+        .form = .{ .map = map },
+        .file = file,
+    };
+}
+
 fn boundaryFromContentType(content_type: []const u8) ?[]const u8 {
     const needle = "boundary=";
     const idx = std.mem.indexOf(u8, content_type, needle) orelse return null;
@@ -189,6 +297,46 @@ fn multipartPartName(headers: []const u8) ?[]const u8 {
     return null;
 }
 
+fn multipartPartFilename(headers: []const u8) ?[]const u8 {
+    const needle = "filename=\"";
+    if (std.mem.indexOf(u8, headers, needle)) |idx| {
+        const start = idx + needle.len;
+        const end = std.mem.indexOfPos(u8, headers, start, "\"") orelse return null;
+        return headers[start..end];
+    }
+
+    const needle2 = "filename=";
+    if (std.mem.indexOf(u8, headers, needle2)) |idx| {
+        var start = idx + needle2.len;
+        if (start >= headers.len) return null;
+
+        if (headers[start] == '"') {
+            start += 1;
+            const endq = std.mem.indexOfPos(u8, headers, start, "\"") orelse return null;
+            return headers[start..endq];
+        }
+
+        const end = std.mem.indexOfAnyPos(u8, headers, start, ";\r\n") orelse headers.len;
+        return headers[start..end];
+    }
+
+    return null;
+}
+
+fn multipartPartContentType(headers: []const u8) ?[]const u8 {
+    const prefix = "content-type:";
+    var it = std.mem.splitScalar(u8, headers, '\n');
+    while (it.next()) |line_raw| {
+        const line_no_cr = std.mem.trimRight(u8, line_raw, "\r");
+        const line = std.mem.trim(u8, line_no_cr, " \t");
+        if (line.len >= prefix.len and std.ascii.eqlIgnoreCase(line[0..prefix.len], prefix)) {
+            const rest = std.mem.trim(u8, line[prefix.len..], " \t");
+            return if (rest.len == 0) null else rest;
+        }
+    }
+    return null;
+}
+
 fn decode(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
     var out = try allocator.alloc(u8, s.len);
     var o: usize = 0;
@@ -216,6 +364,31 @@ fn decode(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
     }
 
     return out[0..o];
+}
+
+test "parseMultipartWithFile: extracts fields + file" {
+    const ct = "multipart/form-data; boundary=abc";
+    const body =
+        "--abc\r\n" ++
+        "Content-Disposition: form-data; name=\"description\"\r\n" ++
+        "\r\n" ++
+        "hello\r\n" ++
+        "--abc\r\n" ++
+        "Content-Disposition: form-data; name=\"file\"; filename=\"a.png\"\r\n" ++
+        "Content-Type: image/png\r\n" ++
+        "\r\n" ++
+        "PNGDATA\r\n" ++
+        "--abc--\r\n";
+
+    var parsed = try parseMultipartWithFile(std.testing.allocator, ct, body);
+    defer parsed.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("hello", parsed.form.get("description").?);
+    try std.testing.expect(parsed.file != null);
+    try std.testing.expectEqualStrings("file", parsed.file.?.name);
+    try std.testing.expectEqualStrings("a.png", parsed.file.?.filename.?);
+    try std.testing.expectEqualStrings("image/png", parsed.file.?.content_type.?);
+    try std.testing.expectEqualStrings("PNGDATA", parsed.file.?.data);
 }
 
 fn fromHex(c: u8) ?u8 {
