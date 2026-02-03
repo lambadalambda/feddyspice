@@ -94,6 +94,11 @@ const migrations = [_]Migration{
         .name = "add_deleted_at",
         .sql = deleted_at_v9_sql,
     },
+    .{
+        .version = 10,
+        .name = "create_jobs",
+        .sql = jobs_v10_sql,
+    },
 };
 
 const schema_migrations_sql: [:0]const u8 =
@@ -248,6 +253,25 @@ const deleted_at_v9_sql: [:0]const u8 =
     \\CREATE INDEX IF NOT EXISTS remote_statuses_remote_actor_id_deleted_at ON remote_statuses(remote_actor_id, deleted_at);
 ++ "\x00";
 
+const jobs_v10_sql: [:0]const u8 =
+    \\CREATE TABLE IF NOT EXISTS jobs (
+    \\  id INTEGER PRIMARY KEY,
+    \\  type TEXT NOT NULL,
+    \\  payload_json TEXT NOT NULL,
+    \\  state TEXT NOT NULL,
+    \\  run_at_ms INTEGER NOT NULL,
+    \\  attempts INTEGER NOT NULL,
+    \\  max_attempts INTEGER NOT NULL,
+    \\  last_error TEXT,
+    \\  locked_at_ms INTEGER,
+    \\  dedupe_key TEXT UNIQUE,
+    \\  created_at_ms INTEGER NOT NULL,
+    \\  updated_at_ms INTEGER NOT NULL
+    \\);
+    \\CREATE INDEX IF NOT EXISTS jobs_state_run_at_ms ON jobs(state, run_at_ms);
+    \\CREATE INDEX IF NOT EXISTS jobs_state_locked_at_ms ON jobs(state, locked_at_ms);
+++ "\x00";
+
 test "migrate: creates users table and records version" {
     var conn = try db.Db.openZ(":memory:");
     defer conn.close();
@@ -282,6 +306,8 @@ test "migrate: creates users table and records version" {
     try std.testing.expectEqual(@as(i64, 8), v_stmt.columnInt64(0));
     try std.testing.expectEqual(db.Stmt.Step.row, try v_stmt.step());
     try std.testing.expectEqual(@as(i64, 9), v_stmt.columnInt64(0));
+    try std.testing.expectEqual(db.Stmt.Step.row, try v_stmt.step());
+    try std.testing.expectEqual(@as(i64, 10), v_stmt.columnInt64(0));
     try std.testing.expectEqual(db.Stmt.Step.done, try v_stmt.step());
 }
 
@@ -296,6 +322,6 @@ test "migrate: is idempotent" {
     defer stmt.finalize();
 
     try std.testing.expectEqual(db.Stmt.Step.row, try stmt.step());
-    try std.testing.expectEqual(@as(i64, 9), stmt.columnInt64(0));
+    try std.testing.expectEqual(@as(i64, 10), stmt.columnInt64(0));
     try std.testing.expectEqual(db.Stmt.Step.done, try stmt.step());
 }

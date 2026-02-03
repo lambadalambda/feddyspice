@@ -53,7 +53,7 @@ export FEDDYSPICE_LOG_LEVEL=info # debug|info|warn|error
 
 Outbound federation deliveries can be controlled via `FEDDYSPICE_JOBS_MODE`:
 
-- `spawn` (default): run deliveries in background threads
+- `spawn` (default): enqueue deliveries into SQLite and run them via a background worker thread (with retries)
 - `sync`: run deliveries inline (useful for debugging)
 - `disabled`: queue jobs but do not execute automatically (useful for tests)
 

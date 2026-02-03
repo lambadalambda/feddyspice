@@ -4,12 +4,47 @@ const app = @import("app.zig");
 const config = @import("config.zig");
 const db = @import("db.zig");
 const federation = @import("federation.zig");
+const jobs = @import("jobs.zig");
 const log = @import("log.zig");
 const statuses = @import("statuses.zig");
 const users = @import("users.zig");
 const transport = @import("transport.zig");
+const jobs_db = @import("jobs_db.zig");
 
 pub const RunError = federation.Error || statuses.Error;
+
+pub fn runJob(app_state: *app.App, allocator: std.mem.Allocator, job: jobs.Job) RunError!void {
+    switch (job) {
+        .send_follow => |j| {
+            try federation.sendFollowActivity(app_state, allocator, j.user_id, j.remote_actor_id, j.follow_activity_id);
+        },
+        .accept_inbound_follow => |j| {
+            try federation.acceptInboundFollow(
+                app_state,
+                allocator,
+                j.user_id,
+                j.username,
+                j.remote_actor_id,
+                j.remote_follow_activity_id,
+            );
+        },
+        .deliver_status => |j| {
+            const user = users.lookupUserById(&app_state.conn, allocator, j.user_id) catch return;
+            if (user == null) return;
+            const st = statuses.lookup(&app_state.conn, allocator, j.status_id) catch return;
+            if (st == null) return;
+            try federation.deliverStatusToFollowers(app_state, allocator, user.?, st.?);
+        },
+        .deliver_delete => |j| {
+            const user = users.lookupUserById(&app_state.conn, allocator, j.user_id) catch return;
+            if (user == null) return;
+            const st = statuses.lookupIncludingDeleted(&app_state.conn, allocator, j.status_id) catch return;
+            if (st == null) return;
+            if (st.?.deleted_at == null) return;
+            try federation.deliverDeleteToFollowers(app_state, allocator, user.?, st.?);
+        },
+    }
+}
 
 pub fn sendFollow(
     app_state: *app.App,
@@ -40,6 +75,19 @@ pub fn sendFollow(
             return;
         },
         .spawn => {},
+    }
+
+    if (jobs_db.enqueue(&app_state.conn, allocator, .{
+        .send_follow = .{
+            .user_id = user_id,
+            .remote_actor_id = @constCast(remote_actor_id),
+            .follow_activity_id = @constCast(follow_activity_id),
+        },
+    }, .{})) |_| {
+        return;
+    } else |err| {
+        app_state.logger.err("sendFollow: enqueue failed remote_actor_id={s} err={any}", .{ remote_actor_id, err });
+        // Fallback to per-job thread execution.
     }
 
     const job = std.heap.page_allocator.create(SendFollowJob) catch return;
@@ -99,6 +147,20 @@ pub fn acceptInboundFollow(
         .spawn => {},
     }
 
+    if (jobs_db.enqueue(&app_state.conn, allocator, .{
+        .accept_inbound_follow = .{
+            .user_id = user_id,
+            .username = @constCast(username),
+            .remote_actor_id = @constCast(remote_actor_id),
+            .remote_follow_activity_id = @constCast(remote_follow_activity_id),
+        },
+    }, .{})) |_| {
+        return;
+    } else |err| {
+        app_state.logger.err("acceptInboundFollow: enqueue failed err={any}", .{err});
+        // Fallback to per-job thread execution.
+    }
+
     const job = std.heap.page_allocator.create(AcceptInboundFollowJob) catch return;
     errdefer std.heap.page_allocator.destroy(job);
 
@@ -149,6 +211,13 @@ pub fn deliverStatusToFollowers(
         .spawn => {},
     }
 
+    if (jobs_db.enqueue(&app_state.conn, allocator, .{ .deliver_status = .{ .user_id = user_id, .status_id = status_id } }, .{})) |_| {
+        return;
+    } else |err| {
+        app_state.logger.err("deliverStatusToFollowers: enqueue failed err={any}", .{err});
+        // Fallback to per-job thread execution.
+    }
+
     const job = std.heap.page_allocator.create(DeliverStatusJob) catch return;
     errdefer std.heap.page_allocator.destroy(job);
 
@@ -189,6 +258,13 @@ pub fn deliverDeleteToFollowers(
         .spawn => {},
     }
 
+    if (jobs_db.enqueue(&app_state.conn, allocator, .{ .deliver_delete = .{ .user_id = user_id, .status_id = status_id } }, .{})) |_| {
+        return;
+    } else |err| {
+        app_state.logger.err("deliverDeleteToFollowers: enqueue failed err={any}", .{err});
+        // Fallback to per-job thread execution.
+    }
+
     const job = std.heap.page_allocator.create(DeliverDeleteJob) catch return;
     errdefer std.heap.page_allocator.destroy(job);
 
@@ -214,36 +290,7 @@ pub fn runQueued(app_state: *app.App, allocator: std.mem.Allocator) RunError!voi
     }
 
     for (list.items) |job| {
-        switch (job) {
-            .send_follow => |j| {
-                try federation.sendFollowActivity(app_state, allocator, j.user_id, j.remote_actor_id, j.follow_activity_id);
-            },
-            .accept_inbound_follow => |j| {
-                try federation.acceptInboundFollow(
-                    app_state,
-                    allocator,
-                    j.user_id,
-                    j.username,
-                    j.remote_actor_id,
-                    j.remote_follow_activity_id,
-                );
-            },
-            .deliver_status => |j| {
-                const user = users.lookupUserById(&app_state.conn, allocator, j.user_id) catch continue;
-                if (user == null) continue;
-                const st = statuses.lookup(&app_state.conn, allocator, j.status_id) catch continue;
-                if (st == null) continue;
-                try federation.deliverStatusToFollowers(app_state, allocator, user.?, st.?);
-            },
-            .deliver_delete => |j| {
-                const user = users.lookupUserById(&app_state.conn, allocator, j.user_id) catch continue;
-                if (user == null) continue;
-                const st = statuses.lookupIncludingDeleted(&app_state.conn, allocator, j.status_id) catch continue;
-                if (st == null) continue;
-                if (st.?.deleted_at == null) continue;
-                try federation.deliverDeleteToFollowers(app_state, allocator, user.?, st.?);
-            },
-        }
+        runJob(app_state, allocator, job) catch continue;
     }
 }
 

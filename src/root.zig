@@ -23,6 +23,8 @@ pub const transport = @import("transport.zig");
 pub const users = @import("users.zig");
 pub const version = @import("version.zig");
 pub const jobs = @import("jobs.zig");
+pub const jobs_db = @import("jobs_db.zig");
+pub const job_worker = @import("job_worker.zig");
 
 test {
     std.testing.refAllDecls(@This());

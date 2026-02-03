@@ -10,5 +10,9 @@ pub fn main() !void {
     const app_state = try feddyspice.app.App.initFromConfig(allocator, cfg);
     defer app_state.deinitAndDestroy();
 
+    if (app_state.jobs_mode == .spawn) {
+        feddyspice.job_worker.startDetached(app_state.cfg, app_state.logger, .{});
+    }
+
     try feddyspice.server.serve(app_state, app_state.cfg.listen_address);
 }
