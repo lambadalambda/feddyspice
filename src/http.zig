@@ -10,6 +10,7 @@ const follows = @import("follows.zig");
 const followers = @import("followers.zig");
 const inbox_dedupe = @import("inbox_dedupe.zig");
 const media = @import("media.zig");
+const notifications = @import("notifications.zig");
 const oauth = @import("oauth.zig");
 const remote_actors = @import("remote_actors.zig");
 const remote_statuses = @import("remote_statuses.zig");
@@ -198,7 +199,15 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
     }
 
     if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/notifications")) {
-        return jsonOk(allocator, [_]i32{});
+        return notificationsGet(app_state, allocator, req);
+    }
+
+    if (req.method == .POST and std.mem.eql(u8, path, "/api/v1/notifications/clear")) {
+        return notificationsClear(app_state, allocator, req);
+    }
+
+    if (req.method == .POST and std.mem.startsWith(u8, path, "/api/v1/notifications/") and std.mem.endsWith(u8, path, "/dismiss")) {
+        return notificationsDismiss(app_state, allocator, req, path);
     }
 
     if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/follow_requests")) {
@@ -2973,6 +2982,97 @@ fn apiFollow(app_state: *app.App, allocator: std.mem.Allocator, req: Request) Re
     };
 }
 
+const NotificationPayload = struct {
+    id: []const u8,
+    type: []const u8,
+    created_at: []const u8,
+    account: AccountPayload,
+    status: ?StatusPayload = null,
+};
+
+fn notificationsGet(app_state: *app.App, allocator: std.mem.Allocator, req: Request) Response {
+    const token = bearerToken(req.authorization) orelse return unauthorized(allocator);
+    const info = oauth.verifyAccessToken(&app_state.conn, allocator, token) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (info == null) return unauthorized(allocator);
+
+    const q = queryString(req.target);
+    var params = form.parse(allocator, q) catch form.Form{ .map = .empty };
+
+    const limit: usize = blk: {
+        const lim_str = params.get("limit") orelse break :blk 20;
+        const parsed = std.fmt.parseInt(usize, lim_str, 10) catch 20;
+        break :blk @min(parsed, 200);
+    };
+
+    const max_id: ?i64 = blk: {
+        const s = params.get("max_id") orelse break :blk null;
+        break :blk std.fmt.parseInt(i64, s, 10) catch null;
+    };
+
+    const rows = notifications.list(&app_state.conn, allocator, info.?.user_id, limit, max_id) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    var out: std.ArrayListUnmanaged(NotificationPayload) = .empty;
+    defer out.deinit(allocator);
+
+    for (rows) |n| {
+        const actor = remote_actors.lookupById(&app_state.conn, allocator, n.actor_id) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        if (actor == null) continue;
+
+        const api_id = remoteAccountApiIdAlloc(app_state, allocator, actor.?.id);
+        const acct = makeRemoteAccountPayload(app_state, allocator, api_id, actor.?);
+
+        out.append(allocator, .{
+            .id = std.fmt.allocPrint(allocator, "{d}", .{n.id}) catch "0",
+            .type = n.kind,
+            .created_at = n.created_at,
+            .account = acct,
+            .status = null,
+        }) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    }
+
+    return jsonOk(allocator, out.items);
+}
+
+fn notificationsClear(app_state: *app.App, allocator: std.mem.Allocator, req: Request) Response {
+    const token = bearerToken(req.authorization) orelse return unauthorized(allocator);
+    const info = oauth.verifyAccessToken(&app_state.conn, allocator, token) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (info == null) return unauthorized(allocator);
+
+    notifications.clear(&app_state.conn, info.?.user_id) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    return jsonOk(allocator, .{});
+}
+
+fn notificationsDismiss(app_state: *app.App, allocator: std.mem.Allocator, req: Request, path: []const u8) Response {
+    const token = bearerToken(req.authorization) orelse return unauthorized(allocator);
+    const info = oauth.verifyAccessToken(&app_state.conn, allocator, token) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (info == null) return unauthorized(allocator);
+
+    const prefix = "/api/v1/notifications/";
+    const suffix = "/dismiss";
+    if (!std.mem.startsWith(u8, path, prefix)) return .{ .status = .not_found, .body = "not found\n" };
+    if (!std.mem.endsWith(u8, path, suffix)) return .{ .status = .not_found, .body = "not found\n" };
+
+    const id_part = path[prefix.len .. path.len - suffix.len];
+    if (id_part.len == 0) return .{ .status = .not_found, .body = "not found\n" };
+    if (std.mem.indexOfScalar(u8, id_part, '/') != null) return .{ .status = .not_found, .body = "not found\n" };
+
+    const id = std.fmt.parseInt(i64, id_part, 10) catch
+        return .{ .status = .not_found, .body = "not found\n" };
+
+    const ok = notifications.dismiss(&app_state.conn, info.?.user_id, id) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (!ok) return .{ .status = .not_found, .body = "not found\n" };
+
+    return jsonOk(allocator, .{});
+}
+
 fn jsonOk(allocator: std.mem.Allocator, payload: anytype) Response {
     const body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
@@ -3508,7 +3608,6 @@ test "client compat: placeholder endpoints return JSON" {
 
     const cases = [_]Case{
         .{ .method = .GET, .target = "/api/v1/custom_emojis", .kind = .array },
-        .{ .method = .GET, .target = "/api/v1/notifications?types[]=follow", .kind = .array },
         .{ .method = .GET, .target = "/api/v1/follow_requests", .kind = .array },
         .{ .method = .GET, .target = "/api/v1/scheduled_statuses", .kind = .array },
         .{ .method = .GET, .target = "/api/v1/lists", .kind = .array },
@@ -3559,6 +3658,86 @@ test "client compat: placeholder endpoints return JSON" {
             try std.testing.expect(notif.get("updated_at") != null);
         }
     }
+}
+
+test "notifications: GET/clear/dismiss" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const app_creds = try oauth.createApp(
+        &app_state.conn,
+        a,
+        "pl-fe",
+        "urn:ietf:wg:oauth:2.0:oob",
+        "read",
+        "",
+    );
+    const token = try oauth.createAccessToken(&app_state.conn, a, app_creds.id, user_id, "read");
+
+    const auth_header = try std.fmt.allocPrint(a, "Bearer {s}", .{token});
+
+    try remote_actors.upsert(&app_state.conn, .{
+        .id = "https://remote.test/users/bob",
+        .inbox = "https://remote.test/users/bob/inbox",
+        .shared_inbox = null,
+        .preferred_username = "bob",
+        .domain = "remote.test",
+        .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
+    });
+
+    const n_id = try notifications.create(&app_state.conn, user_id, "follow", "https://remote.test/users/bob", null);
+
+    const list_resp = handle(&app_state, a, .{
+        .method = .GET,
+        .target = "/api/v1/notifications?limit=20",
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, list_resp.status);
+
+    var list_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, list_resp.body, .{});
+    defer list_json.deinit();
+
+    try std.testing.expect(list_json.value == .array);
+    try std.testing.expectEqual(@as(usize, 1), list_json.value.array.items.len);
+    try std.testing.expectEqualStrings("follow", list_json.value.array.items[0].object.get("type").?.string);
+    try std.testing.expectEqualStrings("bob", list_json.value.array.items[0].object.get("account").?.object.get("username").?.string);
+
+    const dismiss_target = try std.fmt.allocPrint(a, "/api/v1/notifications/{d}/dismiss", .{n_id});
+    const dismiss_resp = handle(&app_state, a, .{
+        .method = .POST,
+        .target = dismiss_target,
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, dismiss_resp.status);
+
+    const clear_id = try notifications.create(&app_state.conn, user_id, "follow", "https://remote.test/users/bob", null);
+    try std.testing.expect(clear_id > 0);
+
+    const clear_resp = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/api/v1/notifications/clear",
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, clear_resp.status);
+
+    const list2 = handle(&app_state, a, .{
+        .method = .GET,
+        .target = "/api/v1/notifications",
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, list2.status);
+
+    var list2_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, list2.body, .{});
+    defer list2_json.deinit();
+    try std.testing.expect(list2_json.value == .array);
+    try std.testing.expectEqual(@as(usize, 0), list2_json.value.array.items.len);
 }
 
 test "POST /signup creates user and session cookie" {

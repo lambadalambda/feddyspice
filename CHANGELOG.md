@@ -45,6 +45,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Prometheus-style metrics endpoint (`GET /metrics`).
 - `mise` loads local env from `.env` (gitignored) and provides `.env.example`.
 - Additional Mastodon API placeholder endpoints used by Elk/pl-fe (notifications, markers, preferences, search, etc.).
+- Notifications API endpoints (`GET /api/v1/notifications`, `POST /api/v1/notifications/clear`, `POST /api/v1/notifications/:id/dismiss`).
 - Account lookup + profile endpoint (`GET /api/v1/accounts/lookup`, `GET /api/v1/accounts/:id`).
 - Accounts relationships endpoint (`GET /api/v1/accounts/relationships`).
 - Account statuses endpoint (`GET /api/v1/accounts/:id/statuses`).
