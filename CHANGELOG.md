@@ -50,6 +50,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `mise` loads local env from `.env` (gitignored) and provides `.env.example`.
 - Additional Mastodon API placeholder endpoints used by Elk/pl-fe (notifications, markers, preferences, search, etc.).
 - Notifications API endpoints (`GET /api/v1/notifications`, `POST /api/v1/notifications/clear`, `POST /api/v1/notifications/:id/dismiss`).
+- Streaming health endpoint (`GET /api/v1/streaming/health`).
 - Account lookup + profile endpoint (`GET /api/v1/accounts/lookup`, `GET /api/v1/accounts/:id`).
 - Accounts relationships endpoint (`GET /api/v1/accounts/relationships`).
 - Account statuses endpoint (`GET /api/v1/accounts/:id/statuses`).
@@ -78,6 +79,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - `Dockerfile` Zig download works on both amd64/arm64 Docker builders.
 - Mastodon-ish API endpoints accept client JSON + multipart form-data bodies (pl-fe/Elk compatibility) and send permissive CORS headers.
+- `/api/v2/instance` now advertises the correct streaming base URL (`ws(s)://domain`, not a nested `/api/v1/streaming` path).
 - Form parsing deallocates owned key/value buffers correctly; multipart parsing can now extract file parts (for media uploads).
 - Fedbox Docker network creation is more reliable via a configurable subnet (`FEDBOX_SUBNET`).
 - Fedbox smoke tests handle API differences between servers (follow fallback + HTML content entity decoding).
