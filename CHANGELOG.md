@@ -23,6 +23,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Mastodon streaming endpoint via WebSockets (`GET /api/v1/streaming`, `stream=user`, `access_token=...`).
 - Local and remote posts publish `event=update` on the streaming user stream.
 - Local and remote deletes publish `event=delete` on the streaming user stream.
+- Inbound follows publish `event=notification` on the streaming user stream.
 - Mastodon v2 instance endpoint (`GET /api/v2/instance`) for client compatibility.
 - Media upload + serving (`POST /api/v1/media`, `PUT /api/v1/media/:id`, `GET /media/:token`).
 - Status posting accepts `media_ids[]` and returns `media_attachments` on status payloads.
