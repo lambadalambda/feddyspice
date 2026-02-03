@@ -24,6 +24,7 @@ const util_url = @import("util/url.zig");
 const users = @import("users.zig");
 const version = @import("version.zig");
 const http_types = @import("http_types.zig");
+const common = @import("http/common.zig");
 const discovery = @import("http/discovery.zig");
 const instance = @import("http/instance.zig");
 
@@ -3509,31 +3510,15 @@ fn conversationsDelete(app_state: *app.App, allocator: std.mem.Allocator, req: R
 }
 
 fn jsonOk(allocator: std.mem.Allocator, payload: anytype) Response {
-    const body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-
-    return .{
-        .content_type = "application/json; charset=utf-8",
-        .body = body,
-    };
+    return common.jsonOk(allocator, payload);
 }
 
 fn bearerToken(authorization: ?[]const u8) ?[]const u8 {
-    const h = authorization orelse return null;
-    const prefix = "Bearer ";
-    if (h.len < prefix.len) return null;
-    if (!std.ascii.eqlIgnoreCase(h[0..prefix.len], prefix)) return null;
-    return std.mem.trim(u8, h[prefix.len..], " \t");
+    return common.bearerToken(authorization);
 }
 
 fn unauthorized(allocator: std.mem.Allocator) Response {
-    const body = std.json.Stringify.valueAlloc(allocator, .{ .@"error" = "unauthorized" }, .{}) catch
-        return .{ .status = .unauthorized, .body = "unauthorized\n" };
-    return .{
-        .status = .unauthorized,
-        .content_type = "application/json; charset=utf-8",
-        .body = body,
-    };
+    return common.unauthorized(allocator);
 }
 
 fn oauthAuthorizeGet(app_state: *app.App, allocator: std.mem.Allocator, req: Request) Response {

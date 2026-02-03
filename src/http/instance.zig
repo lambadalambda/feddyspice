@@ -1,19 +1,10 @@
 const std = @import("std");
 
 const app = @import("../app.zig");
+const common = @import("common.zig");
 const http_types = @import("../http_types.zig");
 const url = @import("../util/url.zig");
 const version = @import("../version.zig");
-
-fn jsonOk(allocator: std.mem.Allocator, payload: anytype) http_types.Response {
-    const body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-
-    return .{
-        .content_type = "application/json; charset=utf-8",
-        .body = body,
-    };
-}
 
 pub fn instanceV1(app_state: *app.App, allocator: std.mem.Allocator) http_types.Response {
     const payload = .{
@@ -24,28 +15,28 @@ pub fn instanceV1(app_state: *app.App, allocator: std.mem.Allocator) http_types.
         .registrations = true,
     };
 
-    return jsonOk(allocator, payload);
+    return common.jsonOk(allocator, payload);
 }
 
 pub fn instancePeers(app_state: *app.App, allocator: std.mem.Allocator) http_types.Response {
     _ = app_state;
-    return jsonOk(allocator, [_][]const u8{});
+    return common.jsonOk(allocator, [_][]const u8{});
 }
 
 pub fn instanceActivity(app_state: *app.App, allocator: std.mem.Allocator) http_types.Response {
     _ = app_state;
-    return jsonOk(allocator, [_]i32{});
+    return common.jsonOk(allocator, [_]i32{});
 }
 
 pub fn instanceExtendedDescription(app_state: *app.App, allocator: std.mem.Allocator) http_types.Response {
     _ = app_state;
     const updated_at = "1970-01-01T00:00:00.000Z";
-    return jsonOk(allocator, .{ .updated_at = updated_at, .content = "" });
+    return common.jsonOk(allocator, .{ .updated_at = updated_at, .content = "" });
 }
 
 pub fn directory(app_state: *app.App, allocator: std.mem.Allocator) http_types.Response {
     _ = app_state;
-    return jsonOk(allocator, [_]i32{});
+    return common.jsonOk(allocator, [_]i32{});
 }
 
 pub fn instanceV2(app_state: *app.App, allocator: std.mem.Allocator) http_types.Response {
@@ -80,5 +71,5 @@ pub fn instanceV2(app_state: *app.App, allocator: std.mem.Allocator) http_types.
         .rules = [_]struct { id: []const u8, text: []const u8 }{},
     };
 
-    return jsonOk(allocator, payload);
+    return common.jsonOk(allocator, payload);
 }
