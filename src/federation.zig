@@ -3,6 +3,8 @@ const std = @import("std");
 const actor_keys = @import("actor_keys.zig");
 const app = @import("app.zig");
 const config = @import("config.zig");
+const html = @import("util/html.zig");
+const ids = @import("util/ids.zig");
 const follows = @import("follows.zig");
 const followers = @import("followers.zig");
 const http_signatures = @import("http_signatures.zig");
@@ -10,6 +12,7 @@ const notifications = @import("notifications.zig");
 const remote_actors = @import("remote_actors.zig");
 const statuses = @import("statuses.zig");
 const transport = @import("transport.zig");
+const url = @import("util/url.zig");
 const users = @import("users.zig");
 
 pub const Error =
@@ -35,8 +38,6 @@ pub const FollowResult = struct {
     remote_actor_id: []const u8,
     follow_activity_id: []const u8,
 };
-
-const remote_actor_id_base: i64 = 1_000_000_000;
 
 const AccountPayload = struct {
     id: []const u8,
@@ -85,10 +86,6 @@ fn parseHandle(handle: []const u8) Error!ParsedHandle {
     return .{ .username = username, .host = host_port, .port = null };
 }
 
-fn schemeString(s: config.Scheme) []const u8 {
-    return @tagName(s);
-}
-
 fn hostHeaderAlloc(allocator: std.mem.Allocator, host: []const u8, port: ?u16, scheme: config.Scheme) ![]u8 {
     const default_port: u16 = switch (scheme) {
         .http => 80,
@@ -99,23 +96,19 @@ fn hostHeaderAlloc(allocator: std.mem.Allocator, host: []const u8, port: ?u16, s
 }
 
 fn baseUrlAlloc(app_state: *app.App, allocator: std.mem.Allocator) ![]u8 {
-    return std.fmt.allocPrint(allocator, "{s}://{s}", .{ schemeString(app_state.cfg.scheme), app_state.cfg.domain });
+    return url.baseUrlAlloc(app_state, allocator);
 }
 
 fn defaultAvatarUrlAlloc(app_state: *app.App, allocator: std.mem.Allocator) ![]u8 {
-    const base = try baseUrlAlloc(app_state, allocator);
-    return std.fmt.allocPrint(allocator, "{s}/static/avatar.png", .{base});
+    return url.defaultAvatarUrlAlloc(app_state, allocator);
 }
 
 fn defaultHeaderUrlAlloc(app_state: *app.App, allocator: std.mem.Allocator) ![]u8 {
-    const base = try baseUrlAlloc(app_state, allocator);
-    return std.fmt.allocPrint(allocator, "{s}/static/header.png", .{base});
+    return url.defaultHeaderUrlAlloc(app_state, allocator);
 }
 
 fn remoteAccountApiIdAlloc(app_state: *app.App, allocator: std.mem.Allocator, actor_id: []const u8) []const u8 {
-    const rowid = remote_actors.lookupRowIdById(&app_state.conn, actor_id) catch return actor_id;
-    if (rowid == null) return actor_id;
-    return std.fmt.allocPrint(allocator, "{d}", .{remote_actor_id_base + rowid.?}) catch actor_id;
+    return ids.remoteAccountApiIdAlloc(app_state, allocator, actor_id);
 }
 
 fn makeRemoteAccountPayload(
@@ -298,45 +291,11 @@ pub fn ensureRemoteActorById(app_state: *app.App, allocator: std.mem.Allocator, 
 }
 
 fn htmlEscapeAlloc(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {
-    var needed: usize = 0;
-    for (raw) |c| {
-        needed += switch (c) {
-            '&' => 5, // &amp;
-            '<', '>' => 4, // &lt; &gt;
-            '"' => 6, // &quot;
-            '\'' => 5, // &#39;
-            else => 1,
-        };
-    }
-
-    var out = try allocator.alloc(u8, needed);
-    var i: usize = 0;
-
-    for (raw) |c| {
-        const repl = switch (c) {
-            '&' => "&amp;",
-            '<' => "&lt;",
-            '>' => "&gt;",
-            '"' => "&quot;",
-            '\'' => "&#39;",
-            else => null,
-        };
-
-        if (repl) |s| {
-            @memcpy(out[i..][0..s.len], s);
-            i += s.len;
-        } else {
-            out[i] = c;
-            i += 1;
-        }
-    }
-
-    return out;
+    return html.htmlEscapeAlloc(allocator, raw);
 }
 
 fn textToHtmlAlloc(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
-    const escaped = try htmlEscapeAlloc(allocator, text);
-    return std.fmt.allocPrint(allocator, "<p>{s}</p>", .{escaped});
+    return html.textToHtmlAlloc(allocator, text);
 }
 
 fn isMentionUsernameChar(c: u8) bool {
@@ -437,7 +396,7 @@ pub fn resolveRemoteActorByHandle(app_state: *app.App, allocator: std.mem.Alloca
         allocator,
         "{s}://{s}{s}/.well-known/webfinger?resource=acct:{s}@{s}",
         .{
-            schemeString(app_state.cfg.scheme),
+            @tagName(app_state.cfg.scheme),
             remote.host,
             if (remote.port) |p| try std.fmt.allocPrint(allocator, ":{d}", .{p}) else "",
             remote.username,

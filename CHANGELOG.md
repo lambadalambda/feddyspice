@@ -84,6 +84,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Additional client-compat endpoints to eliminate 404s (`GET /api/v1/instance/peers`, `GET /api/v1/instance/activity`, `GET /api/v1/instance/extended_description`, `GET /api/v1/directory`, `GET /nodeinfo/2.1`, `GET /robots.txt`).
 - Outbound federation of `visibility=direct` statuses to mentioned recipients (ActivityPub Create/Delete with `to=[actor ids]`, no `Public` recipients).
 
+### Changed
+
+- Extracted shared helpers (`htmlEscapeAlloc`, `textToHtmlAlloc`, URL builders, remote account API ID mapping) into `src/util/*` for easier modularization.
+
 ### Fixed
 
 - `Dockerfile` Zig download works on both amd64/arm64 Docker builders.

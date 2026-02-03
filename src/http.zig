@@ -10,6 +10,8 @@ const follows = @import("follows.zig");
 const followers = @import("followers.zig");
 const inbox_dedupe = @import("inbox_dedupe.zig");
 const conversations = @import("conversations.zig");
+const util_html = @import("util/html.zig");
+const util_ids = @import("util/ids.zig");
 const media = @import("media.zig");
 const notifications = @import("notifications.zig");
 const oauth = @import("oauth.zig");
@@ -18,6 +20,7 @@ const remote_statuses = @import("remote_statuses.zig");
 const sessions = @import("sessions.zig");
 const statuses = @import("statuses.zig");
 const transport = @import("transport.zig");
+const util_url = @import("util/url.zig");
 const users = @import("users.zig");
 const version = @import("version.zig");
 
@@ -677,18 +680,11 @@ fn metrics(app_state: *app.App, allocator: std.mem.Allocator) Response {
 }
 
 fn baseUrlAlloc(app_state: *app.App, allocator: std.mem.Allocator) ![]u8 {
-    return std.fmt.allocPrint(allocator, "{s}://{s}", .{
-        @tagName(app_state.cfg.scheme),
-        app_state.cfg.domain,
-    });
+    return util_url.baseUrlAlloc(app_state, allocator);
 }
 
 fn streamingBaseUrlAlloc(app_state: *app.App, allocator: std.mem.Allocator) ![]u8 {
-    const scheme: []const u8 = switch (app_state.cfg.scheme) {
-        .https => "wss",
-        .http => "ws",
-    };
-    return std.fmt.allocPrint(allocator, "{s}://{s}", .{ scheme, app_state.cfg.domain });
+    return util_url.streamingBaseUrlAlloc(app_state, allocator);
 }
 
 fn hostMeta(app_state: *app.App, allocator: std.mem.Allocator) Response {
@@ -713,17 +709,11 @@ fn hostMeta(app_state: *app.App, allocator: std.mem.Allocator) Response {
 }
 
 fn defaultAvatarUrlAlloc(app_state: *app.App, allocator: std.mem.Allocator) ![]u8 {
-    return std.fmt.allocPrint(allocator, "{s}://{s}/static/avatar.png", .{
-        @tagName(app_state.cfg.scheme),
-        app_state.cfg.domain,
-    });
+    return util_url.defaultAvatarUrlAlloc(app_state, allocator);
 }
 
 fn defaultHeaderUrlAlloc(app_state: *app.App, allocator: std.mem.Allocator) ![]u8 {
-    return std.fmt.allocPrint(allocator, "{s}://{s}/static/header.png", .{
-        @tagName(app_state.cfg.scheme),
-        app_state.cfg.domain,
-    });
+    return util_url.defaultHeaderUrlAlloc(app_state, allocator);
 }
 
 fn mediaUrlAlloc(app_state: *app.App, allocator: std.mem.Allocator, media_id: i64) ?[]u8 {
@@ -2463,12 +2453,10 @@ const AccountPayload = struct {
     header_static: []const u8,
 };
 
-const remote_actor_id_base: i64 = 1_000_000_000;
+const remote_actor_id_base: i64 = util_ids.remote_actor_id_base;
 
 fn remoteAccountApiIdAlloc(app_state: *app.App, allocator: std.mem.Allocator, actor_id: []const u8) []const u8 {
-    const rowid = remote_actors.lookupRowIdById(&app_state.conn, actor_id) catch return actor_id;
-    if (rowid == null) return actor_id;
-    return std.fmt.allocPrint(allocator, "{d}", .{remote_actor_id_base + rowid.?}) catch actor_id;
+    return util_ids.remoteAccountApiIdAlloc(app_state, allocator, actor_id);
 }
 
 fn makeRemoteAccountPayload(
@@ -2722,8 +2710,7 @@ fn remoteStatusResponse(app_state: *app.App, allocator: std.mem.Allocator, actor
 }
 
 fn textToHtmlAlloc(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
-    const escaped = try htmlEscapeAlloc(allocator, text);
-    return std.fmt.allocPrint(allocator, "<p>{s}</p>", .{escaped});
+    return util_html.textToHtmlAlloc(allocator, text);
 }
 
 fn verifyCredentials(app_state: *app.App, allocator: std.mem.Allocator, req: Request) Response {
@@ -3974,40 +3961,7 @@ fn trimTrailingSlash(s: []const u8) []const u8 {
 }
 
 fn htmlEscapeAlloc(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {
-    var needed: usize = 0;
-    for (raw) |c| {
-        needed += switch (c) {
-            '&' => 5, // &amp;
-            '<', '>' => 4, // &lt; &gt;
-            '"' => 6, // &quot;
-            '\'' => 5, // &#39;
-            else => 1,
-        };
-    }
-
-    var out = try allocator.alloc(u8, needed);
-    var i: usize = 0;
-
-    for (raw) |c| {
-        const repl = switch (c) {
-            '&' => "&amp;",
-            '<' => "&lt;",
-            '>' => "&gt;",
-            '"' => "&quot;",
-            '\'' => "&#39;",
-            else => null,
-        };
-
-        if (repl) |s| {
-            @memcpy(out[i..][0..s.len], s);
-            i += s.len;
-        } else {
-            out[i] = c;
-            i += 1;
-        }
-    }
-
-    return out;
+    return util_html.htmlEscapeAlloc(allocator, raw);
 }
 
 fn isForm(content_type: ?[]const u8) bool {
