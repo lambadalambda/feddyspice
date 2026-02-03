@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const config = @import("config.zig");
+const ssrf = @import("ssrf.zig");
 
 pub const Error =
     std.mem.Allocator.Error ||
@@ -16,6 +17,9 @@ pub const Error =
         TimeoutUnsupported,
         NetworkDisabled,
         UnexpectedRequest,
+        OutboundUrlInvalid,
+        ResolveFailed,
+        SsrfBlocked,
     };
 
 pub const FetchOptions = struct {
@@ -78,6 +82,7 @@ pub const NullTransport = struct {
 pub const RealTransport = struct {
     client: std.http.Client,
     timeout_ms: u32,
+    allow_private_networks: bool,
 
     pub fn init(allocator: std.mem.Allocator, cfg: config.Config) !RealTransport {
         var client: std.http.Client = .{ .allocator = allocator };
@@ -91,6 +96,7 @@ pub const RealTransport = struct {
         return .{
             .client = client,
             .timeout_ms = cfg.http_timeout_ms,
+            .allow_private_networks = cfg.allow_private_networks,
         };
     }
 
@@ -120,6 +126,7 @@ pub const RealTransport = struct {
         const self: *RealTransport = @ptrCast(@alignCast(ctx));
 
         const uri = try std.Uri.parse(opts.url);
+        try validateOutboundUri(allocator, uri, self.allow_private_networks);
 
         var req = try self.client.request(opts.method, uri, .{
             .headers = opts.headers,
@@ -164,6 +171,39 @@ pub const RealTransport = struct {
         };
     }
 };
+
+fn validateOutboundUri(allocator: std.mem.Allocator, uri: std.Uri, allow_private_networks: bool) Error!void {
+    if (!schemeIsHttp(uri.scheme)) return error.OutboundUrlInvalid;
+    if (uri.user != null or uri.password != null) return error.OutboundUrlInvalid;
+
+    var host_buf: [std.Uri.host_name_max]u8 = undefined;
+    const host = uri.getHost(&host_buf) catch return error.OutboundUrlInvalid;
+    if (host.len == 0) return error.OutboundUrlInvalid;
+
+    const port: u16 = uri.port orelse defaultPortForScheme(uri.scheme);
+
+    const direct_ip = std.net.Address.parseIp(host, port) catch null;
+    if (direct_ip) |addr| {
+        if (!ssrf.isAllowedAddress(addr, allow_private_networks)) return error.SsrfBlocked;
+        return;
+    }
+
+    const list = std.net.getAddressList(allocator, host, port) catch return error.ResolveFailed;
+    defer list.deinit();
+
+    for (list.addrs) |addr| {
+        if (!ssrf.isAllowedAddress(addr, allow_private_networks)) return error.SsrfBlocked;
+    }
+}
+
+fn schemeIsHttp(scheme: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(scheme, "http") or std.ascii.eqlIgnoreCase(scheme, "https");
+}
+
+fn defaultPortForScheme(scheme: []const u8) u16 {
+    if (std.ascii.eqlIgnoreCase(scheme, "http")) return 80;
+    return 443;
+}
 
 pub const MockTransport = struct {
     pub const Expected = struct {
@@ -286,4 +326,34 @@ fn applySocketTimeouts(conn: ?*std.http.Client.Connection, timeout_ms: u32) Erro
 
     try std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&tv));
     try std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, std.mem.asBytes(&tv));
+}
+
+test "RealTransport blocks outbound loopback by default" {
+    const allocator = std.testing.allocator;
+    const jobs = @import("jobs.zig");
+    const password = @import("password.zig");
+
+    var cfg: config.Config = .{
+        .domain = try allocator.dupe(u8, "example.test"),
+        .scheme = .http,
+        .listen_address = try std.net.Address.parseIp("127.0.0.1", 0),
+        .db_path = try allocator.dupe(u8, ":memory:"),
+        .ca_cert_file = null,
+        .allow_private_networks = false,
+        .log_file = null,
+        .log_level = .err,
+        .password_params = password.Params{ .t = 1, .m = 8, .p = 1 },
+        .http_timeout_ms = 1000,
+        .jobs_mode = jobs.Mode.disabled,
+    };
+    defer cfg.deinit(allocator);
+
+    var real = try RealTransport.init(allocator, cfg);
+    var t = real.transport();
+    defer t.deinit();
+
+    try std.testing.expectError(error.SsrfBlocked, t.fetch(allocator, .{
+        .url = "http://127.0.0.1:1",
+        .method = .GET,
+    }));
 }

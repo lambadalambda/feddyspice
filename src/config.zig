@@ -12,6 +12,7 @@ pub const Config = struct {
     listen_address: std.net.Address,
     db_path: []const u8,
     ca_cert_file: ?[]const u8,
+    allow_private_networks: bool,
     log_file: ?[]const u8,
     log_level: log.Level,
     password_params: password.Params,
@@ -24,6 +25,7 @@ pub const Config = struct {
         const listen_env = std.posix.getenv("FEDDYSPICE_LISTEN") orelse "0.0.0.0:8080";
         const db_path_env = std.posix.getenv("FEDDYSPICE_DB_PATH") orelse "feddyspice.sqlite3";
         const ca_cert_env = std.posix.getenv("FEDDYSPICE_CACERTFILE");
+        const allow_private_networks = envBool("FEDDYSPICE_ALLOW_PRIVATE_NETWORKS", false);
         const log_file_env = std.posix.getenv("FEDDYSPICE_LOG_FILE");
         const log_level_env = std.posix.getenv("FEDDYSPICE_LOG_LEVEL") orelse "info";
         const timeout_env = std.posix.getenv("FEDDYSPICE_HTTP_TIMEOUT_MS") orelse "10000";
@@ -69,6 +71,7 @@ pub const Config = struct {
             .listen_address = listen_address,
             .db_path = db_path,
             .ca_cert_file = ca_cert_file,
+            .allow_private_networks = allow_private_networks,
             .log_file = log_file,
             .log_level = log_level,
             .password_params = password.Params.owasp_2id,
@@ -85,3 +88,17 @@ pub const Config = struct {
         cfg.* = undefined;
     }
 };
+
+fn envBool(name: []const u8, default: bool) bool {
+    const raw = std.posix.getenv(name) orelse return default;
+    if (raw.len == 0) return default;
+    if (std.ascii.eqlIgnoreCase(raw, "1")) return true;
+    if (std.ascii.eqlIgnoreCase(raw, "true")) return true;
+    if (std.ascii.eqlIgnoreCase(raw, "yes")) return true;
+    if (std.ascii.eqlIgnoreCase(raw, "on")) return true;
+    if (std.ascii.eqlIgnoreCase(raw, "0")) return false;
+    if (std.ascii.eqlIgnoreCase(raw, "false")) return false;
+    if (std.ascii.eqlIgnoreCase(raw, "no")) return false;
+    if (std.ascii.eqlIgnoreCase(raw, "off")) return false;
+    return default;
+}

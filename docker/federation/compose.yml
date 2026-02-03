@@ -50,6 +50,8 @@ services:
       FEDDYSPICE_LISTEN: 0.0.0.0:8080
       FEDDYSPICE_DB_PATH: /data/feddyspice.sqlite3
       FEDDYSPICE_CACERTFILE: /caddy/pki/authorities/local/root.crt
+      # Needed for federation-in-a-box; feddyspice must fetch actors/inboxes on the Docker subnet.
+      FEDDYSPICE_ALLOW_PRIVATE_NETWORKS: "true"
     volumes:
       - feddyspice_fed_data:/data
       - caddy_fed_data:/caddy:ro
