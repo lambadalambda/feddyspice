@@ -48,6 +48,7 @@ pub fn serveOnce(app_state: *app.App, listener: *net.Server) !void {
     var upgrade_hdr: ?[]const u8 = null;
     var sec_ws_key: ?[]const u8 = null;
     var sec_ws_version: ?[]const u8 = null;
+    var sec_ws_protocol: ?[]const u8 = null;
 
     var it = request.iterateHeaders();
     while (it.next()) |h| {
@@ -57,6 +58,7 @@ pub fn serveOnce(app_state: *app.App, listener: *net.Server) !void {
         if (std.ascii.eqlIgnoreCase(h.name, "upgrade")) upgrade_hdr = h.value;
         if (std.ascii.eqlIgnoreCase(h.name, "sec-websocket-key")) sec_ws_key = h.value;
         if (std.ascii.eqlIgnoreCase(h.name, "sec-websocket-version")) sec_ws_version = h.value;
+        if (std.ascii.eqlIgnoreCase(h.name, "sec-websocket-protocol")) sec_ws_protocol = h.value;
     }
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -101,7 +103,7 @@ pub fn serveOnce(app_state: *app.App, listener: *net.Server) !void {
         };
         errdefer app_state.streaming.unsubscribe(sub);
 
-        try writeWebSocketHandshake(conn.stream.handle, sec_ws_key.?);
+        try writeWebSocketHandshake(conn.stream.handle, sec_ws_key.?, sec_ws_protocol);
         logAccess(app_state, conn.address, method, target, .switching_protocols, start_ms);
 
         const handler = try std.heap.page_allocator.create(StreamingHandler);
@@ -206,19 +208,33 @@ fn headerHasToken(hdr_value: []const u8, token: []const u8) bool {
     return false;
 }
 
-fn writeWebSocketHandshake(fd: std.posix.fd_t, sec_ws_key: []const u8) !void {
+fn firstProtocolToken(hdr_value: []const u8) ?[]const u8 {
+    var it = std.mem.tokenizeScalar(u8, hdr_value, ',');
+    const raw = it.next() orelse return null;
+    const trimmed = std.mem.trim(u8, raw, " \t");
+    if (trimmed.len == 0) return null;
+    if (std.mem.indexOfAny(u8, trimmed, "\r\n") != null) return null;
+    return trimmed;
+}
+
+fn writeWebSocketHandshake(fd: std.posix.fd_t, sec_ws_key: []const u8, sec_ws_protocol: ?[]const u8) !void {
     const accept = websocket.computeAcceptKey(sec_ws_key);
-    var buf: [256]u8 = undefined;
-    const resp = try std.fmt.bufPrint(
-        &buf,
-        "HTTP/1.1 101 Switching Protocols\r\n" ++
-            "Upgrade: websocket\r\n" ++
-            "Connection: Upgrade\r\n" ++
-            "Sec-WebSocket-Accept: {s}\r\n" ++
-            "\r\n",
-        .{accept[0..]},
-    );
-    try writeAll(fd, resp);
+    var buf: [512]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+    const w = fbs.writer();
+
+    try w.print("HTTP/1.1 101 Switching Protocols\r\n", .{});
+    try w.print("Upgrade: websocket\r\n", .{});
+    try w.print("Connection: Upgrade\r\n", .{});
+    try w.print("Sec-WebSocket-Accept: {s}\r\n", .{accept[0..]});
+    if (sec_ws_protocol) |hdr| {
+        if (firstProtocolToken(hdr)) |proto| {
+            try w.print("Sec-WebSocket-Protocol: {s}\r\n", .{proto});
+        }
+    }
+    try w.print("\r\n", .{});
+
+    try writeAll(fd, fbs.getWritten());
 }
 
 fn writeAll(fd: std.posix.fd_t, data: []const u8) !void {
@@ -441,6 +457,7 @@ test "serveOnce: WebSocket /api/v1/streaming upgrade receives update" {
         addr: net.Address,
         token: []const u8,
         got_101: bool = false,
+        got_protocol: bool = false,
         got_update: bool = false,
     } = .{ .addr = addr, .token = token };
 
@@ -457,8 +474,9 @@ test "serveOnce: WebSocket /api/v1/streaming upgrade receives update" {
                     "Connection: Upgrade\r\n" ++
                     "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" ++
                     "Sec-WebSocket-Version: 13\r\n" ++
+                    "Sec-WebSocket-Protocol: {s}\r\n" ++
                     "\r\n",
-                .{c.token},
+                .{ c.token, c.token },
             );
             defer std.testing.allocator.free(req);
 
@@ -475,6 +493,9 @@ test "serveOnce: WebSocket /api/v1/streaming upgrade receives update" {
 
             const head = buf[0..used];
             c.got_101 = std.mem.startsWith(u8, head, "HTTP/1.1 101");
+            const expected_proto = try std.fmt.allocPrint(std.testing.allocator, "Sec-WebSocket-Protocol: {s}\r\n", .{c.token});
+            defer std.testing.allocator.free(expected_proto);
+            c.got_protocol = (std.mem.indexOf(u8, head, expected_proto) != null);
 
             // Read a single text frame.
             used = 0;
@@ -500,6 +521,7 @@ test "serveOnce: WebSocket /api/v1/streaming upgrade receives update" {
     t.join();
 
     try std.testing.expect(ctx.got_101);
+    try std.testing.expect(ctx.got_protocol);
     try std.testing.expect(ctx.got_update);
 
     // The streaming handler thread is detached; wait for it to notice the client disconnect and unsubscribe.
