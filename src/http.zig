@@ -23,6 +23,7 @@ const transport = @import("transport.zig");
 const util_url = @import("util/url.zig");
 const users = @import("users.zig");
 const version = @import("version.zig");
+const http_types = @import("http_types.zig");
 
 const transparent_png = [_]u8{
     0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
@@ -32,21 +33,8 @@ const transparent_png = [_]u8{
     0xae, 0x42, 0x60, 0x82,
 };
 
-pub const Request = struct {
-    method: std.http.Method,
-    target: []const u8,
-    content_type: ?[]const u8 = null,
-    body: []const u8 = "",
-    cookie: ?[]const u8 = null,
-    authorization: ?[]const u8 = null,
-};
-
-pub const Response = struct {
-    status: std.http.Status = .ok,
-    content_type: []const u8 = "text/plain; charset=utf-8",
-    body: []const u8,
-    headers: []const std.http.Header = &.{},
-};
+pub const Request = http_types.Request;
+pub const Response = http_types.Response;
 
 pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) Response {
     const path = targetPath(req.target);
