@@ -114,3 +114,4 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Outbound HTTP requests enforce basic SSRF protections (DNS-based) by blocking private/loopback/link-local/multicast ranges by default; fedbox enables private ranges via `FEDDYSPICE_ALLOW_PRIVATE_NETWORKS=true`.
 - `POST /api/v1/statuses` now allows an empty `status` when at least one `media_ids[]` attachment is present.
 - Orphan media pruning no longer deletes profile avatar/header media.
+- HTTP `HEAD` requests are treated like `GET` (but with an empty body), and trailing-slash paths are normalized for basic client/crawler compatibility.

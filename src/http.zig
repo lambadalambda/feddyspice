@@ -48,6 +48,18 @@ pub const Response = struct {
 pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) Response {
     const path = targetPath(req.target);
 
+    if (req.method == .HEAD) {
+        var get_req = req;
+        get_req.method = .GET;
+        const get_resp = handle(app_state, allocator, get_req);
+        return .{
+            .status = get_resp.status,
+            .content_type = get_resp.content_type,
+            .headers = get_resp.headers,
+            .body = "",
+        };
+    }
+
     if (req.method == .OPTIONS) {
         return .{ .status = .no_content, .body = "" };
     }
@@ -4048,10 +4060,19 @@ fn cookieValue(allocator: std.mem.Allocator, secure_cookie: bool, token: []const
 }
 
 fn targetPath(target: []const u8) []const u8 {
-    if (std.mem.indexOfScalar(u8, target, '?')) |idx| {
-        return target[0..idx];
+    const raw = if (std.mem.indexOfScalar(u8, target, '?')) |idx|
+        target[0..idx]
+    else
+        target;
+
+    if (raw.len <= 1) return raw;
+    if (raw[raw.len - 1] != '/') return raw;
+
+    var end = raw.len;
+    while (end > 1 and raw[end - 1] == '/') {
+        end -= 1;
     }
-    return target;
+    return raw[0..end];
 }
 
 test "GET /healthz -> 200" {
@@ -4072,6 +4093,28 @@ test "GET /metrics -> 200 and includes build info" {
     const resp = handle(&app_state, arena.allocator(), .{ .method = .GET, .target = "/metrics" });
     try std.testing.expectEqual(std.http.Status.ok, resp.status);
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "feddyspice_build_info") != null);
+}
+
+test "HEAD / -> 200 and empty body" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const resp = handle(&app_state, std.testing.allocator, .{ .method = .HEAD, .target = "/" });
+    try std.testing.expectEqual(std.http.Status.ok, resp.status);
+    try std.testing.expectEqualStrings("", resp.body);
+}
+
+test "GET /api/v1/instance/ -> 200" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const resp = handle(&app_state, a, .{ .method = .GET, .target = "/api/v1/instance/" });
+    try std.testing.expectEqual(std.http.Status.ok, resp.status);
+    try std.testing.expect(std.mem.startsWith(u8, resp.content_type, "application/json"));
 }
 
 test "unknown route -> 404" {
