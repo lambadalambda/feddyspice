@@ -80,12 +80,12 @@ const Worker = struct {
                 .lock_timeout_ms = self.opts.lock_timeout_ms,
             }) catch |err| {
                 self.logger.err("JobsWorker: claim failed err={any}", .{err});
-                std.time.sleep(self.opts.poll_interval_ms * std.time.ns_per_ms);
+                std.Thread.sleep(self.opts.poll_interval_ms * std.time.ns_per_ms);
                 continue;
             };
 
             if (claimed == null) {
-                std.time.sleep(self.opts.poll_interval_ms * std.time.ns_per_ms);
+                std.Thread.sleep(self.opts.poll_interval_ms * std.time.ns_per_ms);
                 continue;
             }
 

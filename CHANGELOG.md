@@ -80,6 +80,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - HTTPS outbound requests with a body flush the underlying connection correctly (fixes federation POST failures like `Follow` deliveries).
 - Outbound ActivityPub deliveries prefer the remote actor's `sharedInbox` when available.
 - Inbox `Accept` handling tolerates trailing-slash variants of the follow activity ID.
+- `job_worker` uses `std.Thread.sleep` (fixes Linux/Docker builds with Zig 0.15.2).
 - ActivityPub visibility is enforced more strictly: outbox/object endpoints exclude `private`/`direct`, unlisted uses `cc=Public`, and outbound Create/Delete deliveries no longer leak non-public posts to `Public`.
 - Inbound ActivityPub `Create` distinguishes `unlisted` (Public in `cc`) from `public` (Public in `to`).
 - `mise run fed:test` is more reliable by bringing up the fedbox stack explicitly before running the test runner.
