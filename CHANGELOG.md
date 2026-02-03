@@ -76,6 +76,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - SQLite-backed media attachments schema + DB helpers (including unguessable public URLs) for `POST /api/v1/media` and status attachments.
 - Remote account profile media (avatars/headers) are parsed from ActivityPub actor documents and exposed via the Mastodon API.
 - Remote status attachments are parsed from inbound ActivityPub notes and exposed via `media_attachments` in the Mastodon API.
+- Implemented Mastodon media v2 upload endpoint (`POST /api/v2/media`) and media metadata fetch (`GET /api/v1/media/:id`) for pl-fe compatibility.
 
 ### Fixed
 
