@@ -6,6 +6,7 @@ const config = @import("config.zig");
 const follows = @import("follows.zig");
 const followers = @import("followers.zig");
 const http_signatures = @import("http_signatures.zig");
+const notifications = @import("notifications.zig");
 const remote_actors = @import("remote_actors.zig");
 const statuses = @import("statuses.zig");
 const transport = @import("transport.zig");
@@ -448,6 +449,7 @@ pub fn acceptInboundFollow(
     });
 
     _ = try followers.markAcceptedByRemoteActorId(&app_state.conn, user_id, actor.id);
+    _ = try notifications.create(&app_state.conn, user_id, "follow", actor.id, null);
 }
 
 pub fn deliverStatusToFollowers(app_state: *app.App, allocator: std.mem.Allocator, user: users.User, st: statuses.Status) Error!void {

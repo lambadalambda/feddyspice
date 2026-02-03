@@ -35,6 +35,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Home timeline + status lookup can return remote posts (negative `id`s in `GET /api/v1/timelines/home` and `GET /api/v1/statuses/:id`).
 - Followers table + helpers for tracking inbound follows (remote accounts following this user).
 - Inbox handling for ActivityPub `Follow`: store inbound follower + send signed `Accept`; expose `GET /users/:name/followers` and `GET /users/:name/following` collections.
+- Inbound ActivityPub `Follow` creates a Mastodon-style `follow` notification (`GET /api/v1/notifications`).
 - ActivityPub outbox + object endpoints (`GET /users/:name/outbox`, `GET /users/:name/statuses/:id`).
 - Local posts are federated to accepted followers via signed ActivityPub `Create(Note)` deliveries.
 - Outbound federation work is offloaded to background jobs to avoid blocking request handling.

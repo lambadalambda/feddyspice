@@ -5645,6 +5645,12 @@ test "POST /users/:name/inbox Follow stores follower and sends Accept" {
     const follower = (try followers.lookupByRemoteActorId(&app_state.conn, a, user_id, remote_actor_id)).?;
     try std.testing.expectEqual(followers.FollowerState.accepted, follower.state);
 
+    const notifs = try notifications.list(&app_state.conn, a, user_id, 10, null);
+    try std.testing.expectEqual(@as(usize, 1), notifs.len);
+    try std.testing.expectEqualStrings("follow", notifs[0].kind);
+    try std.testing.expectEqualStrings(remote_actor_id, notifs[0].actor_id);
+    try std.testing.expectEqual(@as(?i64, null), notifs[0].status_id);
+
     const followers_resp = handle(&app_state, a, .{
         .method = .GET,
         .target = "/users/alice/followers",
