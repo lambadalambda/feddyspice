@@ -114,6 +114,11 @@ const migrations = [_]Migration{
         .name = "media_public_token",
         .sql = media_public_token_v13_sql,
     },
+    .{
+        .version = 14,
+        .name = "create_notifications",
+        .sql = notifications_v14_sql,
+    },
 };
 
 const schema_migrations_sql: [:0]const u8 =
@@ -327,6 +332,18 @@ const media_public_token_v13_sql: [:0]const u8 =
     \\CREATE UNIQUE INDEX IF NOT EXISTS media_attachments_public_token ON media_attachments(public_token);
 ++ "\x00";
 
+const notifications_v14_sql: [:0]const u8 =
+    \\CREATE TABLE IF NOT EXISTS notifications (
+    \\  id INTEGER PRIMARY KEY,
+    \\  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    \\  type TEXT NOT NULL,
+    \\  actor_id TEXT NOT NULL REFERENCES remote_actors(id) ON DELETE CASCADE,
+    \\  status_id INTEGER,
+    \\  created_at TEXT NOT NULL
+    \\);
+    \\CREATE INDEX IF NOT EXISTS notifications_user_id_id ON notifications(user_id, id);
+++ "\x00";
+
 test "migrate: creates users table and records version" {
     var conn = try db.Db.openZ(":memory:");
     defer conn.close();
@@ -369,6 +386,8 @@ test "migrate: creates users table and records version" {
     try std.testing.expectEqual(@as(i64, 12), v_stmt.columnInt64(0));
     try std.testing.expectEqual(db.Stmt.Step.row, try v_stmt.step());
     try std.testing.expectEqual(@as(i64, 13), v_stmt.columnInt64(0));
+    try std.testing.expectEqual(db.Stmt.Step.row, try v_stmt.step());
+    try std.testing.expectEqual(@as(i64, 14), v_stmt.columnInt64(0));
     try std.testing.expectEqual(db.Stmt.Step.done, try v_stmt.step());
 }
 
@@ -383,6 +402,6 @@ test "migrate: is idempotent" {
     defer stmt.finalize();
 
     try std.testing.expectEqual(db.Stmt.Step.row, try stmt.step());
-    try std.testing.expectEqual(@as(i64, 13), stmt.columnInt64(0));
+    try std.testing.expectEqual(@as(i64, 14), stmt.columnInt64(0));
     try std.testing.expectEqual(db.Stmt.Step.done, try stmt.step());
 }

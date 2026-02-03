@@ -20,6 +20,7 @@ pub const sessions = @import("sessions.zig");
 pub const server = @import("server.zig");
 pub const statuses = @import("statuses.zig");
 pub const media = @import("media.zig");
+pub const notifications = @import("notifications.zig");
 pub const transport = @import("transport.zig");
 pub const users = @import("users.zig");
 pub const version = @import("version.zig");
