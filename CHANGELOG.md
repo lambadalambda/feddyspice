@@ -33,6 +33,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Per-actor RSA keypairs (stored in SQLite) and `publicKeyPem` in the ActivityPub actor document.
 - HTTP Signatures helper for signing outbound ActivityPub requests (`Digest`, `Date`, `Signature`).
 - Verify inbound ActivityPub inbox requests using HTTP Signatures + `Digest` (rejects unsigned/invalid deliveries).
+- Inbox signature verification supports `content-type` and `X-Forwarded-Host` (reverse proxy / fedbox compatibility).
 - Remote actor discovery storage + follow tracking tables, plus inbox handling for `Accept` to mark follows as accepted.
 - Outbound federation follow (WebFinger → actor → signed Follow to inbox), plus `POST /api/v1/follows` for clients and `FEDDYSPICE_CACERTFILE` for custom TLS CAs (fedbox).
 - Inbox handling for ActivityPub `Create` to store remote posts in SQLite (`remote_statuses` table).

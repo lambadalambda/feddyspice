@@ -43,6 +43,7 @@ pub fn serveOnce(app_state: *app.App, listener: *net.Server) !void {
     const content_type = request.head.content_type;
 
     var host_hdr: ?[]const u8 = null;
+    var xf_host_hdr: ?[]const u8 = null;
     var date_hdr: ?[]const u8 = null;
     var digest_hdr: ?[]const u8 = null;
     var signature_hdr: ?[]const u8 = null;
@@ -57,6 +58,7 @@ pub fn serveOnce(app_state: *app.App, listener: *net.Server) !void {
     var it = request.iterateHeaders();
     while (it.next()) |h| {
         if (std.ascii.eqlIgnoreCase(h.name, "host")) host_hdr = h.value;
+        if (std.ascii.eqlIgnoreCase(h.name, "x-forwarded-host")) xf_host_hdr = h.value;
         if (std.ascii.eqlIgnoreCase(h.name, "date")) date_hdr = h.value;
         if (std.ascii.eqlIgnoreCase(h.name, "digest")) digest_hdr = h.value;
         if (std.ascii.eqlIgnoreCase(h.name, "signature")) signature_hdr = h.value;
@@ -67,6 +69,12 @@ pub fn serveOnce(app_state: *app.App, listener: *net.Server) !void {
         if (std.ascii.eqlIgnoreCase(h.name, "sec-websocket-key")) sec_ws_key = h.value;
         if (std.ascii.eqlIgnoreCase(h.name, "sec-websocket-version")) sec_ws_version = h.value;
         if (std.ascii.eqlIgnoreCase(h.name, "sec-websocket-protocol")) sec_ws_protocol = h.value;
+    }
+
+    if (xf_host_hdr) |raw| {
+        if (forwardedHostFirst(raw)) |xf| {
+            if (hostHeaderMatchesDomain(xf, app_state.cfg.domain)) host_hdr = xf;
+        }
     }
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -218,6 +226,21 @@ fn headerHasToken(hdr_value: []const u8, token: []const u8) bool {
         if (std.ascii.eqlIgnoreCase(part, token)) return true;
     }
     return false;
+}
+
+fn forwardedHostFirst(raw: []const u8) ?[]const u8 {
+    var it = std.mem.splitScalar(u8, raw, ',');
+    const first = it.next() orelse return null;
+    const trimmed = std.mem.trim(u8, first, " \t");
+    if (trimmed.len == 0) return null;
+    return trimmed;
+}
+
+fn hostHeaderMatchesDomain(host: []const u8, domain: []const u8) bool {
+    if (host.len < domain.len) return false;
+    if (!std.ascii.eqlIgnoreCase(host[0..domain.len], domain)) return false;
+    if (host.len == domain.len) return true;
+    return host[domain.len] == ':';
 }
 
 fn firstProtocolToken(hdr_value: []const u8) ?[]const u8 {

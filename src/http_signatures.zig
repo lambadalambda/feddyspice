@@ -190,6 +190,7 @@ fn signingStringFromHeadersAlloc(
     host: []const u8,
     date: []const u8,
     digest: []const u8,
+    content_type: ?[]const u8,
 ) VerifyError![]u8 {
     var method_buf: [16]u8 = undefined;
     const method_upper = @tagName(method);
@@ -215,6 +216,9 @@ fn signingStringFromHeadersAlloc(
             try aw.writer.print("date: {s}", .{date});
         } else if (std.ascii.eqlIgnoreCase(h, "digest")) {
             try aw.writer.print("digest: {s}", .{digest});
+        } else if (std.ascii.eqlIgnoreCase(h, "content-type")) {
+            const ct = content_type orelse return error.InvalidSignatureHeader;
+            try aw.writer.print("content-type: {s}", .{ct});
         } else {
             return error.UnsupportedSignedHeaders;
         }
@@ -236,6 +240,7 @@ pub fn verifyRequestSignaturePem(
     host: []const u8,
     date: []const u8,
     digest: []const u8,
+    content_type: ?[]const u8,
 ) VerifyError!bool {
     const parsed = parseSignatureHeader(signature_header_value) orelse return error.InvalidSignatureHeader;
 
@@ -244,7 +249,7 @@ pub fn verifyRequestSignaturePem(
     }
 
     const headers = parsed.headers orelse return error.InvalidSignatureHeader;
-    const signing_string = try signingStringFromHeadersAlloc(allocator, headers, method, target, host, date, digest);
+    const signing_string = try signingStringFromHeadersAlloc(allocator, headers, method, target, host, date, digest, content_type);
     defer allocator.free(signing_string);
 
     const sig_bytes = try base64DecodeAlloc(allocator, parsed.signature_b64);
@@ -319,6 +324,7 @@ test "signRequest builds verifiable signature" {
         "example.test",
         signed.date,
         signed.digest,
+        null,
     ));
 }
 
@@ -352,5 +358,6 @@ test "verifyRequestSignaturePem returns false on wrong digest value" {
         "example.test",
         signed.date,
         "SHA-256=totally-wrong",
+        null,
     )));
 }

@@ -74,6 +74,7 @@ fn verifyInboxSignature(
         host_hdr,
         date_hdr,
         digest_hdr,
+        req.content_type,
     ) catch |err| switch (err) {
         error.OutOfMemory => return error.Internal,
         else => return error.Unauthorized,
