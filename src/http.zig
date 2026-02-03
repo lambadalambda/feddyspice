@@ -493,6 +493,18 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
         return statusActionNoop(app_state, allocator, req, path, "/unbookmark");
     }
 
+    if (req.method == .GET and std.mem.startsWith(u8, path, "/api/v1/timelines/tag/")) {
+        return jsonOk(allocator, [_]i32{});
+    }
+
+    if (req.method == .GET and std.mem.startsWith(u8, path, "/api/v1/timelines/list/")) {
+        return jsonOk(allocator, [_]i32{});
+    }
+
+    if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/timelines/link")) {
+        return jsonOk(allocator, [_]i32{});
+    }
+
     if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/timelines/public")) {
         return publicTimeline(app_state, allocator, req);
     }
@@ -4786,6 +4798,31 @@ test "timelines: public timeline returns local statuses" {
     try std.testing.expect(tl_json.value == .array);
     try std.testing.expectEqual(@as(usize, 1), tl_json.value.array.items.len);
     try std.testing.expectEqualStrings(id, tl_json.value.array.items[0].object.get("id").?.string);
+}
+
+test "timelines: tag/list/link placeholders return empty arrays" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const targets = [_][]const u8{
+        "/api/v1/timelines/tag/test",
+        "/api/v1/timelines/list/1",
+        "/api/v1/timelines/link?url=https%3A%2F%2Fexample.test%2F",
+    };
+
+    for (targets) |target| {
+        const resp = handle(&app_state, a, .{ .method = .GET, .target = target });
+        try std.testing.expectEqual(std.http.Status.ok, resp.status);
+
+        var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, resp.body, .{});
+        defer parsed.deinit();
+        try std.testing.expect(parsed.value == .array);
+        try std.testing.expectEqual(@as(usize, 0), parsed.value.array.items.len);
+    }
 }
 
 test "timelines: home timeline pagination (Link + max_id/since_id)" {

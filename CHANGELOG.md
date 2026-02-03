@@ -19,6 +19,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Bearer-token auth for `/api/v1/accounts/verify_credentials`.
 - Status posting and timelines (SQLite `statuses` table; `POST /api/v1/statuses`, `GET /api/v1/timelines/home`, `GET /api/v1/statuses/:id`).
 - Public timeline endpoint (`GET /api/v1/timelines/public`).
+- Additional timeline placeholder endpoints (`GET /api/v1/timelines/tag/:tag`, `GET /api/v1/timelines/list/:id`, `GET /api/v1/timelines/link`).
 - Mastodon v2 instance endpoint (`GET /api/v2/instance`) for client compatibility.
 - Media upload + serving (`POST /api/v1/media`, `PUT /api/v1/media/:id`, `GET /media/:token`).
 - Status posting accepts `media_ids[]` and returns `media_attachments` on status payloads.

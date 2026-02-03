@@ -112,9 +112,9 @@ This is the “eventually” list. We should keep it scoped to what pl-fe needs,
 
 ### Timelines
 
-- [ ] `GET /api/v1/timelines/tag/:tag`
-- [ ] `GET /api/v1/timelines/list/:id`
-- [ ] `GET /api/v1/timelines/link?url=...`
+- [x] `GET /api/v1/timelines/tag/:tag`
+- [x] `GET /api/v1/timelines/list/:id`
+- [x] `GET /api/v1/timelines/link?url=...`
 
 ### Media
 
