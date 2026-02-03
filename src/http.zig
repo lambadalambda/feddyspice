@@ -1586,6 +1586,9 @@ fn createMedia(app_state: *app.App, allocator: std.mem.Allocator, req: Request) 
     ) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
     defer meta.deinit(allocator);
 
+    const one_day_ms: i64 = 24 * 60 * 60 * 1000;
+    _ = media.pruneOrphansOlderThan(&app_state.conn, now_ms - one_day_ms) catch 0;
+
     const payload = makeMediaAttachmentPayload(app_state, allocator, meta);
     const body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
@@ -2003,9 +2006,23 @@ fn deleteStatus(app_state: *app.App, allocator: std.mem.Allocator, req: Request,
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
     if (user == null) return unauthorized(allocator);
 
+    app_state.conn.execZ("BEGIN IMMEDIATE;\x00") catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    var committed = false;
+    defer if (!committed) {
+        app_state.conn.execZ("ROLLBACK;\x00") catch {};
+    };
+
     const ok = statuses.markDeleted(&app_state.conn, id, info.?.user_id) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
     if (!ok) return .{ .status = .not_found, .body = "not found\n" };
+
+    media.deleteForStatus(&app_state.conn, id) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    app_state.conn.execZ("COMMIT;\x00") catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    committed = true;
 
     background.deliverDeleteToFollowers(app_state, allocator, info.?.user_id, id);
 
@@ -4249,6 +4266,61 @@ test "statuses: create supports media_ids[] attachments" {
     );
     try std.testing.expect(std.mem.endsWith(u8, attachments[0].object.get("url").?.string, "/media/tok1"));
     try std.testing.expect(std.mem.endsWith(u8, attachments[1].object.get("url").?.string, "/media/tok2"));
+}
+
+test "statuses: delete removes attached media" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const app_creds = try oauth.createApp(
+        &app_state.conn,
+        a,
+        "pl-fe",
+        "urn:ietf:wg:oauth:2.0:oob",
+        "read write",
+        "",
+    );
+    const token = try oauth.createAccessToken(&app_state.conn, a, app_creds.id, user_id, "read write");
+    const auth_header = try std.fmt.allocPrint(a, "Bearer {s}", .{token});
+
+    const now_ms: i64 = 123;
+    const m1 = try media.createWithToken(&app_state.conn, a, user_id, "tok1", "image/png", "x", "d1", now_ms);
+
+    const create_body = try std.fmt.allocPrint(
+        a,
+        "status=hello&visibility=public&media_ids[]={d}",
+        .{m1.id},
+    );
+    const create_resp = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/api/v1/statuses",
+        .content_type = "application/x-www-form-urlencoded",
+        .body = create_body,
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, create_resp.status);
+
+    var create_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, create_resp.body, .{});
+    defer create_json.deinit();
+    const status_id = create_json.value.object.get("id").?.string;
+
+    const del_target = try std.fmt.allocPrint(a, "/api/v1/statuses/{s}", .{status_id});
+    const del_resp = handle(&app_state, a, .{
+        .method = .DELETE,
+        .target = del_target,
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, del_resp.status);
+
+    const file_resp = handle(&app_state, a, .{ .method = .GET, .target = "/media/tok1" });
+    try std.testing.expectEqual(std.http.Status.not_found, file_resp.status);
 }
 
 test "statuses: create rolls back on invalid media id" {

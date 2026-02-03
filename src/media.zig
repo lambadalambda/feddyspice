@@ -310,6 +310,46 @@ test "media: create/lookup and attach to status" {
     try std.testing.expectEqual(meta.id, list[0].id);
 }
 
+test "media: pruneOrphansOlderThan deletes unattached only" {
+    var conn = try db.Db.openZ(":memory:");
+    defer conn.close();
+
+    try @import("migrations.zig").migrate(&conn);
+
+    const params: @import("password.zig").Params = .{ .t = 1, .m = 8, .p = 1 };
+    const salt: @import("password.zig").Salt = .{0x01} ** @import("password.zig").SaltLen;
+
+    const user_id = try @import("users.zig").createWithSalt(
+        &conn,
+        std.testing.allocator,
+        "alice",
+        "password",
+        salt,
+        params,
+    );
+
+    var orphan = try createWithToken(&conn, std.testing.allocator, user_id, "orph", "image/png", "x", null, 1000);
+    defer orphan.deinit(std.testing.allocator);
+
+    var attached = try createWithToken(&conn, std.testing.allocator, user_id, "att", "image/png", "y", null, 1000);
+    defer attached.deinit(std.testing.allocator);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const st = try @import("statuses.zig").create(&conn, a, user_id, "hello", "public");
+    try std.testing.expect(try attachToStatus(&conn, st.id, attached.id, 0));
+
+    try std.testing.expectEqual(@as(i64, 1), try pruneOrphansOlderThan(&conn, 2000));
+
+    try std.testing.expect((try lookupMeta(&conn, std.testing.allocator, orphan.id)) == null);
+
+    var still = (try lookupMeta(&conn, std.testing.allocator, attached.id)).?;
+    defer still.deinit(std.testing.allocator);
+    try std.testing.expectEqual(attached.id, still.id);
+}
+
 fn generatePublicTokenHexAlloc(allocator: std.mem.Allocator) std.mem.Allocator.Error![]u8 {
     var bytes: [16]u8 = undefined;
     std.crypto.random.bytes(&bytes);
