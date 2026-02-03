@@ -81,6 +81,22 @@ services:
     networks:
       - federation
 
+  dm_sender:
+    profiles: ["fedtest"]
+    build:
+      context: ./dm_sender
+    restart: unless-stopped
+    networks:
+      - federation
+    expose:
+      - "8000"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request; urllib.request.urlopen(\"http://127.0.0.1:8000/healthz\", timeout=2).read()'"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 2s
+
   pleroma_db:
     image: postgres:16
     restart: unless-stopped

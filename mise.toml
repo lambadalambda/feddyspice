@@ -36,6 +36,7 @@ compose --profile fedtest up -d --build \
   gateway \
   gateway_certs \
   feddyspice_web \
+  dm_sender \
   pleroma_db \
   pleroma_web \
   mastodon_db \
@@ -46,12 +47,13 @@ compose --profile fedtest up -d --build \
 
 compose --profile fedtest up -d --wait --wait-timeout 600 \
   feddyspice_web \
+  dm_sender \
   pleroma_web \
   mastodon_web
 
 compose --profile fedtest run --rm --no-deps feddyspice_seed
 compose --profile fedtest run --rm --no-deps pleroma_seed
-compose --profile fedtest run --rm --no-deps fedtest
+compose --profile fedtest run --rm --no-deps --build fedtest
 '''
 
 [tasks."fed:logs"]

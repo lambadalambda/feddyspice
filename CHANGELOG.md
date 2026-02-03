@@ -46,7 +46,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Outbound federation work is offloaded to background jobs to avoid blocking request handling.
 - Docker image for feddyspice + fedbox compose integration (`docker/federation/compose.yml`).
 - Fedbox E2E tests cover feddyspice federation (follow + post delivery).
-- Fedbox E2E test covers inbound `direct` messages and ensures they never leak into the public timeline.
+- Fedbox E2E test covers inbound signed `direct` messages and ensures they never leak into the public timeline.
 - Basic access logging plus optional file logs (`FEDDYSPICE_LOG_FILE`, `FEDDYSPICE_LOG_LEVEL`).
 - Prometheus-style metrics endpoint (`GET /metrics`).
 - `mise` loads local env from `.env` (gitignored) and provides `.env.example`.
