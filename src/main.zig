@@ -11,7 +11,7 @@ pub fn main() !void {
     defer app_state.deinitAndDestroy();
 
     if (app_state.jobs_mode == .spawn) {
-        feddyspice.job_worker.startDetached(app_state.cfg, app_state.logger, .{});
+        feddyspice.job_worker.startDetached(app_state.cfg, app_state.logger, app_state.streaming, .{});
     }
 
     try feddyspice.server.serve(app_state, app_state.cfg.listen_address);
