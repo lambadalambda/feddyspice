@@ -36,6 +36,29 @@ pub const FollowResult = struct {
     follow_activity_id: []const u8,
 };
 
+const remote_actor_id_base: i64 = 1_000_000_000;
+
+const AccountPayload = struct {
+    id: []const u8,
+    username: []const u8,
+    acct: []const u8,
+    display_name: []const u8,
+    note: []const u8,
+    url: []const u8,
+    locked: bool,
+    bot: bool,
+    group: bool,
+    discoverable: bool,
+    created_at: []const u8,
+    followers_count: i64,
+    following_count: i64,
+    statuses_count: i64,
+    avatar: []const u8,
+    avatar_static: []const u8,
+    header: []const u8,
+    header_static: []const u8,
+};
+
 const ParsedHandle = struct {
     username: []const u8,
     host: []const u8,
@@ -77,6 +100,55 @@ fn hostHeaderAlloc(allocator: std.mem.Allocator, host: []const u8, port: ?u16, s
 
 fn baseUrlAlloc(app_state: *app.App, allocator: std.mem.Allocator) ![]u8 {
     return std.fmt.allocPrint(allocator, "{s}://{s}", .{ schemeString(app_state.cfg.scheme), app_state.cfg.domain });
+}
+
+fn defaultAvatarUrlAlloc(app_state: *app.App, allocator: std.mem.Allocator) ![]u8 {
+    const base = try baseUrlAlloc(app_state, allocator);
+    return std.fmt.allocPrint(allocator, "{s}/static/avatar.png", .{base});
+}
+
+fn defaultHeaderUrlAlloc(app_state: *app.App, allocator: std.mem.Allocator) ![]u8 {
+    const base = try baseUrlAlloc(app_state, allocator);
+    return std.fmt.allocPrint(allocator, "{s}/static/header.png", .{base});
+}
+
+fn remoteAccountApiIdAlloc(app_state: *app.App, allocator: std.mem.Allocator, actor_id: []const u8) []const u8 {
+    const rowid = remote_actors.lookupRowIdById(&app_state.conn, actor_id) catch return actor_id;
+    if (rowid == null) return actor_id;
+    return std.fmt.allocPrint(allocator, "{d}", .{remote_actor_id_base + rowid.?}) catch actor_id;
+}
+
+fn makeRemoteAccountPayload(
+    app_state: *app.App,
+    allocator: std.mem.Allocator,
+    api_id: []const u8,
+    actor: remote_actors.RemoteActor,
+) AccountPayload {
+    const acct = std.fmt.allocPrint(allocator, "{s}@{s}", .{ actor.preferred_username, actor.domain }) catch
+        actor.preferred_username;
+    const avatar_url = defaultAvatarUrlAlloc(app_state, allocator) catch actor.id;
+    const header_url = defaultHeaderUrlAlloc(app_state, allocator) catch actor.id;
+
+    return .{
+        .id = api_id,
+        .username = actor.preferred_username,
+        .acct = acct,
+        .display_name = "",
+        .note = "",
+        .url = actor.id,
+        .locked = false,
+        .bot = false,
+        .group = false,
+        .discoverable = true,
+        .created_at = "1970-01-01T00:00:00.000Z",
+        .followers_count = 0,
+        .following_count = 0,
+        .statuses_count = 0,
+        .avatar = avatar_url,
+        .avatar_static = avatar_url,
+        .header = header_url,
+        .header_static = header_url,
+    };
 }
 
 fn requestTargetAlloc(allocator: std.mem.Allocator, uri: std.Uri) ![]u8 {
@@ -449,7 +521,35 @@ pub fn acceptInboundFollow(
     });
 
     _ = try followers.markAcceptedByRemoteActorId(&app_state.conn, user_id, actor.id);
-    _ = try notifications.create(&app_state.conn, user_id, "follow", actor.id, null);
+    const notif_id = try notifications.create(&app_state.conn, user_id, "follow", actor.id, null);
+
+    const NotificationPayload = struct {
+        id: []const u8,
+        type: []const u8,
+        created_at: []const u8,
+        account: AccountPayload,
+        status: ?struct {} = null,
+    };
+
+    const rows = notifications.list(&app_state.conn, allocator, user_id, 1, notif_id + 1) catch &.{};
+    const created_at = if (rows.len > 0) rows[0].created_at else "1970-01-01T00:00:00.000Z";
+
+    const api_id = remoteAccountApiIdAlloc(app_state, allocator, actor.id);
+    const acct = makeRemoteAccountPayload(app_state, allocator, api_id, actor);
+
+    const notif_id_str = std.fmt.allocPrint(allocator, "{d}", .{notif_id}) catch "0";
+    const notif_json = std.json.Stringify.valueAlloc(
+        allocator,
+        NotificationPayload{
+            .id = notif_id_str,
+            .type = "follow",
+            .created_at = created_at,
+            .account = acct,
+        },
+        .{},
+    ) catch return error.OutOfMemory;
+
+    app_state.streaming.publishNotification(user_id, notif_json);
 }
 
 pub fn deliverStatusToFollowers(app_state: *app.App, allocator: std.mem.Allocator, user: users.User, st: statuses.Status) Error!void {
@@ -799,6 +899,57 @@ test "followHandle sends signed Follow to remote inbox" {
     std.base64.standard.Decoder.decode(sig_bytes, sig_b64) catch return error.TestUnexpectedResult;
 
     try std.testing.expect(try @import("crypto_rsa.zig").verifyRsaSha256Pem(keys.public_key_pem, signing_string, sig_bytes));
+}
+
+test "acceptInboundFollow publishes streaming follow notification" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    var mock = transport.MockTransport.init(std.testing.allocator);
+    app_state.transport = mock.transport();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    const sub = try app_state.streaming.subscribe(user_id, &.{.user});
+    defer app_state.streaming.unsubscribe(sub);
+
+    const remote_actor_id = "http://remote.test/users/bob";
+    const remote_inbox = "http://remote.test/users/bob/inbox";
+
+    try remote_actors.upsert(&app_state.conn, .{
+        .id = remote_actor_id,
+        .inbox = remote_inbox,
+        .shared_inbox = null,
+        .preferred_username = "bob",
+        .domain = "remote.test",
+        .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
+    });
+
+    try mock.pushExpected(.{ .method = .POST, .url = remote_inbox, .response_status = .accepted, .response_body = "" });
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    try acceptInboundFollow(&app_state, a, user_id, "alice", remote_actor_id, "http://remote.test/follows/1");
+
+    const msg = sub.pop() orelse {
+        try std.testing.expect(false);
+        return;
+    };
+    defer app_state.streaming.allocator.free(msg);
+
+    var env_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, msg, .{});
+    defer env_json.deinit();
+    try std.testing.expectEqualStrings("notification", env_json.value.object.get("event").?.string);
+
+    const payload_str = env_json.value.object.get("payload").?.string;
+    var payload_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, payload_str, .{});
+    defer payload_json.deinit();
+
+    try std.testing.expectEqualStrings("follow", payload_json.value.object.get("type").?.string);
+    try std.testing.expectEqualStrings("bob", payload_json.value.object.get("account").?.object.get("username").?.string);
 }
 
 fn headerValue(headers: []const std.http.Header, name: []const u8) ?[]const u8 {
