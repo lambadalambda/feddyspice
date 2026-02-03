@@ -82,7 +82,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - ActivityPub actor documents include `name`, `summary`, `icon`, and `image` when profile fields are set.
 - Mastodon conversations endpoints for DMs (`GET /api/v1/conversations`, `POST /api/v1/conversations/:id/read`, `DELETE /api/v1/conversations/:id`).
 - Additional client-compat endpoints to eliminate 404s (`GET /api/v1/instance/peers`, `GET /api/v1/instance/activity`, `GET /api/v1/instance/extended_description`, `GET /api/v1/directory`, `GET /nodeinfo/2.1`, `GET /robots.txt`).
-- Outbound federation of `visibility=direct` statuses to mentioned recipients (ActivityPub `to=[actor ids]`, no `Public` recipients).
+- Outbound federation of `visibility=direct` statuses to mentioned recipients (ActivityPub Create/Delete with `to=[actor ids]`, no `Public` recipients).
 
 ### Fixed
 

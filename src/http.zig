@@ -7264,6 +7264,73 @@ test "DELETE /api/v1/statuses delivers Delete to followers" {
     try std.testing.expect(try @import("crypto_rsa.zig").verifyRsaSha256Pem(keys.public_key_pem, signing_string, sig_bytes));
 }
 
+test "DELETE /api/v1/statuses visibility=direct delivers Delete to mentioned recipients" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    var mock = transport.MockTransport.init(std.testing.allocator);
+    app_state.transport = mock.transport();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const remote_actor_id = "http://remote.test/users/bob";
+    const remote_inbox = "http://remote.test/users/bob/inbox";
+
+    try remote_actors.upsert(&app_state.conn, .{
+        .id = remote_actor_id,
+        .inbox = remote_inbox,
+        .shared_inbox = null,
+        .preferred_username = "bob",
+        .domain = "remote.test",
+        .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
+    });
+
+    const st = try statuses.create(&app_state.conn, a, user_id, "@bob@remote.test hi", "direct");
+
+    const app_creds = try oauth.createApp(&app_state.conn, a, "pl-fe", "urn:ietf:wg:oauth:2.0:oob", "read write", "");
+    const token = try oauth.createAccessToken(&app_state.conn, a, app_creds.id, user_id, "read write");
+    const auth_header = try std.fmt.allocPrint(a, "Bearer {s}", .{token});
+
+    const expected_object_id = try std.fmt.allocPrint(a, "http://example.test/users/alice/statuses/{d}", .{st.id});
+
+    try mock.pushExpected(.{ .method = .POST, .url = remote_inbox, .response_status = .accepted, .response_body = "" });
+
+    const del_target = try std.fmt.allocPrint(a, "/api/v1/statuses/{d}", .{st.id});
+    const del_resp = handle(&app_state, a, .{
+        .method = .DELETE,
+        .target = del_target,
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, del_resp.status);
+
+    try background.runQueued(&app_state, a);
+
+    try std.testing.expectEqual(@as(usize, 1), mock.requests.items.len);
+    const delivered = mock.requests.items[0];
+    try std.testing.expectEqual(std.http.Method.POST, delivered.method);
+    try std.testing.expectEqualStrings(remote_inbox, delivered.url);
+
+    const delivered_body = delivered.payload orelse return error.TestUnexpectedResult;
+    var delivered_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, delivered_body, .{});
+    defer delivered_json.deinit();
+
+    try std.testing.expectEqualStrings("Delete", delivered_json.value.object.get("type").?.string);
+
+    const to_arr = delivered_json.value.object.get("to").?.array.items;
+    const cc_arr = delivered_json.value.object.get("cc").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), to_arr.len);
+    try std.testing.expectEqualStrings(remote_actor_id, to_arr[0].string);
+    try std.testing.expectEqual(@as(usize, 0), cc_arr.len);
+
+    const obj = delivered_json.value.object.get("object").?.object;
+    try std.testing.expectEqualStrings(expected_object_id, obj.get("id").?.string);
+}
+
 test "DELETE /api/v1/statuses publishes streaming delete" {
     var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
     defer app_state.deinit();
