@@ -88,6 +88,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - Extracted shared helpers (`htmlEscapeAlloc`, `textToHtmlAlloc`, URL builders, remote account API ID mapping) into `src/util/*` for easier modularization.
 - Moved HTTP `Request`/`Response` types into `src/http_types.zig` to allow splitting `src/http.zig` without import cycles.
+- Moved NodeInfo/host-meta handlers into `src/http/discovery.zig`.
 
 ### Fixed
 

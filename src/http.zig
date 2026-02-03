@@ -24,6 +24,7 @@ const util_url = @import("util/url.zig");
 const users = @import("users.zig");
 const version = @import("version.zig");
 const http_types = @import("http_types.zig");
+const discovery = @import("http/discovery.zig");
 
 const transparent_png = [_]u8{
     0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
@@ -115,19 +116,19 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
     }
 
     if (req.method == .GET and std.mem.eql(u8, path, "/.well-known/host-meta")) {
-        return hostMeta(app_state, allocator);
+        return discovery.hostMeta(app_state, allocator);
     }
 
     if (req.method == .GET and std.mem.eql(u8, path, "/.well-known/nodeinfo")) {
-        return nodeinfoDiscovery(app_state, allocator);
+        return discovery.nodeinfoDiscovery(app_state, allocator);
     }
 
     if (req.method == .GET and std.mem.eql(u8, path, "/nodeinfo/2.0")) {
-        return nodeinfoDocument(app_state, allocator);
+        return discovery.nodeinfoDocumentWithVersion(app_state, allocator, "2.0");
     }
 
     if (req.method == .GET and std.mem.eql(u8, path, "/nodeinfo/2.1")) {
-        return nodeinfoDocumentWithVersion(app_state, allocator, "2.1");
+        return discovery.nodeinfoDocumentWithVersion(app_state, allocator, "2.1");
     }
 
     if (std.mem.startsWith(u8, path, "/users/")) {
@@ -675,27 +676,6 @@ fn streamingBaseUrlAlloc(app_state: *app.App, allocator: std.mem.Allocator) ![]u
     return util_url.streamingBaseUrlAlloc(app_state, allocator);
 }
 
-fn hostMeta(app_state: *app.App, allocator: std.mem.Allocator) Response {
-    const scheme = @tagName(app_state.cfg.scheme);
-    const domain = app_state.cfg.domain;
-
-    const body = std.fmt.allocPrint(
-        allocator,
-        \\<?xml version="1.0" encoding="UTF-8"?>
-        \\<XRD xmlns="http://docs.oasis-open.org/ns/xri/xrd-1.0">
-        \\  <Link rel="lrdd" type="application/jrd+json" template="{s}://{s}/.well-known/webfinger?resource={{uri}}" />
-        \\</XRD>
-        \\
-    ,
-        .{ scheme, domain },
-    ) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
-
-    return .{
-        .content_type = "application/xrd+xml; charset=utf-8",
-        .body = body,
-    };
-}
-
 fn defaultAvatarUrlAlloc(app_state: *app.App, allocator: std.mem.Allocator) ![]u8 {
     return util_url.defaultAvatarUrlAlloc(app_state, allocator);
 }
@@ -778,69 +758,6 @@ fn webfinger(app_state: *app.App, allocator: std.mem.Allocator, req: Request) Re
 
     return .{
         .content_type = "application/jrd+json; charset=utf-8",
-        .body = body,
-    };
-}
-
-fn nodeinfoDiscovery(app_state: *app.App, allocator: std.mem.Allocator) Response {
-    const base = baseUrlAlloc(app_state, allocator) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-
-    const href = std.fmt.allocPrint(allocator, "{s}/nodeinfo/2.0", .{base}) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-
-    const payload = .{
-        .links = [_]struct { rel: []const u8, href: []const u8 }{
-            .{
-                .rel = "http://nodeinfo.diaspora.software/ns/schema/2.0",
-                .href = href,
-            },
-        },
-    };
-
-    const body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-
-    return .{
-        .content_type = "application/json; charset=utf-8",
-        .body = body,
-    };
-}
-
-fn nodeinfoDocument(app_state: *app.App, allocator: std.mem.Allocator) Response {
-    return nodeinfoDocumentWithVersion(app_state, allocator, "2.0");
-}
-
-fn nodeinfoDocumentWithVersion(app_state: *app.App, allocator: std.mem.Allocator, schema_version: []const u8) Response {
-    const user_count = users.count(&app_state.conn) catch 0;
-    const open_registrations = (user_count == 0);
-
-    const payload = .{
-        .version = schema_version,
-        .software = .{
-            .name = "feddyspice",
-            .version = version.version,
-        },
-        .protocols = [_][]const u8{"activitypub"},
-        .services = .{
-            .inbound = [_][]const u8{},
-            .outbound = [_][]const u8{},
-        },
-        .openRegistrations = open_registrations,
-        .usage = .{
-            .users = .{
-                .total = user_count,
-            },
-            .localPosts = @as(i64, 0),
-        },
-        .metadata = .{},
-    };
-
-    const body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-
-    return .{
-        .content_type = "application/json; charset=utf-8",
         .body = body,
     };
 }
