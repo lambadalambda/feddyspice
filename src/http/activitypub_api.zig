@@ -65,6 +65,9 @@ fn verifyInboxSignature(
 
     if (!http_signatures.digestHeaderHasSha256(req.body, digest_hdr)) return error.Unauthorized;
 
+    var cl_buf: [32]u8 = undefined;
+    const content_length = std.fmt.bufPrint(&cl_buf, "{d}", .{req.body.len}) catch return error.Internal;
+
     const ok = http_signatures.verifyRequestSignaturePem(
         allocator,
         actor.public_key_pem,
@@ -75,6 +78,7 @@ fn verifyInboxSignature(
         date_hdr,
         digest_hdr,
         req.content_type,
+        content_length,
     ) catch |err| switch (err) {
         error.OutOfMemory => return error.Internal,
         else => return error.Unauthorized,

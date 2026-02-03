@@ -191,6 +191,7 @@ fn signingStringFromHeadersAlloc(
     date: []const u8,
     digest: []const u8,
     content_type: ?[]const u8,
+    content_length: ?[]const u8,
 ) VerifyError![]u8 {
     var method_buf: [16]u8 = undefined;
     const method_upper = @tagName(method);
@@ -219,6 +220,9 @@ fn signingStringFromHeadersAlloc(
         } else if (std.ascii.eqlIgnoreCase(h, "content-type")) {
             const ct = content_type orelse return error.InvalidSignatureHeader;
             try aw.writer.print("content-type: {s}", .{ct});
+        } else if (std.ascii.eqlIgnoreCase(h, "content-length")) {
+            const cl = content_length orelse return error.InvalidSignatureHeader;
+            try aw.writer.print("content-length: {s}", .{cl});
         } else {
             return error.UnsupportedSignedHeaders;
         }
@@ -241,6 +245,7 @@ pub fn verifyRequestSignaturePem(
     date: []const u8,
     digest: []const u8,
     content_type: ?[]const u8,
+    content_length: ?[]const u8,
 ) VerifyError!bool {
     const parsed = parseSignatureHeader(signature_header_value) orelse return error.InvalidSignatureHeader;
 
@@ -249,7 +254,17 @@ pub fn verifyRequestSignaturePem(
     }
 
     const headers = parsed.headers orelse return error.InvalidSignatureHeader;
-    const signing_string = try signingStringFromHeadersAlloc(allocator, headers, method, target, host, date, digest, content_type);
+    const signing_string = try signingStringFromHeadersAlloc(
+        allocator,
+        headers,
+        method,
+        target,
+        host,
+        date,
+        digest,
+        content_type,
+        content_length,
+    );
     defer allocator.free(signing_string);
 
     const sig_bytes = try base64DecodeAlloc(allocator, parsed.signature_b64);
@@ -325,6 +340,7 @@ test "signRequest builds verifiable signature" {
         signed.date,
         signed.digest,
         null,
+        null,
     ));
 }
 
@@ -358,6 +374,7 @@ test "verifyRequestSignaturePem returns false on wrong digest value" {
         "example.test",
         signed.date,
         "SHA-256=totally-wrong",
+        null,
         null,
     )));
 }
