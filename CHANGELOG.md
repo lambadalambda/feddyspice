@@ -92,6 +92,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Moved instance endpoints into `src/http/instance.zig`.
 - Added `src/http/common.zig` for shared HTTP helpers used across handler modules.
 - Moved WebFinger handler into `src/http/discovery.zig`.
+- Expanded `src/http/common.zig` with shared HTML/redirect/body-parsing helpers to support further handler modularization.
 
 ### Fixed
 

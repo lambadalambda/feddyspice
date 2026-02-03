@@ -3693,22 +3693,11 @@ fn currentUserId(app_state: *app.App, req: Request) !?i64 {
 }
 
 fn redirect(allocator: std.mem.Allocator, location: []const u8) Response {
-    const headers = allocator.alloc(std.http.Header, 1) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-    headers[0] = .{ .name = "location", .value = location };
-
-    return .{
-        .status = .see_other,
-        .body = "redirecting\n",
-        .headers = headers,
-    };
+    return common.redirect(allocator, location);
 }
 
 fn safeReturnTo(return_to: ?[]const u8) ?[]const u8 {
-    const rt = return_to orelse return null;
-    if (!std.mem.startsWith(u8, rt, "/")) return null;
-    if (std.mem.indexOf(u8, rt, "://") != null) return null;
-    return rt;
+    return common.safeReturnTo(return_to);
 }
 
 fn queryString(target: []const u8) []const u8 {
@@ -3720,27 +3709,7 @@ fn parseQueryParam(allocator: std.mem.Allocator, query: []const u8, name: []cons
 }
 
 fn percentEncodeAlloc(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {
-    var aw: std.Io.Writer.Allocating = .init(allocator);
-    errdefer aw.deinit();
-
-    for (raw) |c| {
-        if (isUnreserved(c)) {
-            try aw.writer.writeByte(c);
-        } else {
-            try aw.writer.print("%{X:0>2}", .{c});
-        }
-    }
-
-    const out = try aw.toOwnedSlice();
-    aw.deinit();
-    return out;
-}
-
-fn isUnreserved(c: u8) bool {
-    return switch (c) {
-        'A'...'Z', 'a'...'z', '0'...'9', '-', '.', '_', '~' => true,
-        else => false,
-    };
+    return common.percentEncodeAlloc(allocator, raw);
 }
 
 fn trimTrailingSlash(s: []const u8) []const u8 {
@@ -3750,50 +3719,27 @@ fn trimTrailingSlash(s: []const u8) []const u8 {
 }
 
 fn htmlEscapeAlloc(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {
-    return util_html.htmlEscapeAlloc(allocator, raw);
+    return common.htmlEscapeAlloc(allocator, raw);
 }
 
 fn isForm(content_type: ?[]const u8) bool {
-    const ct = content_type orelse return false;
-    return std.mem.startsWith(u8, ct, "application/x-www-form-urlencoded");
+    return common.isForm(content_type);
 }
 
 fn isJson(content_type: ?[]const u8) bool {
-    const ct = content_type orelse return false;
-    return std.mem.startsWith(u8, ct, "application/json");
+    return common.isJson(content_type);
 }
 
 fn isMultipart(content_type: ?[]const u8) bool {
-    const ct = content_type orelse return false;
-    return std.mem.startsWith(u8, ct, "multipart/form-data");
+    return common.isMultipart(content_type);
 }
 
 fn parseBodyParams(allocator: std.mem.Allocator, req: Request) !form.Form {
-    if (isForm(req.content_type)) return try form.parse(allocator, req.body);
-    if (isJson(req.content_type)) return try form.parseJson(allocator, req.body);
-    if (isMultipart(req.content_type)) return try form.parseMultipart(allocator, req.content_type.?, req.body);
-    return error.UnsupportedContentType;
+    return common.parseBodyParams(allocator, req);
 }
 
 fn htmlPage(allocator: std.mem.Allocator, title: []const u8, inner_html: []const u8) Response {
-    const body = std.fmt.allocPrint(
-        allocator,
-        \\<!doctype html>
-        \\<html>
-        \\  <head><meta charset="utf-8"><title>{s}</title></head>
-        \\  <body>
-        \\    <h1>{s}</h1>
-        \\    {s}
-        \\  </body>
-        \\</html>
-    ,
-        .{ title, title, inner_html },
-    ) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
-
-    return .{
-        .content_type = "text/html; charset=utf-8",
-        .body = body,
-    };
+    return common.htmlPage(allocator, title, inner_html);
 }
 
 fn redirectWithSession(
