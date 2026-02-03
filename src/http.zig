@@ -1506,11 +1506,44 @@ fn createStatus(app_state: *app.App, allocator: std.mem.Allocator, req: Request)
 
     const text = parsed.get("status") orelse return .{ .status = .bad_request, .body = "missing status\n" };
     const visibility = parsed.get("visibility") orelse "public";
+    const media_ids_raw = parsed.get("media_ids[]") orelse parsed.get("media_ids");
+
+    app_state.conn.execZ("BEGIN IMMEDIATE;\x00") catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    var committed = false;
+    defer if (!committed) {
+        app_state.conn.execZ("ROLLBACK;\x00") catch {};
+    };
 
     const st = statuses.create(&app_state.conn, allocator, info.?.user_id, text, visibility) catch |err| switch (err) {
         error.InvalidText => return .{ .status = .unprocessable_entity, .body = "invalid status\n" },
         else => return .{ .status = .internal_server_error, .body = "internal server error\n" },
     };
+
+    if (media_ids_raw) |raw| {
+        var pos: i64 = 0;
+        var it = std.mem.splitScalar(u8, raw, '\n');
+        while (it.next()) |id_str| {
+            if (id_str.len == 0) continue;
+            const media_id = std.fmt.parseInt(i64, id_str, 10) catch
+                return .{ .status = .unprocessable_entity, .body = "invalid media\n" };
+
+            const meta = media.lookupMeta(&app_state.conn, allocator, media_id) catch
+                return .{ .status = .internal_server_error, .body = "internal server error\n" };
+            if (meta == null or meta.?.user_id != info.?.user_id) {
+                return .{ .status = .unprocessable_entity, .body = "invalid media\n" };
+            }
+
+            const attached = media.attachToStatus(&app_state.conn, st.id, media_id, pos) catch
+                return .{ .status = .internal_server_error, .body = "internal server error\n" };
+            if (!attached) return .{ .status = .unprocessable_entity, .body = "invalid media\n" };
+            pos += 1;
+        }
+    }
+
+    app_state.conn.execZ("COMMIT;\x00") catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    committed = true;
 
     const user = users.lookupUserById(&app_state.conn, allocator, info.?.user_id) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
@@ -2072,6 +2105,7 @@ const StatusPayload = struct {
     uri: []const u8,
     url: []const u8,
     account: AccountPayload,
+    media_attachments: []const MediaAttachmentPayload,
 };
 
 fn statusPayloadIdInt(p: StatusPayload) i64 {
@@ -2121,6 +2155,16 @@ fn makeStatusPayload(app_state: *app.App, allocator: std.mem.Allocator, user: us
 
     const uri = std.fmt.allocPrint(allocator, "{s}/api/v1/statuses/{s}", .{ base, id_str }) catch "";
 
+    const metas: []const media.MediaMeta = media.listForStatus(&app_state.conn, allocator, st.id) catch &.{};
+    const attachments = blk: {
+        if (metas.len == 0) break :blk &.{};
+        const out = allocator.alloc(MediaAttachmentPayload, metas.len) catch break :blk &.{};
+        for (metas, 0..) |m, i| {
+            out[i] = makeMediaAttachmentPayload(app_state, allocator, m);
+        }
+        break :blk out;
+    };
+
     return .{
         .id = id_str,
         .created_at = st.created_at,
@@ -2130,6 +2174,7 @@ fn makeStatusPayload(app_state: *app.App, allocator: std.mem.Allocator, user: us
         .uri = uri,
         .url = uri,
         .account = acct,
+        .media_attachments = attachments,
     };
 }
 
@@ -2179,6 +2224,7 @@ fn makeRemoteStatusPayload(
         .uri = st.remote_uri,
         .url = st.remote_uri,
         .account = acct,
+        .media_attachments = &.{},
     };
 }
 
@@ -4145,6 +4191,108 @@ test "media: upload + update + fetch" {
     var upd_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, upd_resp.body, .{});
     defer upd_json.deinit();
     try std.testing.expectEqualStrings("new", upd_json.value.object.get("description").?.string);
+}
+
+test "statuses: create supports media_ids[] attachments" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const app_creds = try oauth.createApp(
+        &app_state.conn,
+        a,
+        "pl-fe",
+        "urn:ietf:wg:oauth:2.0:oob",
+        "read write",
+        "",
+    );
+    const token = try oauth.createAccessToken(&app_state.conn, a, app_creds.id, user_id, "read write");
+    const auth_header = try std.fmt.allocPrint(a, "Bearer {s}", .{token});
+
+    const now_ms: i64 = 123;
+    const m1 = try media.createWithToken(&app_state.conn, a, user_id, "tok1", "image/png", "x", "d1", now_ms);
+    const m2 = try media.createWithToken(&app_state.conn, a, user_id, "tok2", "image/png", "y", "d2", now_ms);
+
+    const create_body = try std.fmt.allocPrint(
+        a,
+        "status=hello&visibility=public&media_ids[]={d}&media_ids[]={d}",
+        .{ m1.id, m2.id },
+    );
+
+    const create_resp = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/api/v1/statuses",
+        .content_type = "application/x-www-form-urlencoded",
+        .body = create_body,
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, create_resp.status);
+
+    var create_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, create_resp.body, .{});
+    defer create_json.deinit();
+
+    const attachments = create_json.value.object.get("media_attachments").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), attachments.len);
+    try std.testing.expectEqualStrings(
+        try std.fmt.allocPrint(a, "{d}", .{m1.id}),
+        attachments[0].object.get("id").?.string,
+    );
+    try std.testing.expectEqualStrings(
+        try std.fmt.allocPrint(a, "{d}", .{m2.id}),
+        attachments[1].object.get("id").?.string,
+    );
+    try std.testing.expect(std.mem.endsWith(u8, attachments[0].object.get("url").?.string, "/media/tok1"));
+    try std.testing.expect(std.mem.endsWith(u8, attachments[1].object.get("url").?.string, "/media/tok2"));
+}
+
+test "statuses: create rolls back on invalid media id" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const app_creds = try oauth.createApp(
+        &app_state.conn,
+        a,
+        "pl-fe",
+        "urn:ietf:wg:oauth:2.0:oob",
+        "read write",
+        "",
+    );
+    const token = try oauth.createAccessToken(&app_state.conn, a, app_creds.id, user_id, "read write");
+    const auth_header = try std.fmt.allocPrint(a, "Bearer {s}", .{token});
+
+    const create_resp = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/api/v1/statuses",
+        .content_type = "application/x-www-form-urlencoded",
+        .body = "status=hello&visibility=public&media_ids[]=999",
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.unprocessable_entity, create_resp.status);
+
+    const tl_resp = handle(&app_state, a, .{
+        .method = .GET,
+        .target = "/api/v1/timelines/home",
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, tl_resp.status);
+
+    var tl_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, tl_resp.body, .{});
+    defer tl_json.deinit();
+    try std.testing.expect(tl_json.value == .array);
+    try std.testing.expectEqual(@as(usize, 0), tl_json.value.array.items.len);
 }
 
 test "timelines: public timeline returns local statuses" {

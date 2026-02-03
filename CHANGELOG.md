@@ -21,6 +21,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Public timeline endpoint (`GET /api/v1/timelines/public`).
 - Mastodon v2 instance endpoint (`GET /api/v2/instance`) for client compatibility.
 - Media upload + serving (`POST /api/v1/media`, `PUT /api/v1/media/:id`, `GET /media/:token`).
+- Status posting accepts `media_ids[]` and returns `media_attachments` on status payloads.
 - Initial ActivityPub discovery endpoints: WebFinger, NodeInfo, and actor document (`/.well-known/webfinger`, `/.well-known/nodeinfo`, `/nodeinfo/2.0`, `/users/:name`).
 - Host-meta discovery endpoint (`/.well-known/host-meta`) advertising WebFinger LRDD template.
 - Per-actor RSA keypairs (stored in SQLite) and `publicKeyPem` in the ActivityPub actor document.

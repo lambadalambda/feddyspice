@@ -30,7 +30,7 @@ Target: pl-fe can log in and post/read.
 - [x] Timelines: home (minimal)
 - [x] Timelines: public (basic)
 - [x] Timelines: pagination (Link headers; `since_id`/`min_id`/`max_id`)
-- [ ] Attachments (optional early): upload + include in status
+- [x] Attachments (optional early): upload + include in status
 - [x] Markers: basic support (`GET/POST /api/v1/markers`)
 
 ## 3) Federation basics (ActivityPub)
@@ -120,7 +120,7 @@ This is the “eventually” list. We should keep it scoped to what pl-fe needs,
 
 - [x] `POST /api/v1/media` (upload)
 - [x] `PUT /api/v1/media/:id` (update metadata)
-- [ ] Attachments in `POST /api/v1/statuses` (IDs from media upload)
+- [x] Attachments in `POST /api/v1/statuses` (IDs from media upload)
 
 ### Notifications / streaming
 
