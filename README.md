@@ -106,6 +106,17 @@ In practice, this means implementing a minimal set of:
 - OAuth 2.0 endpoints (`/oauth/authorize`, `/oauth/token`, app registration)
 - Mastodon-ish REST endpoints pl-fe expects (accounts, timelines, posting)
 
+## API compatibility target
+
+Compatibility is intentionally scoped to:
+
+- Primary client: **pl-fe**
+- Secondary client: **Elk** (optional; kept working when practical)
+
+The reference surface is the **Mastodon API** (v1/v2) only for the subset those clients actually use, plus enough **ActivityPub** to federate.
+
+For the living list of endpoints and milestones, see `PLAN.md` (especially sections 2, 6, and 7).
+
 ## Status
 
 Pre-alpha. See `PLAN.md` for the checklist of milestones.

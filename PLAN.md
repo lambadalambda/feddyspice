@@ -4,8 +4,8 @@ This is a living checklist. We only mark items complete when there are tests cov
 
 ## 0) Repo / workflow
 
-- [ ] Add `CHANGELOG.md` entries for each PR/commit group
-- [ ] Decide exact “API compatibility target” for pl-fe (document required endpoints)
+- [x] Add `CHANGELOG.md` entries for each PR/commit group
+- [x] Decide exact “API compatibility target” for pl-fe (document required endpoints)
 - [x] Add a minimal Zig project skeleton (`zig build test` runs locally)
 - [x] Add formatting workflow (`zig fmt`)
 
