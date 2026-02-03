@@ -147,6 +147,8 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
     }
 
     if (req.method == .GET and std.mem.eql(u8, path, "/api/v2/instance")) {
+        const base = baseUrlAlloc(app_state, allocator) catch "";
+        const streaming_url = std.fmt.allocPrint(allocator, "{s}/api/v1/streaming", .{base}) catch "";
         const payload = .{
             .domain = app_state.cfg.domain,
             .title = "feddyspice",
@@ -160,7 +162,7 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
             .thumbnail = .{ .url = "" },
             .languages = [_][]const u8{"en"},
             .configuration = .{
-                .urls = .{},
+                .urls = .{ .streaming = streaming_url },
                 .polls = .{
                     .max_characters_per_option = 25,
                     .max_expiration = 2629746,
@@ -184,6 +186,10 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
             .content_type = "application/json; charset=utf-8",
             .body = body,
         };
+    }
+
+    if (req.method == .GET and std.mem.startsWith(u8, path, "/api/v1/streaming")) {
+        return .{ .status = .not_implemented, .body = "streaming not implemented\n" };
     }
 
     // --- Client-compat placeholders (Elk/pl-fe) ---
@@ -3462,12 +3468,26 @@ test "GET /api/v2/instance -> 200 with domain" {
     try std.testing.expect(cfg.get("polls") != null);
     try std.testing.expect(cfg.get("statuses") != null);
 
+    const urls = cfg.get("urls").?.object;
+    try std.testing.expectEqualStrings("http://example.test/api/v1/streaming", urls.get("streaming").?.string);
+
     const polls = cfg.get("polls").?.object;
     switch (polls.get("max_options").?) {
         .integer => |i| try std.testing.expectEqual(@as(i64, 4), i),
         .float => |f| try std.testing.expectEqual(@as(f64, 4), f),
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "GET /api/v1/streaming -> 501" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const resp = handle(&app_state, std.testing.allocator, .{
+        .method = .GET,
+        .target = "/api/v1/streaming/?stream=user",
+    });
+    try std.testing.expectEqual(std.http.Status.not_implemented, resp.status);
 }
 
 test "client compat: placeholder endpoints return JSON" {

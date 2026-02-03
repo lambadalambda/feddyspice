@@ -126,4 +126,4 @@ This is the “eventually” list. We should keep it scoped to what pl-fe needs,
 
 - [ ] `GET /api/v1/notifications` (real notifications)
 - [ ] `POST /api/v1/notifications/clear` + `POST /api/v1/notifications/:id/dismiss`
-- [ ] Streaming endpoint strategy (implement `/api/v1/streaming` or ensure clients don’t rely on it)
+- [x] Streaming endpoint strategy (implement `/api/v1/streaming` or ensure clients don’t rely on it)
