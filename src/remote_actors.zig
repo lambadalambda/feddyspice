@@ -128,6 +128,35 @@ pub fn lookupByRowId(conn: *db.Db, allocator: std.mem.Allocator, rowid: i64) Err
     };
 }
 
+pub fn lookupByHandle(conn: *db.Db, allocator: std.mem.Allocator, username: []const u8, domain: []const u8) Error!?RemoteActor {
+    var stmt = try conn.prepareZ(
+        "SELECT id, inbox, shared_inbox, preferred_username, domain, public_key_pem, avatar_url, header_url FROM remote_actors WHERE preferred_username = ?1 AND domain = ?2 LIMIT 1;\x00",
+    );
+    defer stmt.finalize();
+    try stmt.bindText(1, username);
+    try stmt.bindText(2, domain);
+
+    switch (try stmt.step()) {
+        .done => return null,
+        .row => {},
+    }
+
+    const shared = if (stmt.columnType(2) == .null) null else try allocator.dupe(u8, stmt.columnText(2));
+    const avatar_url = if (stmt.columnType(6) == .null) null else try allocator.dupe(u8, stmt.columnText(6));
+    const header_url = if (stmt.columnType(7) == .null) null else try allocator.dupe(u8, stmt.columnText(7));
+
+    return .{
+        .id = try allocator.dupe(u8, stmt.columnText(0)),
+        .inbox = try allocator.dupe(u8, stmt.columnText(1)),
+        .shared_inbox = shared,
+        .preferred_username = try allocator.dupe(u8, stmt.columnText(3)),
+        .domain = try allocator.dupe(u8, stmt.columnText(4)),
+        .public_key_pem = try allocator.dupe(u8, stmt.columnText(5)),
+        .avatar_url = avatar_url,
+        .header_url = header_url,
+    };
+}
+
 test "upsert + lookupById" {
     var conn = try db.Db.openZ(":memory:");
     defer conn.close();

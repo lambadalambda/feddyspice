@@ -339,6 +339,45 @@ fn textToHtmlAlloc(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
     return std.fmt.allocPrint(allocator, "<p>{s}</p>", .{escaped});
 }
 
+fn isMentionUsernameChar(c: u8) bool {
+    return (c >= 'a' and c <= 'z') or
+        (c >= 'A' and c <= 'Z') or
+        (c >= '0' and c <= '9') or
+        c == '_' or
+        c == '-' or
+        c == '.';
+}
+
+fn isMentionHostChar(c: u8) bool {
+    return (c >= 'a' and c <= 'z') or
+        (c >= 'A' and c <= 'Z') or
+        (c >= '0' and c <= '9') or
+        c == '-' or
+        c == '.' or
+        c == ':' or
+        c == '_';
+}
+
+fn trimTrailingMentionPunct(s: []const u8) []const u8 {
+    var end = s.len;
+    while (end > 0) {
+        const c = s[end - 1];
+        if (c == '.' or c == ',' or c == ':' or c == ';' or c == '!' or c == '?' or c == ')' or c == ']' or c == '}' or c == '>' or c == '"' or c == '\'') {
+            end -= 1;
+            continue;
+        }
+        break;
+    }
+    return s[0..end];
+}
+
+fn hasActorId(actors: []const remote_actors.RemoteActor, actor_id: []const u8) bool {
+    for (actors) |a| {
+        if (std.mem.eql(u8, a.id, actor_id)) return true;
+    }
+    return false;
+}
+
 pub fn resolveRemoteActorByHandle(app_state: *app.App, allocator: std.mem.Allocator, handle: []const u8) Error!remote_actors.RemoteActor {
     const remote = try parseHandle(handle);
 
@@ -585,6 +624,11 @@ pub fn acceptInboundFollow(
 }
 
 pub fn deliverStatusToFollowers(app_state: *app.App, allocator: std.mem.Allocator, user: users.User, st: statuses.Status) Error!void {
+    if (std.mem.eql(u8, st.visibility, "direct")) {
+        try deliverDirectStatus(app_state, allocator, user, st);
+        return;
+    }
+
     app_state.logger.debug("deliverStatusToFollowers: user_id={d}", .{user.id});
     const follower_ids = try followers.listAcceptedRemoteActorIds(&app_state.conn, allocator, user.id, 200);
     app_state.logger.debug("deliverStatusToFollowers: followers={d}", .{follower_ids.len});
@@ -717,6 +761,155 @@ pub fn deliverStatusToFollowers(app_state: *app.App, allocator: std.mem.Allocato
             .payload = create_body,
         }) catch |err| {
             app_state.logger.err("deliverStatusToFollowers: deliver failed inbox={s} err={any}", .{ inbox_url, err });
+            continue;
+        };
+    }
+}
+
+fn deliverDirectStatus(app_state: *app.App, allocator: std.mem.Allocator, user: users.User, st: statuses.Status) Error!void {
+    var recipients: std.ArrayListUnmanaged(remote_actors.RemoteActor) = .empty;
+    defer recipients.deinit(allocator);
+
+    var i: usize = 0;
+    while (i < st.text.len) : (i += 1) {
+        if (st.text[i] != '@') continue;
+
+        var j = i + 1;
+        if (j >= st.text.len) continue;
+
+        const username_start = j;
+        while (j < st.text.len and isMentionUsernameChar(st.text[j])) : (j += 1) {}
+        if (j >= st.text.len or st.text[j] != '@') continue;
+        const username = st.text[username_start..j];
+        if (username.len == 0) continue;
+
+        j += 1; // skip '@'
+        const domain_start = j;
+        while (j < st.text.len and isMentionHostChar(st.text[j])) : (j += 1) {}
+        var domain = trimTrailingMentionPunct(st.text[domain_start..j]);
+        if (domain.len == 0) continue;
+
+        // For DB lookups, ignore an explicit :port.
+        const host_only = blk: {
+            const colon = std.mem.lastIndexOfScalar(u8, domain, ':') orelse break :blk domain;
+            const port_str = domain[colon + 1 ..];
+            if (port_str.len == 0) break :blk domain;
+            _ = std.fmt.parseInt(u16, port_str, 10) catch break :blk domain;
+            const host = domain[0..colon];
+            if (host.len == 0) break :blk domain;
+            break :blk host;
+        };
+
+        const actor_opt: ?remote_actors.RemoteActor = blk: {
+            if (remote_actors.lookupByHandle(&app_state.conn, allocator, username, host_only) catch null) |a| break :blk a;
+            const handle = std.fmt.allocPrint(allocator, "@{s}@{s}", .{ username, domain }) catch break :blk null;
+            break :blk resolveRemoteActorByHandle(app_state, allocator, handle) catch null;
+        };
+
+        if (actor_opt) |actor| {
+            if (!hasActorId(recipients.items, actor.id)) {
+                recipients.append(allocator, actor) catch return error.OutOfMemory;
+            }
+        }
+    }
+
+    if (recipients.items.len == 0) return;
+
+    const base = try baseUrlAlloc(app_state, allocator);
+    const local_actor_id = try std.fmt.allocPrint(allocator, "{s}/users/{s}", .{ base, user.username });
+    const key_id = try std.fmt.allocPrint(allocator, "{s}#main-key", .{local_actor_id});
+
+    const status_url = try std.fmt.allocPrint(allocator, "{s}/users/{s}/statuses/{d}", .{ base, user.username, st.id });
+    const create_id = try std.fmt.allocPrint(allocator, "{s}#create", .{status_url});
+
+    const content_html = try textToHtmlAlloc(allocator, st.text);
+
+    const to = try allocator.alloc([]const u8, recipients.items.len);
+    for (recipients.items, 0..) |actor, idx| {
+        to[idx] = actor.id;
+    }
+    const cc: []const []const u8 = &.{};
+
+    const payload = .{
+        .@"@context" = "https://www.w3.org/ns/activitystreams",
+        .id = create_id,
+        .type = "Create",
+        .actor = local_actor_id,
+        .published = st.created_at,
+        .to = to,
+        .cc = cc,
+        .object = .{
+            .id = status_url,
+            .type = "Note",
+            .attributedTo = local_actor_id,
+            .content = content_html,
+            .published = st.created_at,
+            .to = to,
+            .cc = cc,
+        },
+    };
+
+    const create_body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch
+        return error.OutOfMemory;
+
+    const keys = try actor_keys.ensureForUser(&app_state.conn, allocator, user.id);
+
+    for (recipients.items) |actor| {
+        const inbox_url = deliveryInboxUrl(actor);
+        const inbox_uri = std.Uri.parse(inbox_url) catch |err| {
+            app_state.logger.err("deliverDirectStatus: invalid inbox url={s} err={any}", .{ inbox_url, err });
+            continue;
+        };
+        const inbox_target = requestTargetAlloc(allocator, inbox_uri) catch |err| {
+            app_state.logger.err("deliverDirectStatus: requestTargetAlloc failed inbox={s} err={any}", .{ inbox_url, err });
+            continue;
+        };
+
+        const inbox_host_part = inbox_uri.host orelse {
+            app_state.logger.err("deliverDirectStatus: inbox url missing host url={s}", .{inbox_url});
+            continue;
+        };
+        const inbox_host = inbox_host_part.toRawMaybeAlloc(allocator) catch |err| {
+            app_state.logger.err("deliverDirectStatus: toRawMaybeAlloc failed inbox={s} err={any}", .{ inbox_url, err });
+            continue;
+        };
+        const inbox_host_header = hostHeaderAlloc(allocator, inbox_host, inbox_uri.port, app_state.cfg.scheme) catch |err| {
+            app_state.logger.err("deliverDirectStatus: hostHeaderAlloc failed inbox={s} err={any}", .{ inbox_url, err });
+            continue;
+        };
+
+        const signed = http_signatures.signRequest(
+            allocator,
+            keys.private_key_pem,
+            key_id,
+            .POST,
+            inbox_target,
+            inbox_host_header,
+            create_body,
+            std.time.timestamp(),
+        ) catch |err| {
+            app_state.logger.err("deliverDirectStatus: signRequest failed inbox={s} err={any}", .{ inbox_url, err });
+            continue;
+        };
+
+        fetchOkDiscardBody(app_state, allocator, .{
+            .url = inbox_url,
+            .method = .POST,
+            .headers = .{
+                .host = .{ .override = inbox_host_header },
+                .content_type = .{ .override = "application/activity+json" },
+                .accept_encoding = .omit,
+                .user_agent = .{ .override = "feddyspice" },
+            },
+            .extra_headers = &.{
+                .{ .name = "accept", .value = "application/activity+json" },
+                .{ .name = "date", .value = signed.date },
+                .{ .name = "digest", .value = signed.digest },
+                .{ .name = "signature", .value = signed.signature },
+            },
+            .payload = create_body,
+        }) catch |err| {
+            app_state.logger.err("deliverDirectStatus: deliver failed inbox={s} err={any}", .{ inbox_url, err });
             continue;
         };
     }

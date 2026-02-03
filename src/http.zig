@@ -7077,6 +7077,83 @@ test "POST /api/v1/statuses visibility=private delivers Create without Public re
     if (cc_arr.len > 0) try std.testing.expect(!std.mem.eql(u8, cc_arr[0].string, public_iri));
 }
 
+test "POST /api/v1/statuses visibility=direct delivers Create to mentioned recipients" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    var mock = transport.MockTransport.init(std.testing.allocator);
+    app_state.transport = mock.transport();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const remote_actor_id = "http://remote.test/users/bob";
+    const remote_inbox = "http://remote.test/users/bob/inbox";
+
+    try remote_actors.upsert(&app_state.conn, .{
+        .id = remote_actor_id,
+        .inbox = remote_inbox,
+        .shared_inbox = null,
+        .preferred_username = "bob",
+        .domain = "remote.test",
+        .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
+    });
+
+    const app_creds = try oauth.createApp(
+        &app_state.conn,
+        a,
+        "pl-fe",
+        "urn:ietf:wg:oauth:2.0:oob",
+        "read write",
+        "",
+    );
+
+    const token = try oauth.createAccessToken(&app_state.conn, a, app_creds.id, user_id, "read write");
+    const auth_header = try std.fmt.allocPrint(a, "Bearer {s}", .{token});
+
+    try mock.pushExpected(.{ .method = .POST, .url = remote_inbox, .response_status = .accepted, .response_body = "" });
+
+    const create_resp = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/api/v1/statuses",
+        .content_type = "application/x-www-form-urlencoded",
+        .body = "status=@bob@remote.test%20hi&visibility=direct",
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, create_resp.status);
+
+    try background.runQueued(&app_state, a);
+
+    try std.testing.expectEqual(@as(usize, 1), mock.requests.items.len);
+    const delivered = mock.requests.items[0];
+    try std.testing.expectEqual(std.http.Method.POST, delivered.method);
+    try std.testing.expectEqualStrings(remote_inbox, delivered.url);
+
+    const delivered_body = delivered.payload orelse return error.TestUnexpectedResult;
+
+    var delivered_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, delivered_body, .{});
+    defer delivered_json.deinit();
+
+    try std.testing.expectEqualStrings("Create", delivered_json.value.object.get("type").?.string);
+
+    const to_arr = delivered_json.value.object.get("to").?.array.items;
+    const cc_arr = delivered_json.value.object.get("cc").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), to_arr.len);
+    try std.testing.expectEqualStrings(remote_actor_id, to_arr[0].string);
+    try std.testing.expectEqual(@as(usize, 0), cc_arr.len);
+
+    const obj = delivered_json.value.object.get("object").?.object;
+    const obj_to = obj.get("to").?.array.items;
+    const obj_cc = obj.get("cc").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), obj_to.len);
+    try std.testing.expectEqualStrings(remote_actor_id, obj_to[0].string);
+    try std.testing.expectEqual(@as(usize, 0), obj_cc.len);
+}
+
 test "DELETE /api/v1/statuses delivers Delete to followers" {
     var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
     defer app_state.deinit();
