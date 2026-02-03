@@ -8,6 +8,7 @@ const background = @import("background.zig");
 const form = @import("form.zig");
 const follows = @import("follows.zig");
 const followers = @import("followers.zig");
+const inbox_dedupe = @import("inbox_dedupe.zig");
 const oauth = @import("oauth.zig");
 const remote_actors = @import("remote_actors.zig");
 const remote_statuses = @import("remote_statuses.zig");
@@ -1074,6 +1075,29 @@ fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: Request, pa
             break :blk p.string;
         };
 
+        const received_at_ms: i64 = std.time.milliTimestamp();
+        var dedupe_activity_id: ?[]const u8 = null;
+        var dedupe_keep: bool = false;
+        defer {
+            if (dedupe_activity_id) |id| {
+                if (!dedupe_keep) inbox_dedupe.clear(&app_state.conn, id) catch {};
+            }
+        }
+
+        const activity_id = blk: {
+            const id_val = parsed.value.object.get("id") orelse break :blk null;
+            if (id_val != .string) break :blk null;
+            if (id_val.string.len == 0) break :blk null;
+            break :blk trimTrailingSlash(id_val.string);
+        };
+
+        if (activity_id) |id| {
+            const inserted = inbox_dedupe.begin(&app_state.conn, id, user.?.id, actor_val.string, received_at_ms) catch
+                return .{ .status = .internal_server_error, .body = "internal server error\n" };
+            if (!inserted) return .{ .status = .accepted, .body = "duplicate\n" };
+            dedupe_activity_id = id;
+        }
+
         var remote_actor = blk: {
             if (remote_actors.lookupById(&app_state.conn, allocator, actor_val.string) catch
                 return .{ .status = .internal_server_error, .body = "internal server error\n" }) |found|
@@ -1139,6 +1163,7 @@ fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: Request, pa
             created_at,
         ) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
 
+        dedupe_keep = true;
         return .{ .status = .accepted, .body = "ok\n" };
     }
 
@@ -1146,6 +1171,29 @@ fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: Request, pa
         const actor_val = parsed.value.object.get("actor") orelse
             return .{ .status = .bad_request, .body = "missing actor\n" };
         if (actor_val != .string) return .{ .status = .bad_request, .body = "invalid actor\n" };
+
+        const received_at_ms: i64 = std.time.milliTimestamp();
+        var dedupe_activity_id: ?[]const u8 = null;
+        var dedupe_keep: bool = false;
+        defer {
+            if (dedupe_activity_id) |id| {
+                if (!dedupe_keep) inbox_dedupe.clear(&app_state.conn, id) catch {};
+            }
+        }
+
+        const activity_id = blk: {
+            const id_val = parsed.value.object.get("id") orelse break :blk null;
+            if (id_val != .string) break :blk null;
+            if (id_val.string.len == 0) break :blk null;
+            break :blk trimTrailingSlash(id_val.string);
+        };
+
+        if (activity_id) |id| {
+            const inserted = inbox_dedupe.begin(&app_state.conn, id, user.?.id, actor_val.string, received_at_ms) catch
+                return .{ .status = .internal_server_error, .body = "internal server error\n" };
+            if (!inserted) return .{ .status = .accepted, .body = "duplicate\n" };
+            dedupe_activity_id = id;
+        }
 
         const remote_actor = blk: {
             if (remote_actors.lookupById(&app_state.conn, allocator, actor_val.string) catch
@@ -1230,6 +1278,7 @@ fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: Request, pa
         _ = remote_statuses.markDeletedByUri(&app_state.conn, remote_status.?.remote_uri, deleted_at) catch
             return .{ .status = .internal_server_error, .body = "internal server error\n" };
 
+        dedupe_keep = true;
         return .{ .status = .accepted, .body = "ok\n" };
     }
 
@@ -1241,6 +1290,21 @@ fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: Request, pa
         const actor_val = parsed.value.object.get("actor") orelse
             return .{ .status = .bad_request, .body = "missing actor\n" };
         if (actor_val != .string) return .{ .status = .bad_request, .body = "invalid actor\n" };
+
+        const received_at_ms: i64 = std.time.milliTimestamp();
+        var dedupe_activity_id: ?[]const u8 = null;
+        var dedupe_keep: bool = false;
+        defer {
+            if (dedupe_activity_id) |id| {
+                if (!dedupe_keep) inbox_dedupe.clear(&app_state.conn, id) catch {};
+            }
+        }
+
+        const follow_activity_id = trimTrailingSlash(id_val.string);
+        const inserted = inbox_dedupe.begin(&app_state.conn, follow_activity_id, user.?.id, actor_val.string, received_at_ms) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        if (!inserted) return .{ .status = .accepted, .body = "duplicate\n" };
+        dedupe_activity_id = follow_activity_id;
 
         const obj = parsed.value.object.get("object") orelse
             return .{ .status = .bad_request, .body = "missing object\n" };
@@ -1273,12 +1337,42 @@ fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: Request, pa
             return .{ .status = .accepted, .body = "ignored\n" };
         }
 
-        background.acceptInboundFollow(app_state, allocator, user.?.id, username, actor_val.string, id_val.string);
+        background.acceptInboundFollow(app_state, allocator, user.?.id, username, actor_val.string, follow_activity_id);
 
+        dedupe_keep = true;
         return .{ .status = .accepted, .body = "ok\n" };
     }
 
     if (std.mem.eql(u8, typ.string, "Accept")) {
+        const received_at_ms: i64 = std.time.milliTimestamp();
+        var dedupe_activity_id: ?[]const u8 = null;
+        var dedupe_keep: bool = false;
+        defer {
+            if (dedupe_activity_id) |id| {
+                if (!dedupe_keep) inbox_dedupe.clear(&app_state.conn, id) catch {};
+            }
+        }
+
+        const activity_id = blk: {
+            const id_val = parsed.value.object.get("id") orelse break :blk null;
+            if (id_val != .string) break :blk null;
+            if (id_val.string.len == 0) break :blk null;
+            break :blk trimTrailingSlash(id_val.string);
+        };
+        const actor_id = blk: {
+            const actor_val = parsed.value.object.get("actor") orelse break :blk null;
+            if (actor_val != .string) break :blk null;
+            if (actor_val.string.len == 0) break :blk null;
+            break :blk actor_val.string;
+        };
+
+        if (activity_id != null and actor_id != null) {
+            const inserted = inbox_dedupe.begin(&app_state.conn, activity_id.?, user.?.id, actor_id.?, received_at_ms) catch
+                return .{ .status = .internal_server_error, .body = "internal server error\n" };
+            if (!inserted) return .{ .status = .accepted, .body = "duplicate\n" };
+            dedupe_activity_id = activity_id.?;
+        }
+
         const obj = parsed.value.object.get("object") orelse
             return .{ .status = .bad_request, .body = "missing object\n" };
 
@@ -1318,6 +1412,7 @@ fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: Request, pa
             }
         }
 
+        dedupe_keep = true;
         return .{ .status = .accepted, .body = "ok\n" };
     }
 

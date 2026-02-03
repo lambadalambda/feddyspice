@@ -99,6 +99,11 @@ const migrations = [_]Migration{
         .name = "create_jobs",
         .sql = jobs_v10_sql,
     },
+    .{
+        .version = 11,
+        .name = "create_inbox_dedupe",
+        .sql = inbox_dedupe_v11_sql,
+    },
 };
 
 const schema_migrations_sql: [:0]const u8 =
@@ -272,6 +277,16 @@ const jobs_v10_sql: [:0]const u8 =
     \\CREATE INDEX IF NOT EXISTS jobs_state_locked_at_ms ON jobs(state, locked_at_ms);
 ++ "\x00";
 
+const inbox_dedupe_v11_sql: [:0]const u8 =
+    \\CREATE TABLE IF NOT EXISTS inbox_dedupe (
+    \\  activity_id TEXT PRIMARY KEY,
+    \\  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    \\  actor_id TEXT NOT NULL,
+    \\  received_at_ms INTEGER NOT NULL
+    \\);
+    \\CREATE INDEX IF NOT EXISTS inbox_dedupe_user_id_received_at_ms ON inbox_dedupe(user_id, received_at_ms);
+++ "\x00";
+
 test "migrate: creates users table and records version" {
     var conn = try db.Db.openZ(":memory:");
     defer conn.close();
@@ -308,6 +323,8 @@ test "migrate: creates users table and records version" {
     try std.testing.expectEqual(@as(i64, 9), v_stmt.columnInt64(0));
     try std.testing.expectEqual(db.Stmt.Step.row, try v_stmt.step());
     try std.testing.expectEqual(@as(i64, 10), v_stmt.columnInt64(0));
+    try std.testing.expectEqual(db.Stmt.Step.row, try v_stmt.step());
+    try std.testing.expectEqual(@as(i64, 11), v_stmt.columnInt64(0));
     try std.testing.expectEqual(db.Stmt.Step.done, try v_stmt.step());
 }
 
@@ -322,6 +339,6 @@ test "migrate: is idempotent" {
     defer stmt.finalize();
 
     try std.testing.expectEqual(db.Stmt.Step.row, try stmt.step());
-    try std.testing.expectEqual(@as(i64, 10), stmt.columnInt64(0));
+    try std.testing.expectEqual(@as(i64, 11), stmt.columnInt64(0));
     try std.testing.expectEqual(db.Stmt.Step.done, try stmt.step());
 }

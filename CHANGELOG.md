@@ -47,6 +47,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Deleted local ActivityPub objects return Tombstones (`GET /users/:name/statuses/:id`).
 - ActivityPub `Delete` deliveries to followers when local statuses are deleted.
 - ActivityPub inbox handling for `Delete` to mark remote statuses deleted.
+- Inbox idempotency via `inbox_dedupe` table to avoid reprocessing duplicate ActivityPub deliveries.
 - Timeline pagination (`max_id`, `since_id`, `min_id`) with `Link` headers on home/public timelines.
 - `GET /api/v2/search` resolves acct handles via WebFinger (enables finding remote accounts in pl-fe/Elk).
 - `POST /api/v1/accounts/:id/follow` and `POST /api/v1/accounts/:id/unfollow` for client follow UX.
