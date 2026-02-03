@@ -25,6 +25,7 @@ const users = @import("users.zig");
 const version = @import("version.zig");
 const http_types = @import("http_types.zig");
 const discovery = @import("http/discovery.zig");
+const instance = @import("http/instance.zig");
 
 const transparent_png = [_]u8{
     0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
@@ -146,79 +147,27 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
     }
 
     if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/instance")) {
-        const payload = .{
-            .uri = app_state.cfg.domain,
-            .title = "feddyspice",
-            .short_description = "single-user server",
-            .version = version.version,
-            .registrations = true,
-        };
-
-        const body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch
-            return .{ .status = .internal_server_error, .body = "internal server error\n" };
-
-        return .{
-            .content_type = "application/json; charset=utf-8",
-            .body = body,
-        };
+        return instance.instanceV1(app_state, allocator);
     }
 
     if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/instance/peers")) {
-        return jsonOk(allocator, [_][]const u8{});
+        return instance.instancePeers(app_state, allocator);
     }
 
     if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/instance/activity")) {
-        return jsonOk(allocator, [_]i32{});
+        return instance.instanceActivity(app_state, allocator);
     }
 
     if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/instance/extended_description")) {
-        const updated_at = "1970-01-01T00:00:00.000Z";
-        return jsonOk(allocator, .{ .updated_at = updated_at, .content = "" });
+        return instance.instanceExtendedDescription(app_state, allocator);
     }
 
     if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/directory")) {
-        return jsonOk(allocator, [_]i32{});
+        return instance.directory(app_state, allocator);
     }
 
     if (req.method == .GET and std.mem.eql(u8, path, "/api/v2/instance")) {
-        const streaming_url = streamingBaseUrlAlloc(app_state, allocator) catch "";
-        const payload = .{
-            .domain = app_state.cfg.domain,
-            .title = "feddyspice",
-            .version = version.version,
-            .source_url = "",
-            .description = "single-user server",
-            .registrations = .{
-                .enabled = true,
-                .approval_required = false,
-            },
-            .thumbnail = .{ .url = "" },
-            .languages = [_][]const u8{"en"},
-            .configuration = .{
-                .urls = .{ .streaming = streaming_url },
-                .polls = .{
-                    .max_characters_per_option = 25,
-                    .max_expiration = 2629746,
-                    .max_options = 4,
-                    .min_expiration = 300,
-                },
-                .statuses = .{
-                    .max_characters = 500,
-                    .max_media_attachments = 4,
-                },
-                .vapid = .{ .public_key = "" },
-            },
-            .usage = .{ .users = .{ .active_month = 1 } },
-            .rules = [_]struct { id: []const u8, text: []const u8 }{},
-        };
-
-        const body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch
-            return .{ .status = .internal_server_error, .body = "internal server error\n" };
-
-        return .{
-            .content_type = "application/json; charset=utf-8",
-            .body = body,
-        };
+        return instance.instanceV2(app_state, allocator);
     }
 
     if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/streaming/health")) {
