@@ -785,7 +785,9 @@ fn outboxGet(app_state: *app.App, allocator: std.mem.Allocator, req: Request, pa
     const is_page = params.get("page") != null;
 
     if (!is_page) {
-        var count_stmt = app_state.conn.prepareZ("SELECT COUNT(*) FROM statuses WHERE user_id = ?1;\x00") catch
+        var count_stmt = app_state.conn.prepareZ(
+            "SELECT COUNT(*) FROM statuses WHERE user_id = ?1 AND deleted_at IS NULL AND (visibility = 'public' OR visibility = 'unlisted');\x00",
+        ) catch
             return .{ .status = .internal_server_error, .body = "internal server error\n" };
         defer count_stmt.finalize();
         count_stmt.bindInt64(1, user.?.id) catch
@@ -849,28 +851,39 @@ fn outboxGet(app_state: *app.App, allocator: std.mem.Allocator, req: Request, pa
     defer items.deinit(allocator);
 
     for (list) |st| {
+        if (!isPubliclyVisibleVisibility(st.visibility)) continue;
+
         const status_id_str = std.fmt.allocPrint(allocator, "{d}", .{st.id}) catch "0";
         const status_url = std.fmt.allocPrint(allocator, "{s}/users/{s}/statuses/{s}", .{ base, username, status_id_str }) catch "";
         const activity_id = std.fmt.allocPrint(allocator, "{s}#create", .{status_url}) catch "";
 
         const html_content = textToHtmlAlloc(allocator, st.text) catch st.text;
 
-        const to = [_][]const u8{"https://www.w3.org/ns/activitystreams#Public"};
-        const cc = [_][]const u8{followers_url};
+        const public_iri = "https://www.w3.org/ns/activitystreams#Public";
+        const to = allocator.alloc([]const u8, 1) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        const cc = allocator.alloc([]const u8, 1) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+        if (std.mem.eql(u8, st.visibility, "unlisted")) {
+            to[0] = followers_url;
+            cc[0] = public_iri;
+        } else {
+            to[0] = public_iri;
+            cc[0] = followers_url;
+        }
 
         items.append(allocator, .{
             .id = activity_id,
             .actor = actor_id,
             .published = st.created_at,
-            .to = to[0..],
-            .cc = cc[0..],
+            .to = to,
+            .cc = cc,
             .object = .{
                 .id = status_url,
                 .attributedTo = actor_id,
                 .content = html_content,
                 .published = st.created_at,
-                .to = to[0..],
-                .cc = cc[0..],
+                .to = to,
+                .cc = cc,
             },
         }) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
     }
@@ -919,6 +932,8 @@ fn userStatusGet(app_state: *app.App, allocator: std.mem.Allocator, path: []cons
     if (st == null) return .{ .status = .not_found, .body = "not found\n" };
     if (st.?.user_id != user.?.id) return .{ .status = .not_found, .body = "not found\n" };
 
+    if (!isPubliclyVisibleVisibility(st.?.visibility)) return .{ .status = .not_found, .body = "not found\n" };
+
     const base = baseUrlAlloc(app_state, allocator) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
 
@@ -948,8 +963,18 @@ fn userStatusGet(app_state: *app.App, allocator: std.mem.Allocator, path: []cons
         };
     }
 
-    const to = [_][]const u8{"https://www.w3.org/ns/activitystreams#Public"};
-    const cc = [_][]const u8{followers_url};
+    const public_iri = "https://www.w3.org/ns/activitystreams#Public";
+    var to_buf: [1][]const u8 = undefined;
+    var cc_buf: [1][]const u8 = undefined;
+    if (std.mem.eql(u8, st.?.visibility, "unlisted")) {
+        to_buf[0] = followers_url;
+        cc_buf[0] = public_iri;
+    } else {
+        to_buf[0] = public_iri;
+        cc_buf[0] = followers_url;
+    }
+    const to = to_buf[0..];
+    const cc = cc_buf[0..];
 
     const html_content = textToHtmlAlloc(allocator, st.?.text) catch st.?.text;
 
@@ -1090,12 +1115,17 @@ fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: Request, pa
             if (!has_recipients) break :blk "public";
 
             const public_iri = "https://www.w3.org/ns/activitystreams#Public";
-            const is_public =
+
+            const public_in_to =
                 jsonContainsIri(parsed.value.object.get("to"), public_iri) or
+                jsonContainsIri(obj.object.get("to"), public_iri);
+            if (public_in_to) break :blk "public";
+
+            const public_in_cc =
                 jsonContainsIri(parsed.value.object.get("cc"), public_iri) or
-                jsonContainsIri(obj.object.get("to"), public_iri) or
                 jsonContainsIri(obj.object.get("cc"), public_iri);
-            if (is_public) break :blk "public";
+            if (public_in_cc) break :blk "unlisted";
+
             break :blk "direct";
         };
 
@@ -1320,7 +1350,11 @@ fn createStatus(app_state: *app.App, allocator: std.mem.Allocator, req: Request)
     return statusResponse(app_state, allocator, user.?, st);
 }
 
-fn isPublicVisibility(visibility: []const u8) bool {
+fn isPublicTimelineVisibility(visibility: []const u8) bool {
+    return std.mem.eql(u8, visibility, "public");
+}
+
+fn isPubliclyVisibleVisibility(visibility: []const u8) bool {
     return std.mem.eql(u8, visibility, "public") or std.mem.eql(u8, visibility, "unlisted");
 }
 
@@ -1405,7 +1439,7 @@ fn publicTimeline(app_state: *app.App, allocator: std.mem.Allocator, req: Reques
             return .{ .status = .internal_server_error, .body = "internal server error\n" };
 
         for (local_list) |st| {
-            if (!isPublicVisibility(st.visibility)) continue;
+            if (!isPublicTimelineVisibility(st.visibility)) continue;
             payloads.append(allocator, makeStatusPayload(app_state, allocator, u, st)) catch return .{
                 .status = .internal_server_error,
                 .body = "internal server error\n",
@@ -1418,7 +1452,7 @@ fn publicTimeline(app_state: *app.App, allocator: std.mem.Allocator, req: Reques
             return .{ .status = .internal_server_error, .body = "internal server error\n" };
 
         for (remote_list) |st| {
-            if (!isPublicVisibility(st.visibility)) continue;
+            if (!isPublicTimelineVisibility(st.visibility)) continue;
             const actor = remote_actors.lookupById(&app_state.conn, allocator, st.remote_actor_id) catch
                 return .{ .status = .internal_server_error, .body = "internal server error\n" };
             if (actor == null) continue;
@@ -2245,7 +2279,7 @@ fn accountStatuses(app_state: *app.App, allocator: std.mem.Allocator, req: Reque
     defer payloads.deinit(allocator);
 
     for (list) |st| {
-        if (!include_all and !isPublicVisibility(st.visibility)) continue;
+        if (!include_all and !isPubliclyVisibleVisibility(st.visibility)) continue;
         payloads.append(allocator, makeStatusPayload(app_state, allocator, user.?, st)) catch
             return .{ .status = .internal_server_error, .body = "internal server error\n" };
     }
@@ -4479,6 +4513,94 @@ test "GET /users/:name/outbox and /users/:name/statuses/:id return ActivityPub o
     try std.testing.expectEqualStrings(expected_note2_id, items[0].object.get("object").?.object.get("id").?.string);
 }
 
+test "ActivityPub visibility: outbox + note endpoints do not leak private/direct, and unlisted uses cc=Public" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const public_st = try statuses.create(&app_state.conn, a, user_id, "pub", "public");
+    const unlisted_st = try statuses.create(&app_state.conn, a, user_id, "unlisted", "unlisted");
+    const private_st = try statuses.create(&app_state.conn, a, user_id, "priv", "private");
+    const direct_st = try statuses.create(&app_state.conn, a, user_id, "dm", "direct");
+
+    const outbox_resp = handle(&app_state, a, .{
+        .method = .GET,
+        .target = "/users/alice/outbox",
+    });
+    try std.testing.expectEqual(std.http.Status.ok, outbox_resp.status);
+
+    var outbox_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, outbox_resp.body, .{});
+    defer outbox_json.deinit();
+
+    try std.testing.expectEqualStrings("OrderedCollection", outbox_json.value.object.get("type").?.string);
+    try std.testing.expectEqual(@as(i64, 2), outbox_json.value.object.get("totalItems").?.integer);
+
+    const page_resp = handle(&app_state, a, .{
+        .method = .GET,
+        .target = "/users/alice/outbox?page=true",
+    });
+    try std.testing.expectEqual(std.http.Status.ok, page_resp.status);
+
+    var page_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, page_resp.body, .{});
+    defer page_json.deinit();
+
+    const items = page_json.value.object.get("orderedItems").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), items.len);
+
+    // Public Note is visible and uses to=Public.
+    const public_iri = "https://www.w3.org/ns/activitystreams#Public";
+    const public_note_id = try std.fmt.allocPrint(a, "http://example.test/users/alice/statuses/{d}", .{public_st.id});
+    const unlisted_note_id = try std.fmt.allocPrint(a, "http://example.test/users/alice/statuses/{d}", .{unlisted_st.id});
+
+    // We don't care about ordering here; check by ID.
+    var saw_public: bool = false;
+    var saw_unlisted: bool = false;
+    for (items) |it| {
+        const obj = it.object.get("object").?.object;
+        const id_val = obj.get("id").?.string;
+        if (std.mem.eql(u8, id_val, public_note_id)) saw_public = true;
+        if (std.mem.eql(u8, id_val, unlisted_note_id)) saw_unlisted = true;
+    }
+    try std.testing.expect(saw_public);
+    try std.testing.expect(saw_unlisted);
+
+    const followers_url = "http://example.test/users/alice/followers";
+
+    const unlisted_note_resp = handle(&app_state, a, .{
+        .method = .GET,
+        .target = try std.fmt.allocPrint(a, "/users/alice/statuses/{d}", .{unlisted_st.id}),
+    });
+    try std.testing.expectEqual(std.http.Status.ok, unlisted_note_resp.status);
+
+    var unlisted_note_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, unlisted_note_resp.body, .{});
+    defer unlisted_note_json.deinit();
+
+    const unlisted_to = unlisted_note_json.value.object.get("to").?.array.items;
+    const unlisted_cc = unlisted_note_json.value.object.get("cc").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), unlisted_to.len);
+    try std.testing.expectEqual(@as(usize, 1), unlisted_cc.len);
+    try std.testing.expectEqualStrings(followers_url, unlisted_to[0].string);
+    try std.testing.expectEqualStrings(public_iri, unlisted_cc[0].string);
+
+    const private_note_resp = handle(&app_state, a, .{
+        .method = .GET,
+        .target = try std.fmt.allocPrint(a, "/users/alice/statuses/{d}", .{private_st.id}),
+    });
+    try std.testing.expectEqual(std.http.Status.not_found, private_note_resp.status);
+
+    const direct_note_resp = handle(&app_state, a, .{
+        .method = .GET,
+        .target = try std.fmt.allocPrint(a, "/users/alice/statuses/{d}", .{direct_st.id}),
+    });
+    try std.testing.expectEqual(std.http.Status.not_found, direct_note_resp.status);
+}
+
 test "POST /api/v1/statuses delivers Create to followers" {
     var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
     defer app_state.deinit();
@@ -4569,6 +4691,88 @@ test "POST /api/v1/statuses delivers Create to followers" {
     std.base64.standard.Decoder.decode(sig_bytes, sig_b64) catch return error.TestUnexpectedResult;
 
     try std.testing.expect(try @import("crypto_rsa.zig").verifyRsaSha256Pem(keys.public_key_pem, signing_string, sig_bytes));
+}
+
+test "POST /api/v1/statuses visibility=private delivers Create without Public recipients" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    var mock = transport.MockTransport.init(std.testing.allocator);
+    app_state.transport = mock.transport();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const remote_actor_id = "http://remote.test/users/bob";
+    const remote_inbox = "http://remote.test/users/bob/inbox";
+
+    try remote_actors.upsert(&app_state.conn, .{
+        .id = remote_actor_id,
+        .inbox = remote_inbox,
+        .shared_inbox = null,
+        .preferred_username = "bob",
+        .domain = "remote.test",
+        .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
+    });
+
+    const follow_id = "http://remote.test/follows/1";
+    try followers.upsertPending(&app_state.conn, user_id, remote_actor_id, follow_id);
+    try std.testing.expect(try followers.markAcceptedByRemoteActorId(&app_state.conn, user_id, remote_actor_id));
+
+    const app_creds = try oauth.createApp(
+        &app_state.conn,
+        a,
+        "pl-fe",
+        "urn:ietf:wg:oauth:2.0:oob",
+        "read write",
+        "",
+    );
+
+    const token = try oauth.createAccessToken(&app_state.conn, a, app_creds.id, user_id, "read write");
+    const auth_header = try std.fmt.allocPrint(a, "Bearer {s}", .{token});
+    try mock.pushExpected(.{ .method = .POST, .url = remote_inbox, .response_status = .accepted, .response_body = "" });
+
+    const create_resp = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/api/v1/statuses",
+        .content_type = "application/x-www-form-urlencoded",
+        .body = "status=secret&visibility=private",
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, create_resp.status);
+
+    try background.runQueued(&app_state, a);
+
+    try std.testing.expectEqual(@as(usize, 1), mock.requests.items.len);
+    const delivered = mock.requests.items[0];
+
+    const delivered_body = delivered.payload orelse return error.TestUnexpectedResult;
+    var delivered_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, delivered_body, .{});
+    defer delivered_json.deinit();
+
+    const public_iri = "https://www.w3.org/ns/activitystreams#Public";
+    const followers_url = "http://example.test/users/alice/followers";
+
+    const to_arr = delivered_json.value.object.get("to").?.array.items;
+    const cc_arr = delivered_json.value.object.get("cc").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), to_arr.len);
+    try std.testing.expectEqualStrings(followers_url, to_arr[0].string);
+    try std.testing.expectEqual(@as(usize, 0), cc_arr.len);
+
+    const obj = delivered_json.value.object.get("object").?.object;
+    const obj_to = obj.get("to").?.array.items;
+    const obj_cc = obj.get("cc").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), obj_to.len);
+    try std.testing.expectEqualStrings(followers_url, obj_to[0].string);
+    try std.testing.expectEqual(@as(usize, 0), obj_cc.len);
+
+    // Defensive: ensure we never include Public in the recipients.
+    try std.testing.expect(!std.mem.eql(u8, obj_to[0].string, public_iri));
+    if (cc_arr.len > 0) try std.testing.expect(!std.mem.eql(u8, cc_arr[0].string, public_iri));
 }
 
 test "DELETE /api/v1/statuses delivers Delete to followers" {
@@ -4679,6 +4883,99 @@ test "DELETE /api/v1/statuses delivers Delete to followers" {
     std.base64.standard.Decoder.decode(sig_bytes, sig_b64) catch return error.TestUnexpectedResult;
 
     try std.testing.expect(try @import("crypto_rsa.zig").verifyRsaSha256Pem(keys.public_key_pem, signing_string, sig_bytes));
+}
+
+test "DELETE /api/v1/statuses visibility=private delivers Delete without Public recipients" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    var mock = transport.MockTransport.init(std.testing.allocator);
+    app_state.transport = mock.transport();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const remote_actor_id = "http://remote.test/users/bob";
+    const remote_inbox = "http://remote.test/users/bob/inbox";
+
+    try remote_actors.upsert(&app_state.conn, .{
+        .id = remote_actor_id,
+        .inbox = remote_inbox,
+        .shared_inbox = null,
+        .preferred_username = "bob",
+        .domain = "remote.test",
+        .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
+    });
+
+    const follow_id = "http://remote.test/follows/1";
+    try followers.upsertPending(&app_state.conn, user_id, remote_actor_id, follow_id);
+    try std.testing.expectEqual(@as(usize, 0), (try followers.listAcceptedRemoteActorIds(&app_state.conn, a, user_id, 10)).len);
+
+    const app_creds = try oauth.createApp(
+        &app_state.conn,
+        a,
+        "pl-fe",
+        "urn:ietf:wg:oauth:2.0:oob",
+        "read write",
+        "",
+    );
+
+    const token = try oauth.createAccessToken(&app_state.conn, a, app_creds.id, user_id, "read write");
+    const auth_header = try std.fmt.allocPrint(a, "Bearer {s}", .{token});
+
+    const create_resp = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/api/v1/statuses",
+        .content_type = "application/x-www-form-urlencoded",
+        .body = "status=to-delete&visibility=private",
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, create_resp.status);
+
+    var create_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, create_resp.body, .{});
+    defer create_json.deinit();
+    const id_str = create_json.value.object.get("id").?.string;
+
+    // No accepted followers yet, so no Create delivery should happen.
+    try background.runQueued(&app_state, a);
+    try std.testing.expectEqual(@as(usize, 0), mock.requests.items.len);
+
+    try std.testing.expect(try followers.markAcceptedByRemoteActorId(&app_state.conn, user_id, remote_actor_id));
+
+    const expected_object_id = try std.fmt.allocPrint(a, "http://example.test/users/alice/statuses/{s}", .{id_str});
+    try mock.pushExpected(.{ .method = .POST, .url = remote_inbox, .response_status = .accepted, .response_body = "" });
+
+    const del_target = try std.fmt.allocPrint(a, "/api/v1/statuses/{s}", .{id_str});
+    const del_resp = handle(&app_state, a, .{
+        .method = .DELETE,
+        .target = del_target,
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, del_resp.status);
+
+    try background.runQueued(&app_state, a);
+
+    try std.testing.expectEqual(@as(usize, 1), mock.requests.items.len);
+    const delivered = mock.requests.items[0];
+    const delivered_body = delivered.payload orelse return error.TestUnexpectedResult;
+
+    var delivered_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, delivered_body, .{});
+    defer delivered_json.deinit();
+
+    const followers_url = "http://example.test/users/alice/followers";
+    const to_arr = delivered_json.value.object.get("to").?.array.items;
+    const cc_arr = delivered_json.value.object.get("cc").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), to_arr.len);
+    try std.testing.expectEqualStrings(followers_url, to_arr[0].string);
+    try std.testing.expectEqual(@as(usize, 0), cc_arr.len);
+
+    try std.testing.expectEqualStrings("Delete", delivered_json.value.object.get("type").?.string);
+    const obj = delivered_json.value.object.get("object").?.object;
+    try std.testing.expectEqualStrings(expected_object_id, obj.get("id").?.string);
 }
 
 test "POST /users/:name/inbox Accept marks follow accepted" {
@@ -4855,6 +5152,42 @@ test "POST /users/:name/inbox Create discovers actor even when not addressed" {
     try std.testing.expect((try remote_actors.lookupById(&app_state.conn, a, actor_id)) != null);
     const st = (try remote_statuses.lookupByUri(&app_state.conn, a, "https://remote.test/notes/1")).?;
     try std.testing.expectEqualStrings("public", st.visibility);
+}
+
+test "POST /users/:name/inbox Create infers unlisted visibility when Public is in cc" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    _ = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    try remote_actors.upsert(&app_state.conn, .{
+        .id = "https://remote.test/users/bob",
+        .inbox = "https://remote.test/users/bob/inbox",
+        .shared_inbox = null,
+        .preferred_username = "bob",
+        .domain = "remote.test",
+        .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
+    });
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const body =
+        \\{"@context":"https://www.w3.org/ns/activitystreams","type":"Create","actor":"https://remote.test/users/bob","to":["https://remote.test/users/bob/followers"],"cc":["https://www.w3.org/ns/activitystreams#Public"],"object":{"id":"https://remote.test/notes/2","type":"Note","content":"<p>Hello</p>","published":"2020-01-01T00:00:00.000Z","to":["https://remote.test/users/bob/followers"],"cc":["https://www.w3.org/ns/activitystreams#Public"]}}
+    ;
+
+    const resp = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/users/alice/inbox",
+        .content_type = "application/activity+json",
+        .body = body,
+    });
+    try std.testing.expectEqual(std.http.Status.accepted, resp.status);
+
+    const st = (try remote_statuses.lookupByUri(&app_state.conn, a, "https://remote.test/notes/2")).?;
+    try std.testing.expectEqualStrings("unlisted", st.visibility);
 }
 
 test "POST /users/:name/inbox Create stores remote status" {

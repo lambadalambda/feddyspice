@@ -466,8 +466,32 @@ pub fn deliverStatusToFollowers(app_state: *app.App, allocator: std.mem.Allocato
 
     const content_html = try textToHtmlAlloc(allocator, st.text);
 
-    const to = [_][]const u8{"https://www.w3.org/ns/activitystreams#Public"};
-    const cc = [_][]const u8{followers_url};
+    const public_iri = "https://www.w3.org/ns/activitystreams#Public";
+
+    var to_buf: [1][]const u8 = undefined;
+    var cc_buf: [1][]const u8 = undefined;
+
+    var to: []const []const u8 = &.{};
+    var cc: []const []const u8 = &.{};
+
+    if (std.mem.eql(u8, st.visibility, "public")) {
+        to_buf[0] = public_iri;
+        cc_buf[0] = followers_url;
+        to = to_buf[0..];
+        cc = cc_buf[0..];
+    } else if (std.mem.eql(u8, st.visibility, "unlisted")) {
+        to_buf[0] = followers_url;
+        cc_buf[0] = public_iri;
+        to = to_buf[0..];
+        cc = cc_buf[0..];
+    } else if (std.mem.eql(u8, st.visibility, "private")) {
+        to_buf[0] = followers_url;
+        to = to_buf[0..];
+        cc = &.{};
+    } else {
+        app_state.logger.info("deliverStatusToFollowers: skipping visibility={s}", .{st.visibility});
+        return;
+    }
 
     const payload = .{
         .@"@context" = "https://www.w3.org/ns/activitystreams",
@@ -475,16 +499,16 @@ pub fn deliverStatusToFollowers(app_state: *app.App, allocator: std.mem.Allocato
         .type = "Create",
         .actor = local_actor_id,
         .published = st.created_at,
-        .to = to[0..],
-        .cc = cc[0..],
+        .to = to,
+        .cc = cc,
         .object = .{
             .id = status_url,
             .type = "Note",
             .attributedTo = local_actor_id,
             .content = content_html,
             .published = st.created_at,
-            .to = to[0..],
-            .cc = cc[0..],
+            .to = to,
+            .cc = cc,
         },
     };
 
@@ -578,16 +602,40 @@ pub fn deliverDeleteToFollowers(app_state: *app.App, allocator: std.mem.Allocato
     const status_url = try std.fmt.allocPrint(allocator, "{s}/users/{s}/statuses/{d}", .{ base, user.username, st.id });
     const delete_id = try std.fmt.allocPrint(allocator, "{s}#delete", .{status_url});
 
-    const to = [_][]const u8{"https://www.w3.org/ns/activitystreams#Public"};
-    const cc = [_][]const u8{followers_url};
+    const public_iri = "https://www.w3.org/ns/activitystreams#Public";
+
+    var to_buf: [1][]const u8 = undefined;
+    var cc_buf: [1][]const u8 = undefined;
+
+    var to: []const []const u8 = &.{};
+    var cc: []const []const u8 = &.{};
+
+    if (std.mem.eql(u8, st.visibility, "public")) {
+        to_buf[0] = public_iri;
+        cc_buf[0] = followers_url;
+        to = to_buf[0..];
+        cc = cc_buf[0..];
+    } else if (std.mem.eql(u8, st.visibility, "unlisted")) {
+        to_buf[0] = followers_url;
+        cc_buf[0] = public_iri;
+        to = to_buf[0..];
+        cc = cc_buf[0..];
+    } else if (std.mem.eql(u8, st.visibility, "private")) {
+        to_buf[0] = followers_url;
+        to = to_buf[0..];
+        cc = &.{};
+    } else {
+        app_state.logger.info("deliverDeleteToFollowers: skipping visibility={s}", .{st.visibility});
+        return;
+    }
 
     const payload = .{
         .@"@context" = "https://www.w3.org/ns/activitystreams",
         .id = delete_id,
         .type = "Delete",
         .actor = local_actor_id,
-        .to = to[0..],
-        .cc = cc[0..],
+        .to = to,
+        .cc = cc,
         .object = .{
             .id = status_url,
             .type = "Tombstone",
