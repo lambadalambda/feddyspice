@@ -80,7 +80,7 @@ pub const Hub = struct {
         for (self.subscribers.items) |sub| {
             if (sub.user_id != user_id) continue;
             if (!sub.hasStream(stream)) continue;
-            const message = makeEnvelopeAlloc(self.allocator, event, payload) catch continue;
+            const message = makeEnvelopeAlloc(self.allocator, streamName(stream), event, payload) catch continue;
             if (!sub.enqueue(message)) self.allocator.free(message);
         }
     }
@@ -198,12 +198,28 @@ pub const Subscriber = struct {
     }
 };
 
-fn makeEnvelopeAlloc(allocator: std.mem.Allocator, event: []const u8, payload: []const u8) ![]u8 {
+fn streamName(stream: Stream) []const u8 {
+    return switch (stream) {
+        .user => "user",
+        .public => "public",
+    };
+}
+
+fn makeEnvelopeAlloc(allocator: std.mem.Allocator, stream: []const u8, event: []const u8, payload: []const u8) ![]u8 {
     const Envelope = struct {
+        stream: [1][]const u8,
         event: []const u8,
         payload: []const u8,
     };
-    return std.json.Stringify.valueAlloc(allocator, Envelope{ .event = event, .payload = payload }, .{});
+    return std.json.Stringify.valueAlloc(
+        allocator,
+        Envelope{
+            .stream = .{stream},
+            .event = event,
+            .payload = payload,
+        },
+        .{},
+    );
 }
 
 test "Hub publishes update events to matching subscribers" {
@@ -224,7 +240,7 @@ test "Hub publishes update events to matching subscribers" {
     };
     defer std.testing.allocator.free(msg_a);
 
-    try std.testing.expectEqualStrings("{\"event\":\"update\",\"payload\":\"{\\\"id\\\":\\\"1\\\"}\"}", msg_a);
+    try std.testing.expectEqualStrings("{\"stream\":[\"user\"],\"event\":\"update\",\"payload\":\"{\\\"id\\\":\\\"1\\\"}\"}", msg_a);
     try std.testing.expect(sub_b.pop() == null);
 }
 
@@ -243,5 +259,5 @@ test "Hub publishes notification events to matching subscribers" {
     };
     defer std.testing.allocator.free(msg);
 
-    try std.testing.expectEqualStrings("{\"event\":\"notification\",\"payload\":\"{\\\"id\\\":\\\"n1\\\"}\"}", msg);
+    try std.testing.expectEqualStrings("{\"stream\":[\"user\"],\"event\":\"notification\",\"payload\":\"{\\\"id\\\":\\\"n1\\\"}\"}", msg);
 }
