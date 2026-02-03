@@ -119,6 +119,11 @@ const migrations = [_]Migration{
         .name = "create_notifications",
         .sql = notifications_v14_sql,
     },
+    .{
+        .version = 15,
+        .name = "remote_actor_profile_media",
+        .sql = remote_actor_profile_media_v15_sql,
+    },
 };
 
 const schema_migrations_sql: [:0]const u8 =
@@ -344,6 +349,11 @@ const notifications_v14_sql: [:0]const u8 =
     \\CREATE INDEX IF NOT EXISTS notifications_user_id_id ON notifications(user_id, id);
 ++ "\x00";
 
+const remote_actor_profile_media_v15_sql: [:0]const u8 =
+    \\ALTER TABLE remote_actors ADD COLUMN avatar_url TEXT;
+    \\ALTER TABLE remote_actors ADD COLUMN header_url TEXT;
+++ "\x00";
+
 test "migrate: creates users table and records version" {
     var conn = try db.Db.openZ(":memory:");
     defer conn.close();
@@ -388,6 +398,8 @@ test "migrate: creates users table and records version" {
     try std.testing.expectEqual(@as(i64, 13), v_stmt.columnInt64(0));
     try std.testing.expectEqual(db.Stmt.Step.row, try v_stmt.step());
     try std.testing.expectEqual(@as(i64, 14), v_stmt.columnInt64(0));
+    try std.testing.expectEqual(db.Stmt.Step.row, try v_stmt.step());
+    try std.testing.expectEqual(@as(i64, 15), v_stmt.columnInt64(0));
     try std.testing.expectEqual(db.Stmt.Step.done, try v_stmt.step());
 }
 
@@ -402,6 +414,6 @@ test "migrate: is idempotent" {
     defer stmt.finalize();
 
     try std.testing.expectEqual(db.Stmt.Step.row, try stmt.step());
-    try std.testing.expectEqual(@as(i64, 14), stmt.columnInt64(0));
+    try std.testing.expectEqual(@as(i64, 15), stmt.columnInt64(0));
     try std.testing.expectEqual(db.Stmt.Step.done, try stmt.step());
 }

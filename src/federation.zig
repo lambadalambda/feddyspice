@@ -126,8 +126,8 @@ fn makeRemoteAccountPayload(
 ) AccountPayload {
     const acct = std.fmt.allocPrint(allocator, "{s}@{s}", .{ actor.preferred_username, actor.domain }) catch
         actor.preferred_username;
-    const avatar_url = defaultAvatarUrlAlloc(app_state, allocator) catch actor.id;
-    const header_url = defaultHeaderUrlAlloc(app_state, allocator) catch actor.id;
+    const avatar_url = if (actor.avatar_url) |u| u else defaultAvatarUrlAlloc(app_state, allocator) catch actor.id;
+    const header_url = if (actor.header_url) |u| u else defaultHeaderUrlAlloc(app_state, allocator) catch actor.id;
 
     return .{
         .id = api_id,
@@ -235,6 +235,16 @@ fn parseActorDoc(allocator: std.mem.Allocator, body: []const u8, expected_domain
         break :blk try allocator.dupe(u8, si.string);
     };
 
+    const avatar_url: ?[]u8 = blk: {
+        const icon_val = parsed.value.object.get("icon") orelse break :blk null;
+        break :blk try jsonFirstUrlAlloc(allocator, icon_val);
+    };
+
+    const header_url: ?[]u8 = blk: {
+        const image_val = parsed.value.object.get("image") orelse break :blk null;
+        break :blk try jsonFirstUrlAlloc(allocator, image_val);
+    };
+
     return .{
         .id = try allocator.dupe(u8, id_val.string),
         .inbox = try allocator.dupe(u8, inbox_val.string),
@@ -242,7 +252,29 @@ fn parseActorDoc(allocator: std.mem.Allocator, body: []const u8, expected_domain
         .preferred_username = try allocator.dupe(u8, user_val.string),
         .domain = try allocator.dupe(u8, expected_domain),
         .public_key_pem = try allocator.dupe(u8, pem_val.string),
+        .avatar_url = avatar_url,
+        .header_url = header_url,
     };
+}
+
+fn jsonFirstUrlAlloc(allocator: std.mem.Allocator, val: std.json.Value) std.mem.Allocator.Error!?[]u8 {
+    switch (val) {
+        .string => |s| return if (s.len == 0) null else try allocator.dupe(u8, s),
+        .object => |o| {
+            if (o.get("url")) |u| return try jsonFirstUrlAlloc(allocator, u);
+            if (o.get("href")) |h| {
+                if (h == .string and h.string.len > 0) return try allocator.dupe(u8, h.string);
+            }
+            return null;
+        },
+        .array => |arr| {
+            for (arr.items) |item| {
+                if (try jsonFirstUrlAlloc(allocator, item)) |u| return u;
+            }
+            return null;
+        },
+        else => return null,
+    }
 }
 
 pub fn ensureRemoteActorById(app_state: *app.App, allocator: std.mem.Allocator, actor_id: []const u8) Error!remote_actors.RemoteActor {

@@ -2237,8 +2237,8 @@ fn makeRemoteAccountPayload(
 ) AccountPayload {
     const acct = std.fmt.allocPrint(allocator, "{s}@{s}", .{ actor.preferred_username, actor.domain }) catch
         actor.preferred_username;
-    const avatar_url = defaultAvatarUrlAlloc(app_state, allocator) catch actor.id;
-    const header_url = defaultHeaderUrlAlloc(app_state, allocator) catch actor.id;
+    const avatar_url = if (actor.avatar_url) |u| u else defaultAvatarUrlAlloc(app_state, allocator) catch actor.id;
+    const header_url = if (actor.header_url) |u| u else defaultHeaderUrlAlloc(app_state, allocator) catch actor.id;
 
     return .{
         .id = api_id,
@@ -2367,8 +2367,8 @@ fn makeRemoteStatusPayload(
     const acct_str = std.fmt.allocPrint(allocator, "{s}@{s}", .{ actor.preferred_username, actor.domain }) catch
         actor.preferred_username;
 
-    const avatar_url = defaultAvatarUrlAlloc(app_state, allocator) catch actor.id;
-    const header_url = defaultHeaderUrlAlloc(app_state, allocator) catch actor.id;
+    const avatar_url = if (actor.avatar_url) |u| u else defaultAvatarUrlAlloc(app_state, allocator) catch actor.id;
+    const header_url = if (actor.header_url) |u| u else defaultHeaderUrlAlloc(app_state, allocator) catch actor.id;
 
     const api_id = remoteAccountApiIdAlloc(app_state, allocator, actor.id);
 
@@ -6468,7 +6468,7 @@ test "POST /users/:name/inbox Create discovers actor when addressed" {
         .method = .GET,
         .url = actor_id,
         .response_status = .ok,
-        .response_body = "{\"@context\":\"https://www.w3.org/ns/activitystreams\",\"id\":\"https://remote.test/users/bob\",\"type\":\"Person\",\"preferredUsername\":\"bob\",\"inbox\":\"https://remote.test/users/bob/inbox\",\"publicKey\":{\"id\":\"https://remote.test/users/bob#main-key\",\"owner\":\"https://remote.test/users/bob\",\"publicKeyPem\":\"-----BEGIN PUBLIC KEY-----\\n...\\n-----END PUBLIC KEY-----\\n\"}}",
+        .response_body = "{\"@context\":\"https://www.w3.org/ns/activitystreams\",\"id\":\"https://remote.test/users/bob\",\"type\":\"Person\",\"preferredUsername\":\"bob\",\"inbox\":\"https://remote.test/users/bob/inbox\",\"icon\":{\"type\":\"Image\",\"url\":\"https://remote.test/media/avatar.jpg\"},\"image\":{\"type\":\"Image\",\"url\":\"https://remote.test/media/header.jpg\"},\"publicKey\":{\"id\":\"https://remote.test/users/bob#main-key\",\"owner\":\"https://remote.test/users/bob\",\"publicKeyPem\":\"-----BEGIN PUBLIC KEY-----\\n...\\n-----END PUBLIC KEY-----\\n\"}}",
     });
 
     const body = try std.fmt.allocPrint(
@@ -6486,7 +6486,9 @@ test "POST /users/:name/inbox Create discovers actor when addressed" {
     try std.testing.expectEqual(std.http.Status.accepted, resp.status);
     try std.testing.expectEqual(@as(usize, 1), mock.requests.items.len);
 
-    try std.testing.expect((try remote_actors.lookupById(&app_state.conn, a, actor_id)) != null);
+    const actor = (try remote_actors.lookupById(&app_state.conn, a, actor_id)).?;
+    try std.testing.expectEqualStrings("https://remote.test/media/avatar.jpg", actor.avatar_url.?);
+    try std.testing.expectEqualStrings("https://remote.test/media/header.jpg", actor.header_url.?);
     const st = (try remote_statuses.lookupByUri(&app_state.conn, a, "https://remote.test/notes/1")).?;
     try std.testing.expectEqualStrings("direct", st.visibility);
 }
