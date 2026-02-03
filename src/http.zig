@@ -72,6 +72,13 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
         return metrics(app_state, allocator);
     }
 
+    if (req.method == .GET and std.mem.eql(u8, path, "/robots.txt")) {
+        return .{
+            .content_type = "text/plain; charset=utf-8",
+            .body = "User-agent: *\nDisallow:\n",
+        };
+    }
+
     if (req.method == .GET and std.mem.eql(u8, path, "/static/avatar.png")) {
         return .{
             .content_type = "image/png",
@@ -128,6 +135,10 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
         return nodeinfoDocument(app_state, allocator);
     }
 
+    if (req.method == .GET and std.mem.eql(u8, path, "/nodeinfo/2.1")) {
+        return nodeinfoDocumentWithVersion(app_state, allocator, "2.1");
+    }
+
     if (std.mem.startsWith(u8, path, "/users/")) {
         if (req.method == .POST and std.mem.endsWith(u8, path, "/inbox")) {
             return inboxPost(app_state, allocator, req, path);
@@ -158,6 +169,23 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
             .content_type = "application/json; charset=utf-8",
             .body = body,
         };
+    }
+
+    if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/instance/peers")) {
+        return jsonOk(allocator, [_][]const u8{});
+    }
+
+    if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/instance/activity")) {
+        return jsonOk(allocator, [_]i32{});
+    }
+
+    if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/instance/extended_description")) {
+        const updated_at = "1970-01-01T00:00:00.000Z";
+        return jsonOk(allocator, .{ .updated_at = updated_at, .content = "" });
+    }
+
+    if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/directory")) {
+        return jsonOk(allocator, [_]i32{});
     }
 
     if (req.method == .GET and std.mem.eql(u8, path, "/api/v2/instance")) {
@@ -802,11 +830,15 @@ fn nodeinfoDiscovery(app_state: *app.App, allocator: std.mem.Allocator) Response
 }
 
 fn nodeinfoDocument(app_state: *app.App, allocator: std.mem.Allocator) Response {
+    return nodeinfoDocumentWithVersion(app_state, allocator, "2.0");
+}
+
+fn nodeinfoDocumentWithVersion(app_state: *app.App, allocator: std.mem.Allocator, schema_version: []const u8) Response {
     const user_count = users.count(&app_state.conn) catch 0;
     const open_registrations = (user_count == 0);
 
     const payload = .{
-        .version = "2.0",
+        .version = schema_version,
         .software = .{
             .name = "feddyspice",
             .version = version.version,
@@ -4213,6 +4245,8 @@ test "client compat: placeholder endpoints return JSON" {
 
     const cases = [_]Case{
         .{ .method = .GET, .target = "/api/v1/custom_emojis", .kind = .array },
+        .{ .method = .GET, .target = "/api/v1/instance/peers", .kind = .array },
+        .{ .method = .GET, .target = "/api/v1/instance/activity", .kind = .array },
         .{ .method = .GET, .target = "/api/v1/follow_requests", .kind = .array },
         .{ .method = .GET, .target = "/api/v1/scheduled_statuses", .kind = .array },
         .{ .method = .GET, .target = "/api/v1/lists", .kind = .array },
@@ -4220,12 +4254,15 @@ test "client compat: placeholder endpoints return JSON" {
         .{ .method = .GET, .target = "/api/v1/trends/tags", .kind = .array },
         .{ .method = .GET, .target = "/api/v2/filters", .kind = .array },
         .{ .method = .GET, .target = "/api/v2/suggestions?", .kind = .array },
+        .{ .method = .GET, .target = "/api/v1/directory?limit=1", .kind = .array },
         .{ .method = .GET, .target = "/api/v1/followed_tags", .kind = .array },
         .{ .method = .GET, .target = "/api/v1/preferences", .kind = .object },
         .{ .method = .GET, .target = "/api/v1/push/subscription", .kind = .object },
+        .{ .method = .GET, .target = "/api/v1/instance/extended_description", .kind = .object, .require_key = "content" },
         .{ .method = .GET, .target = "/api/v2/search?q=https%3A%2F%2Fexample.test%2F&resolve=true&limit=1", .kind = .object, .require_key = "accounts" },
         .{ .method = .GET, .target = "/api/v1/markers?timeline[]=notifications", .kind = .object, .require_key = "notifications" },
         .{ .method = .POST, .target = "/api/v1/markers", .kind = .object, .require_key = "notifications" },
+        .{ .method = .GET, .target = "/nodeinfo/2.1", .kind = .object, .require_key = "version" },
     };
 
     for (cases) |tc| {
@@ -4262,7 +4299,21 @@ test "client compat: placeholder endpoints return JSON" {
             try std.testing.expect(notif.get("version") != null);
             try std.testing.expect(notif.get("updated_at") != null);
         }
+
+        if (std.mem.eql(u8, tc.target, "/nodeinfo/2.1")) {
+            try std.testing.expectEqualStrings("2.1", parsed.value.object.get("version").?.string);
+        }
     }
+}
+
+test "GET /robots.txt -> 200 text" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const resp = handle(&app_state, std.testing.allocator, .{ .method = .GET, .target = "/robots.txt" });
+    try std.testing.expectEqual(std.http.Status.ok, resp.status);
+    try std.testing.expect(std.mem.startsWith(u8, resp.content_type, "text/plain"));
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "User-agent") != null);
 }
 
 test "notifications: GET/clear/dismiss" {

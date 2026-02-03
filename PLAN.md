@@ -91,6 +91,14 @@ We keep this list in-sync with reality by periodically scanning `feddyspice.log`
 - [x] `GET /api/v2/filters` (client compat placeholder)
 - [x] `GET /api/v2/search` (client compat placeholder)
 - [x] `GET /api/v2/suggestions` (client compat placeholder)
+- [x] `GET /api/v1/instance/peers` (client compat placeholder)
+- [x] `GET /api/v1/instance/activity` (client compat placeholder)
+- [x] `GET /api/v1/instance/extended_description` (client compat placeholder)
+- [x] `GET /api/v1/directory` (client compat placeholder)
+- [x] `GET /nodeinfo/2.1` (client compat alias)
+- [x] `GET /robots.txt` (crawler compat)
+- [x] `HEAD /` and `HEAD /users/:name` (client/crawler compat)
+- [x] Trailing-slash path normalization (`/api/v1/instance/`, `/api/v2/instance/`, etc.)
 
 ## 7) Mastodon API parity (selected, from `../mastodon/config/routes/api.rb`)
 
