@@ -64,7 +64,7 @@ Target: automated federation smoke tests against multiple real servers.
 - [x] Idempotency + dedupe for inbound activities
 - [x] SSRF protections + allowlist for fedbox-only private networking
 - [ ] Media storage + cleanup
-- [ ] Minimal observability (structured logs, basic metrics)
+- [x] Minimal observability (structured logs, basic metrics)
 
 ## 6) Client requests: eliminate 404s (from `feddyspice.log`)
 

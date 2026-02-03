@@ -49,6 +49,10 @@ export FEDDYSPICE_LOG_FILE=./feddyspice.log
 export FEDDYSPICE_LOG_LEVEL=info # debug|info|warn|error
 ```
 
+## Metrics
+
+Prometheus-style metrics are exposed at `GET /metrics`.
+
 ## Background jobs
 
 Outbound federation deliveries can be controlled via `FEDDYSPICE_JOBS_MODE`:
