@@ -33,7 +33,7 @@ pub fn parse(allocator: std.mem.Allocator, body: []const u8) !Form {
         const key = try decode(allocator, key_enc);
         const value = try decode(allocator, val_enc);
 
-        try map.put(allocator, key, value);
+        try putOrAppend(allocator, &map, key, value);
     }
 
     return .{ .map = map };
@@ -55,7 +55,7 @@ pub fn parseJson(allocator: std.mem.Allocator, body: []const u8) !Form {
         if (maybe_val == null) continue;
 
         const key_copy = try allocator.dupe(u8, key);
-        try map.put(allocator, key_copy, maybe_val.?);
+        try putOrAppend(allocator, &map, key_copy, maybe_val.?);
     }
 
     return .{ .map = map };
@@ -145,7 +145,7 @@ pub fn parseMultipart(allocator: std.mem.Allocator, content_type: []const u8, bo
 
         const key_copy = try allocator.dupe(u8, name);
         const val_copy = try allocator.dupe(u8, content);
-        try map.put(allocator, key_copy, val_copy);
+        try putOrAppend(allocator, &map, key_copy, val_copy);
 
         pos = next_marker + 1;
     }
@@ -243,7 +243,7 @@ pub fn parseMultipartWithFile(
 
         const key_copy = try allocator.dupe(u8, name);
         const val_copy = try allocator.dupe(u8, content);
-        try map.put(allocator, key_copy, val_copy);
+        try putOrAppend(allocator, &map, key_copy, val_copy);
 
         pos = next_marker + 1;
     }
@@ -337,6 +337,33 @@ fn multipartPartContentType(headers: []const u8) ?[]const u8 {
     return null;
 }
 
+fn putOrAppend(
+    allocator: std.mem.Allocator,
+    map: *std.StringHashMapUnmanaged([]const u8),
+    key: []u8,
+    value: []u8,
+) std.mem.Allocator.Error!void {
+    const is_array = std.mem.endsWith(u8, key, "[]");
+    if (map.getEntry(key)) |entry| {
+        allocator.free(key);
+
+        if (is_array) {
+            const old = entry.value_ptr.*;
+            const combined = try std.fmt.allocPrint(allocator, "{s}\n{s}", .{ old, value });
+            allocator.free(@constCast(old));
+            allocator.free(value);
+            entry.value_ptr.* = combined;
+            return;
+        }
+
+        allocator.free(@constCast(entry.value_ptr.*));
+        entry.value_ptr.* = value;
+        return;
+    }
+
+    try map.put(allocator, key, value);
+}
+
 fn decode(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
     var out = try allocator.alloc(u8, s.len);
     var o: usize = 0;
@@ -389,6 +416,13 @@ test "parseMultipartWithFile: extracts fields + file" {
     try std.testing.expectEqualStrings("a.png", parsed.file.?.filename.?);
     try std.testing.expectEqualStrings("image/png", parsed.file.?.content_type.?);
     try std.testing.expectEqualStrings("PNGDATA", parsed.file.?.data);
+}
+
+test "parse: joins repeated [] keys" {
+    var parsed = try parse(std.testing.allocator, "id[]=1&id[]=2");
+    defer parsed.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("1\n2", parsed.get("id[]").?);
 }
 
 fn fromHex(c: u8) ?u8 {
