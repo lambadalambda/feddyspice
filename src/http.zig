@@ -9,6 +9,7 @@ const form = @import("form.zig");
 const follows = @import("follows.zig");
 const followers = @import("followers.zig");
 const inbox_dedupe = @import("inbox_dedupe.zig");
+const media = @import("media.zig");
 const oauth = @import("oauth.zig");
 const remote_actors = @import("remote_actors.zig");
 const remote_statuses = @import("remote_statuses.zig");
@@ -69,6 +70,10 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
             .content_type = "image/png",
             .body = transparent_png[0..],
         };
+    }
+
+    if (req.method == .GET and std.mem.startsWith(u8, path, "/media/")) {
+        return mediaFileGet(app_state, allocator, req, path);
     }
 
     if (req.method == .GET and std.mem.eql(u8, path, "/")) {
@@ -442,6 +447,14 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
 
     if (req.method == .POST and std.mem.eql(u8, path, "/api/v1/follows")) {
         return apiFollow(app_state, allocator, req);
+    }
+
+    if (req.method == .POST and std.mem.eql(u8, path, "/api/v1/media")) {
+        return createMedia(app_state, allocator, req);
+    }
+
+    if (req.method == .PUT and std.mem.startsWith(u8, path, "/api/v1/media/")) {
+        return updateMedia(app_state, allocator, req, path);
     }
 
     if (req.method == .POST and std.mem.eql(u8, path, "/api/v1/statuses")) {
@@ -1508,6 +1521,118 @@ fn createStatus(app_state: *app.App, allocator: std.mem.Allocator, req: Request)
     return statusResponse(app_state, allocator, user.?, st);
 }
 
+fn createMedia(app_state: *app.App, allocator: std.mem.Allocator, req: Request) Response {
+    const token = bearerToken(req.authorization) orelse return unauthorized(allocator);
+    const info = oauth.verifyAccessToken(&app_state.conn, allocator, token) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (info == null) return unauthorized(allocator);
+
+    if (!isMultipart(req.content_type)) {
+        return .{ .status = .bad_request, .body = "invalid form\n" };
+    }
+
+    var parsed = form.parseMultipartWithFile(allocator, req.content_type.?, req.body) catch
+        return .{ .status = .bad_request, .body = "invalid form\n" };
+    defer parsed.deinit(allocator);
+
+    const file = parsed.file orelse return .{ .status = .bad_request, .body = "missing file\n" };
+    if (!std.mem.eql(u8, file.name, "file")) return .{ .status = .bad_request, .body = "missing file\n" };
+
+    const description = parsed.form.get("description");
+    const content_type = file.content_type orelse "application/octet-stream";
+
+    const now_ms: i64 = std.time.milliTimestamp();
+    var meta = media.create(
+        &app_state.conn,
+        allocator,
+        info.?.user_id,
+        content_type,
+        file.data,
+        description,
+        now_ms,
+    ) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    defer meta.deinit(allocator);
+
+    const payload = makeMediaAttachmentPayload(app_state, allocator, meta);
+    const body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    return .{
+        .content_type = "application/json; charset=utf-8",
+        .body = body,
+    };
+}
+
+fn updateMedia(app_state: *app.App, allocator: std.mem.Allocator, req: Request, path: []const u8) Response {
+    const token = bearerToken(req.authorization) orelse return unauthorized(allocator);
+    const info = oauth.verifyAccessToken(&app_state.conn, allocator, token) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (info == null) return unauthorized(allocator);
+
+    const id_str = path["/api/v1/media/".len..];
+    const media_id = std.fmt.parseInt(i64, id_str, 10) catch
+        return .{ .status = .bad_request, .body = "invalid media id\n" };
+
+    var parsed = parseBodyParams(allocator, req) catch
+        return .{ .status = .bad_request, .body = "invalid form\n" };
+
+    const description = parsed.get("description");
+    const now_ms: i64 = std.time.milliTimestamp();
+    const updated = media.updateDescription(&app_state.conn, media_id, info.?.user_id, description, now_ms) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (!updated) return .{ .status = .not_found, .body = "not found\n" };
+
+    var meta = media.lookupMeta(&app_state.conn, allocator, media_id) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (meta == null) return .{ .status = .not_found, .body = "not found\n" };
+    defer meta.?.deinit(allocator);
+
+    const payload = makeMediaAttachmentPayload(app_state, allocator, meta.?);
+    const body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    return .{
+        .content_type = "application/json; charset=utf-8",
+        .body = body,
+    };
+}
+
+fn mediaFileGet(app_state: *app.App, allocator: std.mem.Allocator, req: Request, path: []const u8) Response {
+    _ = req;
+
+    const token = path["/media/".len..];
+    if (token.len == 0) return .{ .status = .not_found, .body = "not found\n" };
+
+    const m = media.lookupByPublicToken(&app_state.conn, allocator, token) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (m == null) return .{ .status = .not_found, .body = "not found\n" };
+
+    return .{
+        .content_type = m.?.content_type,
+        .body = m.?.data,
+    };
+}
+
+fn mediaAttachmentType(content_type: []const u8) []const u8 {
+    if (std.mem.startsWith(u8, content_type, "image/")) return "image";
+    if (std.mem.startsWith(u8, content_type, "video/")) return "video";
+    if (std.mem.startsWith(u8, content_type, "audio/")) return "audio";
+    return "unknown";
+}
+
+fn makeMediaAttachmentPayload(app_state: *app.App, allocator: std.mem.Allocator, meta: media.MediaMeta) MediaAttachmentPayload {
+    const id_str = std.fmt.allocPrint(allocator, "{d}", .{meta.id}) catch "0";
+    const base = baseUrlAlloc(app_state, allocator) catch "";
+    const url = std.fmt.allocPrint(allocator, "{s}/media/{s}", .{ base, meta.public_token }) catch "";
+    return .{
+        .id = id_str,
+        .type = mediaAttachmentType(meta.content_type),
+        .url = url,
+        .preview_url = url,
+        .description = meta.description,
+    };
+}
+
 fn isPublicTimelineVisibility(visibility: []const u8) bool {
     return std.mem.eql(u8, visibility, "public");
 }
@@ -1925,6 +2050,18 @@ fn makeRemoteAccountPayload(
         .header_static = header_url,
     };
 }
+
+const MediaAttachmentPayload = struct {
+    id: []const u8,
+    type: []const u8,
+    url: []const u8,
+    preview_url: []const u8,
+    remote_url: ?[]const u8 = null,
+    text_url: ?[]const u8 = null,
+    meta: struct {} = .{},
+    description: ?[]const u8,
+    blurhash: ?[]const u8 = null,
+};
 
 const StatusPayload = struct {
     id: []const u8,
@@ -3932,6 +4069,82 @@ test "statuses: create + get + home timeline" {
 
     try std.testing.expectEqual(@as(usize, 1), tl_json.value.array.items.len);
     try std.testing.expectEqualStrings(id, tl_json.value.array.items[0].object.get("id").?.string);
+}
+
+test "media: upload + update + fetch" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const app_creds = try oauth.createApp(
+        &app_state.conn,
+        a,
+        "pl-fe",
+        "urn:ietf:wg:oauth:2.0:oob",
+        "read write",
+        "",
+    );
+
+    const token = try oauth.createAccessToken(&app_state.conn, a, app_creds.id, user_id, "read write");
+    const auth_header = try std.fmt.allocPrint(a, "Bearer {s}", .{token});
+
+    const ct = "multipart/form-data; boundary=abc";
+    const body =
+        "--abc\r\n" ++
+        "Content-Disposition: form-data; name=\"description\"\r\n" ++
+        "\r\n" ++
+        "hello\r\n" ++
+        "--abc\r\n" ++
+        "Content-Disposition: form-data; name=\"file\"; filename=\"a.png\"\r\n" ++
+        "Content-Type: image/png\r\n" ++
+        "\r\n" ++
+        "PNGDATA\r\n" ++
+        "--abc--\r\n";
+
+    const upload_resp = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/api/v1/media",
+        .content_type = ct,
+        .body = body,
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, upload_resp.status);
+
+    var upload_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, upload_resp.body, .{});
+    defer upload_json.deinit();
+
+    const media_id = upload_json.value.object.get("id").?.string;
+    try std.testing.expectEqualStrings("image", upload_json.value.object.get("type").?.string);
+    try std.testing.expectEqualStrings("hello", upload_json.value.object.get("description").?.string);
+
+    const url = upload_json.value.object.get("url").?.string;
+    try std.testing.expect(std.mem.startsWith(u8, url, "http://example.test/media/"));
+
+    const path = url["http://example.test".len..];
+    const file_resp = handle(&app_state, a, .{ .method = .GET, .target = path });
+    try std.testing.expectEqual(std.http.Status.ok, file_resp.status);
+    try std.testing.expectEqualStrings("image/png", file_resp.content_type);
+    try std.testing.expectEqualStrings("PNGDATA", file_resp.body);
+
+    const put_target = try std.fmt.allocPrint(a, "/api/v1/media/{s}", .{media_id});
+    const upd_resp = handle(&app_state, a, .{
+        .method = .PUT,
+        .target = put_target,
+        .content_type = "application/x-www-form-urlencoded",
+        .body = "description=new",
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, upd_resp.status);
+
+    var upd_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, upd_resp.body, .{});
+    defer upd_json.deinit();
+    try std.testing.expectEqualStrings("new", upd_json.value.object.get("description").?.string);
 }
 
 test "timelines: public timeline returns local statuses" {

@@ -313,5 +313,6 @@ test "media: create/lookup and attach to status" {
 fn generatePublicTokenHexAlloc(allocator: std.mem.Allocator) std.mem.Allocator.Error![]u8 {
     var bytes: [16]u8 = undefined;
     std.crypto.random.bytes(&bytes);
-    return std.fmt.allocPrint(allocator, "{s}", .{std.fmt.fmtSliceHexLower(bytes[0..])});
+    const encoded = std.fmt.bytesToHex(bytes, .lower);
+    return allocator.dupe(u8, encoded[0..]);
 }

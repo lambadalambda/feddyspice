@@ -33,6 +33,7 @@ pub fn serveOnce(app_state: *app.App, listener: *net.Server) !void {
 
     const method = request.head.method;
     const target = request.head.target;
+    const path = targetPath(target);
     const content_type = request.head.content_type;
 
     var cookie: ?[]const u8 = null;
@@ -50,7 +51,9 @@ pub fn serveOnce(app_state: *app.App, listener: *net.Server) !void {
 
     var body: []const u8 = "";
     if (request.head.method.requestHasBody()) {
-        const max_len: usize = 1024 * 1024;
+        const default_max_len: usize = 1024 * 1024;
+        const media_max_len: usize = 10 * 1024 * 1024;
+        const max_len: usize = if (std.mem.eql(u8, path, "/api/v1/media")) media_max_len else default_max_len;
         const content_length: usize = @intCast(request.head.content_length orelse 0);
         if (content_length > max_len) {
             const resp: routes.Response = .{
@@ -78,6 +81,11 @@ pub fn serveOnce(app_state: *app.App, listener: *net.Server) !void {
 
     try writeResponse(&request, resp);
     logAccess(app_state, conn.address, method, target, resp.status, start_ms);
+}
+
+fn targetPath(target: []const u8) []const u8 {
+    if (std.mem.indexOfScalar(u8, target, '?')) |idx| return target[0..idx];
+    return target;
 }
 
 fn writeResponse(request: *http.Server.Request, resp: routes.Response) !void {

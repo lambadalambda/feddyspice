@@ -118,8 +118,8 @@ This is the “eventually” list. We should keep it scoped to what pl-fe needs,
 
 ### Media
 
-- [ ] `POST /api/v1/media` (upload)
-- [ ] `PUT /api/v1/media/:id` (update metadata)
+- [x] `POST /api/v1/media` (upload)
+- [x] `PUT /api/v1/media/:id` (update metadata)
 - [ ] Attachments in `POST /api/v1/statuses` (IDs from media upload)
 
 ### Notifications / streaming
