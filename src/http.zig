@@ -477,6 +477,10 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
         return homeTimeline(app_state, allocator, req);
     }
 
+    if (req.method == .GET and std.mem.startsWith(u8, path, "/api/v1/statuses/") and std.mem.endsWith(u8, path, "/context")) {
+        return statusContext(app_state, allocator, req, path);
+    }
+
     if (req.method == .GET and std.mem.startsWith(u8, path, "/api/v1/statuses/")) {
         return getStatus(app_state, allocator, req, path);
     }
@@ -1993,6 +1997,36 @@ fn getStatus(app_state: *app.App, allocator: std.mem.Allocator, req: Request, pa
     if (user == null) return unauthorized(allocator);
 
     return statusResponse(app_state, allocator, user.?, st.?);
+}
+
+fn statusContext(app_state: *app.App, allocator: std.mem.Allocator, req: Request, path: []const u8) Response {
+    const token = bearerToken(req.authorization) orelse return unauthorized(allocator);
+    const info = oauth.verifyAccessToken(&app_state.conn, allocator, token) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (info == null) return unauthorized(allocator);
+
+    const prefix = "/api/v1/statuses/";
+    const suffix = "/context";
+    if (!std.mem.startsWith(u8, path, prefix)) return .{ .status = .not_found, .body = "not found\n" };
+    if (!std.mem.endsWith(u8, path, suffix)) return .{ .status = .not_found, .body = "not found\n" };
+
+    const id_str = path[prefix.len .. path.len - suffix.len];
+    const id = std.fmt.parseInt(i64, id_str, 10) catch return .{ .status = .not_found, .body = "not found\n" };
+
+    if (id < 0) {
+        const st = remote_statuses.lookup(&app_state.conn, allocator, id) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        if (st == null) return .{ .status = .not_found, .body = "not found\n" };
+    } else {
+        const st = statuses.lookup(&app_state.conn, allocator, id) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        if (st == null) return .{ .status = .not_found, .body = "not found\n" };
+    }
+
+    return jsonOk(allocator, .{
+        .ancestors = [_]StatusPayload{},
+        .descendants = [_]StatusPayload{},
+    });
 }
 
 fn deleteStatus(app_state: *app.App, allocator: std.mem.Allocator, req: Request, path: []const u8) Response {
@@ -4287,6 +4321,61 @@ test "statuses: create + get + home timeline" {
 
     try std.testing.expectEqual(@as(usize, 1), tl_json.value.array.items.len);
     try std.testing.expectEqualStrings(id, tl_json.value.array.items[0].object.get("id").?.string);
+}
+
+test "statuses: context endpoint returns empty arrays" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const app_creds = try oauth.createApp(
+        &app_state.conn,
+        a,
+        "pl-fe",
+        "urn:ietf:wg:oauth:2.0:oob",
+        "read write",
+        "",
+    );
+    const token = try oauth.createAccessToken(&app_state.conn, a, app_creds.id, user_id, "read write");
+    const auth_header = try std.fmt.allocPrint(a, "Bearer {s}", .{token});
+
+    const create_resp = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/api/v1/statuses",
+        .content_type = "application/x-www-form-urlencoded",
+        .body = "status=hello&visibility=public",
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, create_resp.status);
+
+    var create_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, create_resp.body, .{});
+    defer create_json.deinit();
+    const id = create_json.value.object.get("id").?.string;
+
+    const ctx_target = try std.fmt.allocPrint(a, "/api/v1/statuses/{s}/context", .{id});
+    const ctx_resp = handle(&app_state, a, .{
+        .method = .GET,
+        .target = ctx_target,
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, ctx_resp.status);
+
+    var ctx_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, ctx_resp.body, .{});
+    defer ctx_json.deinit();
+
+    try std.testing.expect(ctx_json.value == .object);
+    const ancestors = ctx_json.value.object.get("ancestors").?;
+    const descendants = ctx_json.value.object.get("descendants").?;
+    try std.testing.expect(ancestors == .array);
+    try std.testing.expect(descendants == .array);
+    try std.testing.expectEqual(@as(usize, 0), ancestors.array.items.len);
+    try std.testing.expectEqual(@as(usize, 0), descendants.array.items.len);
 }
 
 test "media: upload + update + fetch" {

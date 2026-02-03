@@ -49,6 +49,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Account followers/following endpoints (`GET /api/v1/accounts/:id/followers`, `GET /api/v1/accounts/:id/following`).
 - Soft-delete support for local + remote statuses (`deleted_at`).
 - Delete local status endpoint (`DELETE /api/v1/statuses/:id`).
+- Status context endpoint (`GET /api/v1/statuses/:id/context`).
 - Deleted local ActivityPub objects return Tombstones (`GET /users/:name/statuses/:id`).
 - ActivityPub `Delete` deliveries to followers when local statuses are deleted.
 - ActivityPub inbox handling for `Delete` to mark remote statuses deleted.
