@@ -97,6 +97,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Added `src/http/session.zig` for cookie/session helpers shared by OAuth and HTML auth pages.
 - Moved OAuth app registration + authorization-code flow handlers into `src/http/oauth_api.zig`.
 - Added `src/http/urls.zig` to share URL-building helpers across HTTP modules.
+- Added `src/http/mastodon.zig` for shared Mastodon API payload structs + builders (accounts/statuses/media).
 
 ### Fixed
 
