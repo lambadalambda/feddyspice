@@ -7,6 +7,7 @@ pub const Error = db.Error || std.mem.Allocator.Error;
 pub const Media = struct {
     id: i64,
     user_id: i64,
+    public_token: []const u8,
     content_type: []const u8,
     data: []const u8,
     description: ?[]const u8,
@@ -14,6 +15,7 @@ pub const Media = struct {
     updated_at_ms: i64,
 
     pub fn deinit(self: *Media, allocator: std.mem.Allocator) void {
+        allocator.free(self.public_token);
         allocator.free(self.content_type);
         allocator.free(self.data);
         if (self.description) |d| allocator.free(d);
@@ -24,12 +26,14 @@ pub const Media = struct {
 pub const MediaMeta = struct {
     id: i64,
     user_id: i64,
+    public_token: []const u8,
     content_type: []const u8,
     description: ?[]const u8,
     created_at_ms: i64,
     updated_at_ms: i64,
 
     pub fn deinit(self: *MediaMeta, allocator: std.mem.Allocator) void {
+        allocator.free(self.public_token);
         allocator.free(self.content_type);
         if (self.description) |d| allocator.free(d);
         self.* = undefined;
@@ -45,21 +49,37 @@ pub fn create(
     description: ?[]const u8,
     now_ms: i64,
 ) Error!MediaMeta {
+    const token = try generatePublicTokenHexAlloc(allocator);
+    defer allocator.free(token);
+    return createWithToken(conn, allocator, user_id, token, content_type, data, description, now_ms);
+}
+
+pub fn createWithToken(
+    conn: *db.Db,
+    allocator: std.mem.Allocator,
+    user_id: i64,
+    public_token: []const u8,
+    content_type: []const u8,
+    data: []const u8,
+    description: ?[]const u8,
+    now_ms: i64,
+) Error!MediaMeta {
     var stmt = try conn.prepareZ(
-        "INSERT INTO media_attachments(user_id, content_type, data, description, created_at_ms, updated_at_ms)\n" ++
-            "VALUES (?1, ?2, ?3, ?4, ?5, ?5);\x00",
+        "INSERT INTO media_attachments(user_id, public_token, content_type, data, description, created_at_ms, updated_at_ms)\n" ++
+            "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6);\x00",
     );
     defer stmt.finalize();
 
     try stmt.bindInt64(1, user_id);
-    try stmt.bindText(2, content_type);
-    try stmt.bindBlob(3, data);
+    try stmt.bindText(2, public_token);
+    try stmt.bindText(3, content_type);
+    try stmt.bindBlob(4, data);
     if (description) |d| {
-        try stmt.bindText(4, d);
+        try stmt.bindText(5, d);
     } else {
-        try stmt.bindNull(4);
+        try stmt.bindNull(5);
     }
-    try stmt.bindInt64(5, now_ms);
+    try stmt.bindInt64(6, now_ms);
 
     _ = try stmt.step();
     const id = conn.lastInsertRowId();
@@ -68,7 +88,7 @@ pub fn create(
 
 pub fn lookup(conn: *db.Db, allocator: std.mem.Allocator, id: i64) Error!?Media {
     var stmt = try conn.prepareZ(
-        "SELECT id, user_id, content_type, data, description, created_at_ms, updated_at_ms\n" ++
+        "SELECT id, user_id, public_token, content_type, data, description, created_at_ms, updated_at_ms\n" ++
             "FROM media_attachments WHERE id=?1 LIMIT 1;\x00",
     );
     defer stmt.finalize();
@@ -82,21 +102,46 @@ pub fn lookup(conn: *db.Db, allocator: std.mem.Allocator, id: i64) Error!?Media 
     return .{
         .id = stmt.columnInt64(0),
         .user_id = stmt.columnInt64(1),
-        .content_type = try allocator.dupe(u8, stmt.columnText(2)),
-        .data = try allocator.dupe(u8, stmt.columnBlob(3)),
+        .public_token = try allocator.dupe(u8, stmt.columnText(2)),
+        .content_type = try allocator.dupe(u8, stmt.columnText(3)),
+        .data = try allocator.dupe(u8, stmt.columnBlob(4)),
+        .description = if (stmt.columnType(5) == .null) null else try allocator.dupe(u8, stmt.columnText(5)),
+        .created_at_ms = stmt.columnInt64(6),
+        .updated_at_ms = stmt.columnInt64(7),
+    };
+}
+
+pub fn lookupMeta(conn: *db.Db, allocator: std.mem.Allocator, id: i64) Error!?MediaMeta {
+    var stmt = try conn.prepareZ(
+        "SELECT id, user_id, public_token, content_type, description, created_at_ms, updated_at_ms\n" ++
+            "FROM media_attachments WHERE id=?1 LIMIT 1;\x00",
+    );
+    defer stmt.finalize();
+    try stmt.bindInt64(1, id);
+
+    switch (try stmt.step()) {
+        .done => return null,
+        .row => {},
+    }
+
+    return .{
+        .id = stmt.columnInt64(0),
+        .user_id = stmt.columnInt64(1),
+        .public_token = try allocator.dupe(u8, stmt.columnText(2)),
+        .content_type = try allocator.dupe(u8, stmt.columnText(3)),
         .description = if (stmt.columnType(4) == .null) null else try allocator.dupe(u8, stmt.columnText(4)),
         .created_at_ms = stmt.columnInt64(5),
         .updated_at_ms = stmt.columnInt64(6),
     };
 }
 
-pub fn lookupMeta(conn: *db.Db, allocator: std.mem.Allocator, id: i64) Error!?MediaMeta {
+pub fn lookupByPublicToken(conn: *db.Db, allocator: std.mem.Allocator, token: []const u8) Error!?Media {
     var stmt = try conn.prepareZ(
-        "SELECT id, user_id, content_type, description, created_at_ms, updated_at_ms\n" ++
-            "FROM media_attachments WHERE id=?1 LIMIT 1;\x00",
+        "SELECT id, user_id, public_token, content_type, data, description, created_at_ms, updated_at_ms\n" ++
+            "FROM media_attachments WHERE public_token=?1 LIMIT 1;\x00",
     );
     defer stmt.finalize();
-    try stmt.bindInt64(1, id);
+    try stmt.bindText(1, token);
 
     switch (try stmt.step()) {
         .done => return null,
@@ -106,10 +151,12 @@ pub fn lookupMeta(conn: *db.Db, allocator: std.mem.Allocator, id: i64) Error!?Me
     return .{
         .id = stmt.columnInt64(0),
         .user_id = stmt.columnInt64(1),
-        .content_type = try allocator.dupe(u8, stmt.columnText(2)),
-        .description = if (stmt.columnType(3) == .null) null else try allocator.dupe(u8, stmt.columnText(3)),
-        .created_at_ms = stmt.columnInt64(4),
-        .updated_at_ms = stmt.columnInt64(5),
+        .public_token = try allocator.dupe(u8, stmt.columnText(2)),
+        .content_type = try allocator.dupe(u8, stmt.columnText(3)),
+        .data = try allocator.dupe(u8, stmt.columnBlob(4)),
+        .description = if (stmt.columnType(5) == .null) null else try allocator.dupe(u8, stmt.columnText(5)),
+        .created_at_ms = stmt.columnInt64(6),
+        .updated_at_ms = stmt.columnInt64(7),
     };
 }
 
@@ -151,7 +198,7 @@ pub fn attachToStatus(conn: *db.Db, status_id: i64, media_id: i64, position: i64
 
 pub fn listForStatus(conn: *db.Db, allocator: std.mem.Allocator, status_id: i64) Error![]MediaMeta {
     var stmt = try conn.prepareZ(
-        "SELECT m.id, m.user_id, m.content_type, m.description, m.created_at_ms, m.updated_at_ms\n" ++
+        "SELECT m.id, m.user_id, m.public_token, m.content_type, m.description, m.created_at_ms, m.updated_at_ms\n" ++
             "FROM status_media_attachments sma\n" ++
             "JOIN media_attachments m ON m.id = sma.media_id\n" ++
             "WHERE sma.status_id = ?1\n" ++
@@ -169,10 +216,11 @@ pub fn listForStatus(conn: *db.Db, allocator: std.mem.Allocator, status_id: i64)
             .row => try out.append(allocator, .{
                 .id = stmt.columnInt64(0),
                 .user_id = stmt.columnInt64(1),
-                .content_type = try allocator.dupe(u8, stmt.columnText(2)),
-                .description = if (stmt.columnType(3) == .null) null else try allocator.dupe(u8, stmt.columnText(3)),
-                .created_at_ms = stmt.columnInt64(4),
-                .updated_at_ms = stmt.columnInt64(5),
+                .public_token = try allocator.dupe(u8, stmt.columnText(2)),
+                .content_type = try allocator.dupe(u8, stmt.columnText(3)),
+                .description = if (stmt.columnType(4) == .null) null else try allocator.dupe(u8, stmt.columnText(4)),
+                .created_at_ms = stmt.columnInt64(5),
+                .updated_at_ms = stmt.columnInt64(6),
             }),
         }
     }
@@ -224,12 +272,23 @@ test "media: create/lookup and attach to status" {
     );
 
     const now_ms: i64 = 123;
-    var meta = try create(&conn, std.testing.allocator, user_id, "image/png", "pngdata", "desc", now_ms);
+    var meta = try createWithToken(
+        &conn,
+        std.testing.allocator,
+        user_id,
+        "token123",
+        "image/png",
+        "pngdata",
+        "desc",
+        now_ms,
+    );
     defer meta.deinit(std.testing.allocator);
     try std.testing.expectEqual(user_id, meta.user_id);
+    try std.testing.expectEqualStrings("token123", meta.public_token);
 
     var full = (try lookup(&conn, std.testing.allocator, meta.id)).?;
     defer full.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("token123", full.public_token);
     try std.testing.expectEqualStrings("image/png", full.content_type);
     try std.testing.expectEqualStrings("pngdata", full.data);
 
@@ -249,4 +308,10 @@ test "media: create/lookup and attach to status" {
     }
     try std.testing.expectEqual(@as(usize, 1), list.len);
     try std.testing.expectEqual(meta.id, list[0].id);
+}
+
+fn generatePublicTokenHexAlloc(allocator: std.mem.Allocator) std.mem.Allocator.Error![]u8 {
+    var bytes: [16]u8 = undefined;
+    std.crypto.random.bytes(&bytes);
+    return std.fmt.allocPrint(allocator, "{s}", .{std.fmt.fmtSliceHexLower(bytes[0..])});
 }

@@ -109,6 +109,11 @@ const migrations = [_]Migration{
         .name = "create_media",
         .sql = media_v12_sql,
     },
+    .{
+        .version = 13,
+        .name = "media_public_token",
+        .sql = media_public_token_v13_sql,
+    },
 };
 
 const schema_migrations_sql: [:0]const u8 =
@@ -314,6 +319,14 @@ const media_v12_sql: [:0]const u8 =
     \\CREATE INDEX IF NOT EXISTS status_media_attachments_media_id ON status_media_attachments(media_id);
 ++ "\x00";
 
+const media_public_token_v13_sql: [:0]const u8 =
+    \\ALTER TABLE media_attachments ADD COLUMN public_token TEXT;
+    \\UPDATE media_attachments
+    \\SET public_token = lower(hex(randomblob(16)))
+    \\WHERE public_token IS NULL;
+    \\CREATE UNIQUE INDEX IF NOT EXISTS media_attachments_public_token ON media_attachments(public_token);
+++ "\x00";
+
 test "migrate: creates users table and records version" {
     var conn = try db.Db.openZ(":memory:");
     defer conn.close();
@@ -354,6 +367,8 @@ test "migrate: creates users table and records version" {
     try std.testing.expectEqual(@as(i64, 11), v_stmt.columnInt64(0));
     try std.testing.expectEqual(db.Stmt.Step.row, try v_stmt.step());
     try std.testing.expectEqual(@as(i64, 12), v_stmt.columnInt64(0));
+    try std.testing.expectEqual(db.Stmt.Step.row, try v_stmt.step());
+    try std.testing.expectEqual(@as(i64, 13), v_stmt.columnInt64(0));
     try std.testing.expectEqual(db.Stmt.Step.done, try v_stmt.step());
 }
 
@@ -368,6 +383,6 @@ test "migrate: is idempotent" {
     defer stmt.finalize();
 
     try std.testing.expectEqual(db.Stmt.Step.row, try stmt.step());
-    try std.testing.expectEqual(@as(i64, 12), stmt.columnInt64(0));
+    try std.testing.expectEqual(@as(i64, 13), stmt.columnInt64(0));
     try std.testing.expectEqual(db.Stmt.Step.done, try stmt.step());
 }
