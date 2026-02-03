@@ -22,8 +22,6 @@ pub fn create(
     text: []const u8,
     visibility: []const u8,
 ) Error!Status {
-    if (text.len == 0) return error.InvalidText;
-
     var stmt = try conn.prepareZ(
         "INSERT INTO statuses(user_id, text, visibility, created_at) VALUES (?1, ?2, ?3, strftime('%Y-%m-%dT%H:%M:%fZ','now'));\x00",
     );

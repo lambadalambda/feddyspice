@@ -1684,9 +1684,24 @@ fn createStatus(app_state: *app.App, allocator: std.mem.Allocator, req: Request)
     var parsed = parseBodyParams(allocator, req) catch
         return .{ .status = .bad_request, .body = "invalid form\n" };
 
-    const text = parsed.get("status") orelse return .{ .status = .bad_request, .body = "missing status\n" };
+    const text_opt = parsed.get("status");
+    const text = text_opt orelse "";
     const visibility = parsed.get("visibility") orelse "public";
     const media_ids_raw = parsed.get("media_ids[]") orelse parsed.get("media_ids");
+
+    const has_media = blk: {
+        const raw = media_ids_raw orelse break :blk false;
+        var it = std.mem.splitScalar(u8, raw, '\n');
+        while (it.next()) |id_str| {
+            if (id_str.len == 0) continue;
+            break :blk true;
+        }
+        break :blk false;
+    };
+
+    const has_text = std.mem.trim(u8, text, " \t\r\n").len > 0;
+    if (text_opt == null and !has_media) return .{ .status = .bad_request, .body = "missing status\n" };
+    if (!has_text and !has_media) return .{ .status = .unprocessable_entity, .body = "invalid status\n" };
 
     app_state.conn.execZ("BEGIN IMMEDIATE;\x00") catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
@@ -5175,6 +5190,56 @@ test "statuses: create supports media_ids[] attachments" {
     );
     try std.testing.expect(std.mem.endsWith(u8, attachments[0].object.get("url").?.string, "/media/tok1"));
     try std.testing.expect(std.mem.endsWith(u8, attachments[1].object.get("url").?.string, "/media/tok2"));
+}
+
+test "statuses: create allows empty status when media attached" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const app_creds = try oauth.createApp(
+        &app_state.conn,
+        a,
+        "pl-fe",
+        "urn:ietf:wg:oauth:2.0:oob",
+        "read write",
+        "",
+    );
+    const token = try oauth.createAccessToken(&app_state.conn, a, app_creds.id, user_id, "read write");
+    const auth_header = try std.fmt.allocPrint(a, "Bearer {s}", .{token});
+
+    const now_ms: i64 = 123;
+    const m1 = try media.createWithToken(&app_state.conn, a, user_id, "tok1", "image/png", "x", "d1", now_ms);
+
+    const create_body = try std.fmt.allocPrint(
+        a,
+        "status=&visibility=public&media_ids[]={d}",
+        .{m1.id},
+    );
+
+    const create_resp = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/api/v1/statuses",
+        .content_type = "application/x-www-form-urlencoded",
+        .body = create_body,
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, create_resp.status);
+
+    var create_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, create_resp.body, .{});
+    defer create_json.deinit();
+
+    try std.testing.expectEqualStrings("<p></p>", create_json.value.object.get("content").?.string);
+
+    const attachments = create_json.value.object.get("media_attachments").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), attachments.len);
+    try std.testing.expect(std.mem.endsWith(u8, attachments[0].object.get("url").?.string, "/media/tok1"));
 }
 
 test "statuses: delete removes attached media" {
