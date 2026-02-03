@@ -134,6 +134,11 @@ const migrations = [_]Migration{
         .name = "user_profile_fields",
         .sql = user_profile_fields_v17_sql,
     },
+    .{
+        .version = 18,
+        .name = "create_conversations",
+        .sql = conversations_v18_sql,
+    },
 };
 
 const schema_migrations_sql: [:0]const u8 =
@@ -375,6 +380,20 @@ const user_profile_fields_v17_sql: [:0]const u8 =
     \\ALTER TABLE users ADD COLUMN header_media_id INTEGER;
 ++ "\x00";
 
+const conversations_v18_sql: [:0]const u8 =
+    \\CREATE TABLE IF NOT EXISTS conversations (
+    \\  id INTEGER PRIMARY KEY,
+    \\  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    \\  remote_actor_id TEXT NOT NULL REFERENCES remote_actors(id) ON DELETE CASCADE,
+    \\  last_status_id INTEGER NOT NULL,
+    \\  unread INTEGER NOT NULL DEFAULT 1,
+    \\  hidden INTEGER NOT NULL DEFAULT 0,
+    \\  updated_at_ms INTEGER NOT NULL,
+    \\  UNIQUE(user_id, remote_actor_id)
+    \\);
+    \\CREATE INDEX IF NOT EXISTS conversations_user_id_updated_at_ms_id ON conversations(user_id, updated_at_ms DESC, id DESC);
+++ "\x00";
+
 test "migrate: creates users table and records version" {
     var conn = try db.Db.openZ(":memory:");
     defer conn.close();
@@ -425,6 +444,8 @@ test "migrate: creates users table and records version" {
     try std.testing.expectEqual(@as(i64, 16), v_stmt.columnInt64(0));
     try std.testing.expectEqual(db.Stmt.Step.row, try v_stmt.step());
     try std.testing.expectEqual(@as(i64, 17), v_stmt.columnInt64(0));
+    try std.testing.expectEqual(db.Stmt.Step.row, try v_stmt.step());
+    try std.testing.expectEqual(@as(i64, 18), v_stmt.columnInt64(0));
     try std.testing.expectEqual(db.Stmt.Step.done, try v_stmt.step());
 }
 
@@ -439,6 +460,6 @@ test "migrate: is idempotent" {
     defer stmt.finalize();
 
     try std.testing.expectEqual(db.Stmt.Step.row, try stmt.step());
-    try std.testing.expectEqual(@as(i64, 17), stmt.columnInt64(0));
+    try std.testing.expectEqual(@as(i64, 18), stmt.columnInt64(0));
     try std.testing.expectEqual(db.Stmt.Step.done, try stmt.step());
 }

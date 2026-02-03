@@ -80,6 +80,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - User profile fields stored in SQLite (`display_name`, `note`, `avatar_media_id`, `header_media_id`).
 - Profile updates via `PATCH /api/v1/accounts/update_credentials` (display name, bio, avatar, header).
 - ActivityPub actor documents include `name`, `summary`, `icon`, and `image` when profile fields are set.
+- Mastodon conversations endpoints for DMs (`GET /api/v1/conversations`, `POST /api/v1/conversations/:id/read`, `DELETE /api/v1/conversations/:id`).
 
 ### Fixed
 
