@@ -7,6 +7,7 @@ const db = @import("db.zig");
 const jobs_db = @import("jobs_db.zig");
 const log = @import("log.zig");
 const migrations = @import("migrations.zig");
+const streaming_hub = @import("streaming_hub.zig");
 const transport = @import("transport.zig");
 
 pub const Options = struct {
@@ -58,6 +59,7 @@ const Worker = struct {
             .logger = self.logger,
             .jobs_mode = .sync,
             .jobs_queue = .{},
+            .streaming = streaming_hub.Hub.init(std.heap.page_allocator),
             .transport = undefined,
             .null_transport = null_transport,
             .real_transport = real_transport,

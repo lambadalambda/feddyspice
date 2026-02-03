@@ -6,6 +6,7 @@ const jobs = @import("jobs.zig");
 const log = @import("log.zig");
 const migrations = @import("migrations.zig");
 const password = @import("password.zig");
+const streaming_hub = @import("streaming_hub.zig");
 const transport = @import("transport.zig");
 
 pub const App = struct {
@@ -15,6 +16,7 @@ pub const App = struct {
     logger: *log.Logger,
     jobs_mode: jobs.Mode,
     jobs_queue: jobs.Queue = .{},
+    streaming: streaming_hub.Hub,
     transport: transport.Transport,
     null_transport: transport.NullTransport,
     real_transport: transport.RealTransport,
@@ -46,6 +48,7 @@ pub const App = struct {
             .logger = logger,
             .jobs_mode = cfg.jobs_mode,
             .jobs_queue = .{},
+            .streaming = streaming_hub.Hub.init(std.heap.page_allocator),
             .transport = undefined,
             .null_transport = transport.NullTransport.init(),
             .real_transport = real_transport,
@@ -85,6 +88,7 @@ pub const App = struct {
             .logger = logger,
             .jobs_mode = cfg.jobs_mode,
             .jobs_queue = .{},
+            .streaming = streaming_hub.Hub.init(std.heap.page_allocator),
             .transport = undefined,
             .null_transport = transport.NullTransport.init(),
             .real_transport = undefined,
@@ -96,6 +100,7 @@ pub const App = struct {
 
     pub fn deinit(app: *App) void {
         app.jobs_queue.deinit(app.allocator);
+        app.streaming.deinit();
         app.transport.deinit();
         app.conn.close();
         app.cfg.deinit(app.allocator);
