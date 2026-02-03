@@ -1417,8 +1417,12 @@ fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: Request, pa
             return .{ .status = .accepted, .body = "ignored\n" };
         }
 
-        _ = remote_statuses.markDeletedByUri(&app_state.conn, remote_status.?.remote_uri, deleted_at) catch
+        const deleted = remote_statuses.markDeletedByUri(&app_state.conn, remote_status.?.remote_uri, deleted_at) catch
             return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        if (deleted) {
+            const id_str = std.fmt.allocPrint(allocator, "{d}", .{remote_status.?.id}) catch "0";
+            app_state.streaming.publishDelete(user.?.id, id_str);
+        }
 
         dedupe_keep = true;
         return .{ .status = .accepted, .body = "ok\n" };
@@ -2167,7 +2171,9 @@ fn deleteStatus(app_state: *app.App, allocator: std.mem.Allocator, req: Request,
 
     background.deliverDeleteToFollowers(app_state, allocator, info.?.user_id, id);
 
-    return statusResponse(app_state, allocator, user.?, st.?);
+    const resp = statusResponse(app_state, allocator, user.?, st.?);
+    app_state.streaming.publishDelete(info.?.user_id, id_str);
+    return resp;
 }
 
 fn statusResponse(app_state: *app.App, allocator: std.mem.Allocator, user: users.User, st: statuses.Status) Response {
@@ -6174,6 +6180,65 @@ test "DELETE /api/v1/statuses delivers Delete to followers" {
     try std.testing.expect(try @import("crypto_rsa.zig").verifyRsaSha256Pem(keys.public_key_pem, signing_string, sig_bytes));
 }
 
+test "DELETE /api/v1/statuses publishes streaming delete" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    const sub = try app_state.streaming.subscribe(user_id, &.{.user});
+    defer app_state.streaming.unsubscribe(sub);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const app_creds = try oauth.createApp(&app_state.conn, a, "pl-fe", "urn:ietf:wg:oauth:2.0:oob", "read write", "");
+    const token = try oauth.createAccessToken(&app_state.conn, a, app_creds.id, user_id, "read write");
+    const auth_header = try std.fmt.allocPrint(a, "Bearer {s}", .{token});
+
+    const create_resp = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/api/v1/statuses",
+        .content_type = "application/x-www-form-urlencoded",
+        .body = "status=bye&visibility=public",
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, create_resp.status);
+
+    // Drain the create update.
+    const msg_update = sub.pop() orelse {
+        try std.testing.expect(false);
+        return;
+    };
+    defer app_state.streaming.allocator.free(msg_update);
+
+    var create_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, create_resp.body, .{});
+    defer create_json.deinit();
+    const id = create_json.value.object.get("id").?.string;
+
+    const del_target = try std.fmt.allocPrint(a, "/api/v1/statuses/{s}", .{id});
+    const del_resp = handle(&app_state, a, .{
+        .method = .DELETE,
+        .target = del_target,
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, del_resp.status);
+
+    const msg_delete = sub.pop() orelse {
+        try std.testing.expect(false);
+        return;
+    };
+    defer app_state.streaming.allocator.free(msg_delete);
+
+    var env_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, msg_delete, .{});
+    defer env_json.deinit();
+
+    try std.testing.expectEqualStrings("delete", env_json.value.object.get("event").?.string);
+    try std.testing.expectEqualStrings(id, env_json.value.object.get("payload").?.string);
+}
+
 test "DELETE /api/v1/statuses visibility=private delivers Delete without Public recipients" {
     var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
     defer app_state.deinit();
@@ -6566,6 +6631,82 @@ test "POST /users/:name/inbox Delete marks remote status deleted" {
     try std.testing.expect((try remote_statuses.lookupByUri(&app_state.conn, a, "https://remote.test/notes/1")) == null);
     const st2 = (try remote_statuses.lookupByUriIncludingDeleted(&app_state.conn, a, "https://remote.test/notes/1")).?;
     try std.testing.expectEqualStrings(deleted_ts, st2.deleted_at.?);
+}
+
+test "POST /users/:name/inbox Delete publishes streaming delete" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    const sub = try app_state.streaming.subscribe(user_id, &.{.user});
+    defer app_state.streaming.unsubscribe(sub);
+
+    try remote_actors.upsert(&app_state.conn, .{
+        .id = "https://remote.test/users/bob",
+        .inbox = "https://remote.test/users/bob/inbox",
+        .shared_inbox = null,
+        .preferred_username = "bob",
+        .domain = "remote.test",
+        .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
+    });
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const create_body =
+        \\{"@context":"https://www.w3.org/ns/activitystreams","type":"Create","actor":"https://remote.test/users/bob","object":{"id":"https://remote.test/notes/1","type":"Note","content":"<p>Hello</p>","published":"2020-01-01T00:00:00.000Z"}}
+    ;
+
+    const create_resp = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/users/alice/inbox",
+        .content_type = "application/activity+json",
+        .body = create_body,
+    });
+    try std.testing.expectEqual(std.http.Status.accepted, create_resp.status);
+
+    // Drain the create update and capture the remote API id.
+    const msg_update = sub.pop() orelse {
+        try std.testing.expect(false);
+        return;
+    };
+    defer app_state.streaming.allocator.free(msg_update);
+
+    var env_update = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, msg_update, .{});
+    defer env_update.deinit();
+    const payload_str = env_update.value.object.get("payload").?.string;
+
+    var payload_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, payload_str, .{});
+    defer payload_json.deinit();
+    const remote_id = payload_json.value.object.get("id").?.string;
+    try std.testing.expect(std.mem.startsWith(u8, remote_id, "-"));
+
+    const delete_body =
+        \\{"@context":"https://www.w3.org/ns/activitystreams","type":"Delete","actor":"https://remote.test/users/bob","object":"https://remote.test/notes/1"}
+    ;
+
+    const delete_resp = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/users/alice/inbox",
+        .content_type = "application/activity+json",
+        .body = delete_body,
+    });
+    try std.testing.expectEqual(std.http.Status.accepted, delete_resp.status);
+
+    const msg_delete = sub.pop() orelse {
+        try std.testing.expect(false);
+        return;
+    };
+    defer app_state.streaming.allocator.free(msg_delete);
+
+    var env_delete = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, msg_delete, .{});
+    defer env_delete.deinit();
+
+    try std.testing.expectEqualStrings("delete", env_delete.value.object.get("event").?.string);
+    try std.testing.expectEqualStrings(remote_id, env_delete.value.object.get("payload").?.string);
 }
 
 fn headerValue(headers: []const std.http.Header, name: []const u8) ?[]const u8 {
