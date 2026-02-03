@@ -1292,7 +1292,7 @@ fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: Request, pa
             break :blk "direct";
         };
 
-        _ = remote_statuses.createIfNotExists(
+        const created = remote_statuses.createIfNotExists(
             &app_state.conn,
             allocator,
             note_id_val.string,
@@ -1301,6 +1301,9 @@ fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: Request, pa
             visibility,
             created_at,
         ) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+        const st_resp = remoteStatusResponse(app_state, allocator, remote_actor.?, created);
+        app_state.streaming.publishUpdate(user.?.id, st_resp.body);
 
         dedupe_keep = true;
         return .{ .status = .accepted, .body = "ok\n" };
@@ -1614,7 +1617,9 @@ fn createStatus(app_state: *app.App, allocator: std.mem.Allocator, req: Request)
 
     background.deliverStatusToFollowers(app_state, allocator, info.?.user_id, st.id);
 
-    return statusResponse(app_state, allocator, user.?, st);
+    const resp = statusResponse(app_state, allocator, user.?, st);
+    app_state.streaming.publishUpdate(info.?.user_id, resp.body);
+    return resp;
 }
 
 fn createMedia(app_state: *app.App, allocator: std.mem.Allocator, req: Request) Response {
@@ -4601,6 +4606,53 @@ test "statuses: create + get + home timeline" {
     try std.testing.expectEqualStrings(id, tl_json.value.array.items[0].object.get("id").?.string);
 }
 
+test "POST /api/v1/statuses publishes streaming update" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    const sub = try app_state.streaming.subscribe(user_id, &.{.user});
+    defer app_state.streaming.unsubscribe(sub);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const app_creds = try oauth.createApp(
+        &app_state.conn,
+        a,
+        "pl-fe",
+        "urn:ietf:wg:oauth:2.0:oob",
+        "read write",
+        "",
+    );
+    const token = try oauth.createAccessToken(&app_state.conn, a, app_creds.id, user_id, "read write");
+    const auth_header = try std.fmt.allocPrint(a, "Bearer {s}", .{token});
+
+    const create_resp = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/api/v1/statuses",
+        .content_type = "application/x-www-form-urlencoded",
+        .body = "status=hello&visibility=public",
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, create_resp.status);
+
+    const msg = sub.pop() orelse {
+        try std.testing.expect(false);
+        return;
+    };
+    defer app_state.streaming.allocator.free(msg);
+
+    var env_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, msg, .{});
+    defer env_json.deinit();
+
+    try std.testing.expectEqualStrings("update", env_json.value.object.get("event").?.string);
+    try std.testing.expectEqualStrings(create_resp.body, env_json.value.object.get("payload").?.string);
+}
+
 test "statuses: context endpoint returns empty arrays" {
     var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
     defer app_state.deinit();
@@ -5266,6 +5318,9 @@ test "remote statuses: appear in home timeline and can be fetched" {
 
     const local_id = local_json.value.object.get("id").?.string;
 
+    const sub = try app_state.streaming.subscribe(user_id, &.{.user});
+    defer app_state.streaming.unsubscribe(sub);
+
     try remote_actors.upsert(&app_state.conn, .{
         .id = "https://remote.test/users/bob",
         .inbox = "https://remote.test/users/bob/inbox",
@@ -5287,6 +5342,24 @@ test "remote statuses: appear in home timeline and can be fetched" {
     });
     try std.testing.expectEqual(std.http.Status.accepted, inbox_resp.status);
 
+    const msg = sub.pop() orelse {
+        try std.testing.expect(false);
+        return;
+    };
+    defer app_state.streaming.allocator.free(msg);
+
+    var env_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, msg, .{});
+    defer env_json.deinit();
+    try std.testing.expectEqualStrings("update", env_json.value.object.get("event").?.string);
+
+    const payload_str = env_json.value.object.get("payload").?.string;
+    var payload_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, payload_str, .{});
+    defer payload_json.deinit();
+
+    const remote_id_copy = try a.dupe(u8, payload_json.value.object.get("id").?.string);
+    try std.testing.expect(std.mem.startsWith(u8, remote_id_copy, "-"));
+    try std.testing.expectEqualStrings("<p>Remote</p>", payload_json.value.object.get("content").?.string);
+
     const tl_resp = handle(&app_state, a, .{
         .method = .GET,
         .target = "/api/v1/timelines/home",
@@ -5303,6 +5376,7 @@ test "remote statuses: appear in home timeline and can be fetched" {
     const second_id = tl_json.value.array.items[1].object.get("id").?.string;
 
     try std.testing.expect(std.mem.startsWith(u8, first_id, "-"));
+    try std.testing.expectEqualStrings(remote_id_copy, first_id);
     try std.testing.expectEqualStrings(local_id, second_id);
     try std.testing.expectEqualStrings("<p>Remote</p>", tl_json.value.array.items[0].object.get("content").?.string);
     try std.testing.expectEqualStrings(
