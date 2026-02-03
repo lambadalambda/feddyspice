@@ -91,6 +91,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Moved NodeInfo/host-meta handlers into `src/http/discovery.zig`.
 - Moved instance endpoints into `src/http/instance.zig`.
 - Added `src/http/common.zig` for shared HTTP helpers used across handler modules.
+- Moved WebFinger handler into `src/http/discovery.zig`.
 
 ### Fixed
 

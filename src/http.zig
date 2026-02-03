@@ -114,7 +114,7 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
     }
 
     if (req.method == .GET and std.mem.eql(u8, path, "/.well-known/webfinger")) {
-        return webfinger(app_state, allocator, req);
+        return discovery.webfinger(app_state, allocator, req);
     }
 
     if (req.method == .GET and std.mem.eql(u8, path, "/.well-known/host-meta")) {
@@ -663,53 +663,6 @@ fn userUrlAlloc(app_state: *app.App, allocator: std.mem.Allocator, username: []c
         app_state.cfg.domain,
         username,
     });
-}
-
-fn webfinger(app_state: *app.App, allocator: std.mem.Allocator, req: Request) Response {
-    const q = queryString(req.target);
-    const resource = parseQueryParam(allocator, q, "resource") catch
-        return .{ .status = .bad_request, .body = "invalid query\n" };
-    if (resource == null) return .{ .status = .bad_request, .body = "missing resource\n" };
-
-    const prefix = "acct:";
-    if (!std.mem.startsWith(u8, resource.?, prefix)) return .{ .status = .not_found, .body = "not found\n" };
-
-    const acct = resource.?[prefix.len..];
-    const at = std.mem.indexOfScalar(u8, acct, '@') orelse return .{ .status = .not_found, .body = "not found\n" };
-    const username = acct[0..at];
-    const domain = acct[at + 1 ..];
-    if (!std.mem.eql(u8, domain, app_state.cfg.domain)) return .{ .status = .not_found, .body = "not found\n" };
-
-    const user = users.lookupUserByUsername(&app_state.conn, allocator, username) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-    if (user == null) return .{ .status = .not_found, .body = "not found\n" };
-
-    const base = baseUrlAlloc(app_state, allocator) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-
-    const href = std.fmt.allocPrint(allocator, "{s}/users/{s}", .{ base, username }) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-
-    const Link = struct {
-        rel: []const u8,
-        type: []const u8,
-        href: []const u8,
-    };
-
-    const payload = .{
-        .subject = resource.?,
-        .links = [_]Link{
-            .{ .rel = "self", .type = "application/activity+json", .href = href },
-        },
-    };
-
-    const body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-
-    return .{
-        .content_type = "application/jrd+json; charset=utf-8",
-        .body = body,
-    };
 }
 
 fn actorGet(app_state: *app.App, allocator: std.mem.Allocator, path: []const u8) Response {
@@ -3759,14 +3712,11 @@ fn safeReturnTo(return_to: ?[]const u8) ?[]const u8 {
 }
 
 fn queryString(target: []const u8) []const u8 {
-    const idx = std.mem.indexOfScalar(u8, target, '?') orelse return "";
-    return target[idx + 1 ..];
+    return common.queryString(target);
 }
 
 fn parseQueryParam(allocator: std.mem.Allocator, query: []const u8, name: []const u8) !?[]const u8 {
-    if (query.len == 0) return null;
-    var parsed = try form.parse(allocator, query);
-    return parsed.get(name);
+    return common.parseQueryParam(allocator, query, name);
 }
 
 fn percentEncodeAlloc(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {
