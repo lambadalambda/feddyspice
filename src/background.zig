@@ -317,6 +317,9 @@ const SendFollowJob = struct {
         var conn = db.Db.open(a, job.cfg.db_path) catch return;
         defer conn.close();
 
+        var hub: streaming_hub.Hub = streaming_hub.Hub.init(std.heap.page_allocator);
+        defer hub.deinit();
+
         var thread_app: app.App = .{
             .allocator = a,
             .cfg = job.cfg,
@@ -324,7 +327,7 @@ const SendFollowJob = struct {
             .logger = job.logger,
             .jobs_mode = .sync,
             .jobs_queue = .{},
-            .streaming = streaming_hub.Hub.init(std.heap.page_allocator),
+            .streaming = &hub,
             .transport = undefined,
             .null_transport = transport.NullTransport.init(),
             .real_transport = transport.RealTransport.init(a, job.cfg) catch return,
@@ -363,6 +366,9 @@ const AcceptInboundFollowJob = struct {
         var conn = db.Db.open(a, job.cfg.db_path) catch return;
         defer conn.close();
 
+        var hub: streaming_hub.Hub = streaming_hub.Hub.init(std.heap.page_allocator);
+        defer hub.deinit();
+
         var thread_app: app.App = .{
             .allocator = a,
             .cfg = job.cfg,
@@ -370,7 +376,7 @@ const AcceptInboundFollowJob = struct {
             .logger = job.logger,
             .jobs_mode = .sync,
             .jobs_queue = .{},
-            .streaming = streaming_hub.Hub.init(std.heap.page_allocator),
+            .streaming = &hub,
             .transport = undefined,
             .null_transport = transport.NullTransport.init(),
             .real_transport = transport.RealTransport.init(a, job.cfg) catch return,
@@ -405,6 +411,9 @@ const DeliverStatusJob = struct {
         var conn = db.Db.open(a, job.cfg.db_path) catch return;
         defer conn.close();
 
+        var hub: streaming_hub.Hub = streaming_hub.Hub.init(std.heap.page_allocator);
+        defer hub.deinit();
+
         var thread_app: app.App = .{
             .allocator = a,
             .cfg = job.cfg,
@@ -412,7 +421,7 @@ const DeliverStatusJob = struct {
             .logger = job.logger,
             .jobs_mode = .sync,
             .jobs_queue = .{},
-            .streaming = streaming_hub.Hub.init(std.heap.page_allocator),
+            .streaming = &hub,
             .transport = undefined,
             .null_transport = transport.NullTransport.init(),
             .real_transport = transport.RealTransport.init(a, job.cfg) catch return,
@@ -445,6 +454,9 @@ const DeliverDeleteJob = struct {
         var conn = db.Db.open(a, job.cfg.db_path) catch return;
         defer conn.close();
 
+        var hub: streaming_hub.Hub = streaming_hub.Hub.init(std.heap.page_allocator);
+        defer hub.deinit();
+
         var thread_app: app.App = .{
             .allocator = a,
             .cfg = job.cfg,
@@ -452,7 +464,7 @@ const DeliverDeleteJob = struct {
             .logger = job.logger,
             .jobs_mode = .sync,
             .jobs_queue = .{},
-            .streaming = streaming_hub.Hub.init(std.heap.page_allocator),
+            .streaming = &hub,
             .transport = undefined,
             .null_transport = transport.NullTransport.init(),
             .real_transport = transport.RealTransport.init(a, job.cfg) catch return,

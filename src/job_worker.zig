@@ -52,6 +52,8 @@ const Worker = struct {
         };
         const null_transport = transport.NullTransport.init();
 
+        var hub: streaming_hub.Hub = streaming_hub.Hub.init(std.heap.page_allocator);
+
         var thread_app: app.App = .{
             .allocator = std.heap.page_allocator,
             .cfg = self.cfg,
@@ -59,7 +61,7 @@ const Worker = struct {
             .logger = self.logger,
             .jobs_mode = .sync,
             .jobs_queue = .{},
-            .streaming = streaming_hub.Hub.init(std.heap.page_allocator),
+            .streaming = &hub,
             .transport = undefined,
             .null_transport = null_transport,
             .real_transport = real_transport,

@@ -107,7 +107,7 @@ pub fn serveOnce(app_state: *app.App, listener: *net.Server) !void {
         const handler = try std.heap.page_allocator.create(StreamingHandler);
         handler.* = .{
             .logger = app_state.logger,
-            .hub = &app_state.streaming,
+            .hub = app_state.streaming,
             .sub = sub,
             .stream = conn.stream,
         };

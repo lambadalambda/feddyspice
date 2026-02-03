@@ -16,7 +16,7 @@ pub const App = struct {
     logger: *log.Logger,
     jobs_mode: jobs.Mode,
     jobs_queue: jobs.Queue = .{},
-    streaming: streaming_hub.Hub,
+    streaming: *streaming_hub.Hub,
     transport: transport.Transport,
     null_transport: transport.NullTransport,
     real_transport: transport.RealTransport,
@@ -41,6 +41,10 @@ pub const App = struct {
         var real_transport = try transport.RealTransport.init(allocator, cfg);
         errdefer real_transport.deinit();
 
+        const hub = try std.heap.page_allocator.create(streaming_hub.Hub);
+        errdefer std.heap.page_allocator.destroy(hub);
+        hub.* = streaming_hub.Hub.init(std.heap.page_allocator);
+
         app_state.* = .{
             .allocator = allocator,
             .cfg = cfg,
@@ -48,7 +52,7 @@ pub const App = struct {
             .logger = logger,
             .jobs_mode = cfg.jobs_mode,
             .jobs_queue = .{},
-            .streaming = streaming_hub.Hub.init(std.heap.page_allocator),
+            .streaming = hub,
             .transport = undefined,
             .null_transport = transport.NullTransport.init(),
             .real_transport = real_transport,
@@ -81,6 +85,10 @@ pub const App = struct {
         errdefer allocator.destroy(logger);
         logger.* = log.Logger.initNull();
 
+        const hub = try std.heap.page_allocator.create(streaming_hub.Hub);
+        errdefer std.heap.page_allocator.destroy(hub);
+        hub.* = streaming_hub.Hub.init(std.heap.page_allocator);
+
         var app_state: App = .{
             .allocator = allocator,
             .cfg = cfg,
@@ -88,7 +96,7 @@ pub const App = struct {
             .logger = logger,
             .jobs_mode = cfg.jobs_mode,
             .jobs_queue = .{},
-            .streaming = streaming_hub.Hub.init(std.heap.page_allocator),
+            .streaming = hub,
             .transport = undefined,
             .null_transport = transport.NullTransport.init(),
             .real_transport = undefined,
@@ -101,6 +109,7 @@ pub const App = struct {
     pub fn deinit(app: *App) void {
         app.jobs_queue.deinit(app.allocator);
         app.streaming.deinit();
+        std.heap.page_allocator.destroy(app.streaming);
         app.transport.deinit();
         app.conn.close();
         app.cfg.deinit(app.allocator);
