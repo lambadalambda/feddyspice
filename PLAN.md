@@ -106,9 +106,9 @@ This is the “eventually” list. We should keep it scoped to what pl-fe needs,
 
 - [x] `DELETE /api/v1/statuses/:id` (delete local status)
 - [x] `GET /api/v1/statuses/:id/context`
-- [ ] `POST /api/v1/statuses/:id/favourite` + `POST /api/v1/statuses/:id/unfavourite`
-- [ ] `POST /api/v1/statuses/:id/reblog` + `POST /api/v1/statuses/:id/unreblog`
-- [ ] `POST /api/v1/statuses/:id/bookmark` + `POST /api/v1/statuses/:id/unbookmark`
+- [x] `POST /api/v1/statuses/:id/favourite` + `POST /api/v1/statuses/:id/unfavourite`
+- [x] `POST /api/v1/statuses/:id/reblog` + `POST /api/v1/statuses/:id/unreblog`
+- [x] `POST /api/v1/statuses/:id/bookmark` + `POST /api/v1/statuses/:id/unbookmark`
 
 ### Timelines
 
