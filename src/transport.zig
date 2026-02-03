@@ -20,6 +20,7 @@ pub const Error =
         OutboundUrlInvalid,
         ResolveFailed,
         SsrfBlocked,
+        ResponseTooLarge,
     };
 
 pub const FetchOptions = struct {
@@ -30,6 +31,7 @@ pub const FetchOptions = struct {
     payload: ?[]const u8 = null,
     keep_alive: bool = false,
     redirect_behavior: std.http.Client.Request.RedirectBehavior = .unhandled,
+    max_body_bytes: ?usize = null,
 };
 
 pub const Response = struct {
@@ -83,6 +85,7 @@ pub const RealTransport = struct {
     client: std.http.Client,
     timeout_ms: u32,
     allow_private_networks: bool,
+    max_body_bytes: usize,
 
     pub fn init(allocator: std.mem.Allocator, cfg: config.Config) !RealTransport {
         var client: std.http.Client = .{ .allocator = allocator };
@@ -97,6 +100,7 @@ pub const RealTransport = struct {
             .client = client,
             .timeout_ms = cfg.http_timeout_ms,
             .allow_private_networks = cfg.allow_private_networks,
+            .max_body_bytes = cfg.http_max_body_bytes,
         };
     }
 
@@ -124,6 +128,7 @@ pub const RealTransport = struct {
 
     fn fetch(ctx: *anyopaque, allocator: std.mem.Allocator, opts: FetchOptions) Error!Response {
         const self: *RealTransport = @ptrCast(@alignCast(ctx));
+        const max_body_bytes = opts.max_body_bytes orelse self.max_body_bytes;
 
         const uri = try std.Uri.parse(opts.url);
         try validateOutboundUri(allocator, uri, self.allow_private_networks);
@@ -152,18 +157,14 @@ pub const RealTransport = struct {
         var redirect_buf: [8 * 1024]u8 = undefined;
         var response = try req.receiveHead(&redirect_buf);
 
-        var aw: std.Io.Writer.Allocating = .init(allocator);
-        errdefer aw.deinit();
-
         var transfer_buf: [64]u8 = undefined;
-        const reader = response.reader(&transfer_buf);
-        _ = reader.streamRemaining(&aw.writer) catch |err| switch (err) {
+        var reader = response.reader(&transfer_buf);
+        const limit: std.Io.Limit = if (max_body_bytes == 0) .unlimited else .limited(max_body_bytes);
+        const body_bytes = reader.allocRemaining(allocator, limit) catch |err| switch (err) {
+            error.StreamTooLong => return error.ResponseTooLarge,
             error.ReadFailed => return response.bodyErr().?,
             else => |e| return e,
         };
-
-        const body_bytes = try aw.toOwnedSlice();
-        aw.deinit();
 
         return .{
             .status = response.head.status,
@@ -355,5 +356,74 @@ test "RealTransport blocks outbound loopback by default" {
     try std.testing.expectError(error.SsrfBlocked, t.fetch(allocator, .{
         .url = "http://127.0.0.1:1",
         .method = .GET,
+    }));
+}
+
+test "RealTransport enforces max_body_bytes" {
+    const allocator = std.testing.allocator;
+    const jobs = @import("jobs.zig");
+    const password = @import("password.zig");
+
+    const addr = try std.net.Address.parseIp("127.0.0.1", 0);
+    var server = try addr.listen(.{ .reuse_address = true });
+    defer server.deinit();
+    const port = server.listen_address.getPort();
+
+    const body_len: usize = 2048;
+    const t = try std.Thread.spawn(.{}, struct {
+        fn run(listener: *std.net.Server, len: usize) void {
+            var conn = listener.accept() catch return;
+            defer conn.stream.close();
+
+            var req_buf: [1024]u8 = undefined;
+            _ = conn.stream.read(&req_buf) catch {};
+
+            var write_buf: [4096]u8 = undefined;
+            var w = std.net.Stream.Writer.init(conn.stream, &write_buf);
+            w.interface.print(
+                "HTTP/1.1 200 OK\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n",
+                .{len},
+            ) catch return;
+
+            var chunk: [1024]u8 = undefined;
+            @memset(chunk[0..], 'a');
+
+            var remaining: usize = len;
+            while (remaining > 0) {
+                const n = @min(remaining, chunk.len);
+                w.interface.writeAll(chunk[0..n]) catch return;
+                remaining -= n;
+            }
+            w.interface.flush() catch {};
+        }
+    }.run, .{ &server, body_len });
+    defer t.join();
+
+    var cfg: config.Config = .{
+        .domain = try allocator.dupe(u8, "example.test"),
+        .scheme = .http,
+        .listen_address = try std.net.Address.parseIp("127.0.0.1", 0),
+        .db_path = try allocator.dupe(u8, ":memory:"),
+        .ca_cert_file = null,
+        .allow_private_networks = true,
+        .log_file = null,
+        .log_level = .err,
+        .password_params = password.Params{ .t = 1, .m = 8, .p = 1 },
+        .http_timeout_ms = 1000,
+        .jobs_mode = jobs.Mode.disabled,
+    };
+    defer cfg.deinit(allocator);
+
+    var real = try RealTransport.init(allocator, cfg);
+    var tr = real.transport();
+    defer tr.deinit();
+
+    const url = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/", .{port});
+    defer allocator.free(url);
+
+    try std.testing.expectError(error.ResponseTooLarge, tr.fetch(allocator, .{
+        .url = url,
+        .method = .GET,
+        .max_body_bytes = 1024,
     }));
 }

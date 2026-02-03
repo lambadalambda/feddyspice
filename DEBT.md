@@ -19,7 +19,7 @@ This file tracks “good future refactors” and known risks. Add items whenever
 ## Performance / robustness
 
 - `src/server.zig` allocates response header arrays via `std.heap.page_allocator` per request; consider using the request arena (or stack/static headers) to reduce alloc churn.
-- Outbound fetches (`src/transport.zig`) have no maximum response size and currently read entire bodies into memory; add a `max_body_bytes` guard (especially for WebFinger + actor-doc fetches) to prevent OOM on malicious/buggy remotes.
+- Outbound fetches now enforce a maximum response size (`FEDDYSPICE_HTTP_MAX_BODY_BYTES`); consider per-request overrides for known-safe endpoints if needed.
 
 ## Security
 
