@@ -104,6 +104,11 @@ const migrations = [_]Migration{
         .name = "create_inbox_dedupe",
         .sql = inbox_dedupe_v11_sql,
     },
+    .{
+        .version = 12,
+        .name = "create_media",
+        .sql = media_v12_sql,
+    },
 };
 
 const schema_migrations_sql: [:0]const u8 =
@@ -287,6 +292,28 @@ const inbox_dedupe_v11_sql: [:0]const u8 =
     \\CREATE INDEX IF NOT EXISTS inbox_dedupe_user_id_received_at_ms ON inbox_dedupe(user_id, received_at_ms);
 ++ "\x00";
 
+const media_v12_sql: [:0]const u8 =
+    \\CREATE TABLE IF NOT EXISTS media_attachments (
+    \\  id INTEGER PRIMARY KEY,
+    \\  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    \\  content_type TEXT NOT NULL,
+    \\  data BLOB NOT NULL,
+    \\  description TEXT,
+    \\  created_at_ms INTEGER NOT NULL,
+    \\  updated_at_ms INTEGER NOT NULL
+    \\);
+    \\CREATE INDEX IF NOT EXISTS media_attachments_user_id_created_at_ms ON media_attachments(user_id, created_at_ms);
+    \\
+    \\CREATE TABLE IF NOT EXISTS status_media_attachments (
+    \\  status_id INTEGER NOT NULL REFERENCES statuses(id) ON DELETE CASCADE,
+    \\  media_id INTEGER NOT NULL REFERENCES media_attachments(id) ON DELETE CASCADE,
+    \\  position INTEGER NOT NULL,
+    \\  PRIMARY KEY(status_id, media_id),
+    \\  UNIQUE(media_id)
+    \\);
+    \\CREATE INDEX IF NOT EXISTS status_media_attachments_media_id ON status_media_attachments(media_id);
+++ "\x00";
+
 test "migrate: creates users table and records version" {
     var conn = try db.Db.openZ(":memory:");
     defer conn.close();
@@ -325,6 +352,8 @@ test "migrate: creates users table and records version" {
     try std.testing.expectEqual(@as(i64, 10), v_stmt.columnInt64(0));
     try std.testing.expectEqual(db.Stmt.Step.row, try v_stmt.step());
     try std.testing.expectEqual(@as(i64, 11), v_stmt.columnInt64(0));
+    try std.testing.expectEqual(db.Stmt.Step.row, try v_stmt.step());
+    try std.testing.expectEqual(@as(i64, 12), v_stmt.columnInt64(0));
     try std.testing.expectEqual(db.Stmt.Step.done, try v_stmt.step());
 }
 
@@ -339,6 +368,6 @@ test "migrate: is idempotent" {
     defer stmt.finalize();
 
     try std.testing.expectEqual(db.Stmt.Step.row, try stmt.step());
-    try std.testing.expectEqual(@as(i64, 11), stmt.columnInt64(0));
+    try std.testing.expectEqual(@as(i64, 12), stmt.columnInt64(0));
     try std.testing.expectEqual(db.Stmt.Step.done, try stmt.step());
 }
