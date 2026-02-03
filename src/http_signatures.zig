@@ -250,7 +250,8 @@ pub fn verifyRequestSignaturePem(
     const parsed = parseSignatureHeader(signature_header_value) orelse return error.InvalidSignatureHeader;
 
     if (parsed.algorithm) |alg| {
-        if (!std.ascii.eqlIgnoreCase(alg, "rsa-sha256")) return false;
+        // Some implementations send `hs2019` here but still use RSA-SHA256.
+        if (!std.ascii.eqlIgnoreCase(alg, "rsa-sha256") and !std.ascii.eqlIgnoreCase(alg, "hs2019")) return false;
     }
 
     const headers = parsed.headers orelse return error.InvalidSignatureHeader;
