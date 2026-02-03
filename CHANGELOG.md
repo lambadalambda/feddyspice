@@ -99,6 +99,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Added `src/http/urls.zig` to share URL-building helpers across HTTP modules.
 - Added `src/http/mastodon.zig` for shared Mastodon API payload structs + builders (accounts/statuses/media).
 - Added `src/http/accounts_api.zig` and moved core account endpoints (`verify_credentials`, `update_credentials`, `lookup`).
+- Moved remaining account/search endpoints into `src/http/accounts_api.zig` (`GET /api/v2/search`, `/api/v1/accounts/:id`, relationships, follow/unfollow, followers/following, statuses).
 - Added `src/http/statuses_api.zig` and moved status endpoints (`POST /api/v1/statuses`, `GET /api/v1/statuses/:id`, `GET /api/v1/statuses/:id/context`, `DELETE /api/v1/statuses/:id`, and no-op action endpoints).
 - Added `src/http/timelines_api.zig` and moved timeline endpoints (`GET /api/v1/timelines/home`, `GET /api/v1/timelines/public`).
 

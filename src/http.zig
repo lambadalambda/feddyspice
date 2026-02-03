@@ -264,7 +264,7 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
     }
 
     if (req.method == .GET and std.mem.eql(u8, path, "/api/v2/search")) {
-        return apiV2Search(app_state, allocator, req);
+        return accounts_api.apiV2Search(app_state, allocator, req);
     }
 
     if (std.mem.eql(u8, path, "/api/v1/markers")) {
@@ -319,33 +319,33 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
     }
 
     if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/accounts/relationships")) {
-        return accountRelationships(app_state, allocator, req);
+        return accounts_api.accountRelationships(app_state, allocator, req);
     }
 
     if (req.method == .GET and std.mem.startsWith(u8, path, "/api/v1/accounts/") and std.mem.endsWith(u8, path, "/statuses")) {
-        return accountStatuses(app_state, allocator, req, path);
+        return accounts_api.accountStatuses(app_state, allocator, req, path);
     }
 
     if (req.method == .GET and std.mem.startsWith(u8, path, "/api/v1/accounts/") and std.mem.endsWith(u8, path, "/followers")) {
-        return accountFollowers(app_state, allocator, req, path);
+        return accounts_api.accountFollowers(app_state, allocator, req, path);
     }
 
     if (req.method == .GET and std.mem.startsWith(u8, path, "/api/v1/accounts/") and std.mem.endsWith(u8, path, "/following")) {
-        return accountFollowing(app_state, allocator, req, path);
+        return accounts_api.accountFollowing(app_state, allocator, req, path);
     }
 
     if (req.method == .POST and std.mem.startsWith(u8, path, "/api/v1/accounts/") and std.mem.endsWith(u8, path, "/follow")) {
-        return accountFollow(app_state, allocator, req, path);
+        return accounts_api.accountFollow(app_state, allocator, req, path);
     }
 
     if (req.method == .POST and std.mem.startsWith(u8, path, "/api/v1/accounts/") and std.mem.endsWith(u8, path, "/unfollow")) {
-        return accountUnfollow(app_state, allocator, req, path);
+        return accounts_api.accountUnfollow(app_state, allocator, req, path);
     }
 
     if (req.method == .GET and std.mem.startsWith(u8, path, "/api/v1/accounts/")) {
         const rest = path["/api/v1/accounts/".len..];
         if (std.mem.indexOfScalar(u8, rest, '/') == null) {
-            return accountGet(app_state, allocator, path);
+            return accounts_api.accountGet(app_state, allocator, path);
         }
     }
 
@@ -1608,427 +1608,6 @@ fn remoteStatusResponse(app_state: *app.App, allocator: std.mem.Allocator, actor
 
 fn textToHtmlAlloc(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
     return util_html.textToHtmlAlloc(allocator, text);
-}
-
-fn apiV2Search(app_state: *app.App, allocator: std.mem.Allocator, req: Request) Response {
-    const q = queryString(req.target);
-    const q_param = parseQueryParam(allocator, q, "q") catch
-        return .{ .status = .bad_request, .body = "invalid query\n" };
-
-    const query_raw = q_param orelse return jsonOk(allocator, .{
-        .accounts = [_]i32{},
-        .statuses = [_]i32{},
-        .hashtags = [_]i32{},
-    });
-
-    const query_trimmed = std.mem.trim(u8, query_raw, " \t\r\n");
-    if (query_trimmed.len == 0) return jsonOk(allocator, .{
-        .accounts = [_]i32{},
-        .statuses = [_]i32{},
-        .hashtags = [_]i32{},
-    });
-
-    var accounts: std.ArrayListUnmanaged(AccountPayload) = .empty;
-    defer accounts.deinit(allocator);
-
-    // Minimal: resolve acct handles like `@user@domain` / `user@domain`.
-    if (!std.mem.startsWith(u8, query_trimmed, "http://") and
-        !std.mem.startsWith(u8, query_trimmed, "https://") and
-        std.mem.indexOfScalar(u8, query_trimmed, '@') != null)
-    {
-        const actor = federation.resolveRemoteActorByHandle(app_state, allocator, query_trimmed) catch null;
-        if (actor) |a| {
-            const api_id = remoteAccountApiIdAlloc(app_state, allocator, a.id);
-            accounts.append(allocator, makeRemoteAccountPayload(app_state, allocator, api_id, a)) catch
-                return .{ .status = .internal_server_error, .body = "internal server error\n" };
-        }
-    }
-
-    return jsonOk(allocator, .{
-        .accounts = accounts.items,
-        .statuses = [_]i32{},
-        .hashtags = [_]i32{},
-    });
-}
-
-fn accountGet(app_state: *app.App, allocator: std.mem.Allocator, path: []const u8) Response {
-    const prefix = "/api/v1/accounts/";
-    if (!std.mem.startsWith(u8, path, prefix)) return .{ .status = .not_found, .body = "not found\n" };
-
-    const id_str = path[prefix.len..];
-    const id = std.fmt.parseInt(i64, id_str, 10) catch
-        return .{ .status = .not_found, .body = "not found\n" };
-
-    if (id >= remote_actor_id_base) {
-        const rowid = id - remote_actor_id_base;
-        if (rowid <= 0) return .{ .status = .not_found, .body = "not found\n" };
-
-        const actor = remote_actors.lookupByRowId(&app_state.conn, allocator, rowid) catch
-            return .{ .status = .internal_server_error, .body = "internal server error\n" };
-        if (actor == null) return .{ .status = .not_found, .body = "not found\n" };
-
-        return jsonOk(allocator, makeRemoteAccountPayload(app_state, allocator, id_str, actor.?));
-    }
-
-    const user = users.lookupUserById(&app_state.conn, allocator, id) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-    if (user == null) return .{ .status = .not_found, .body = "not found\n" };
-
-    return accountByUser(app_state, allocator, user.?);
-}
-
-fn accountRelationships(app_state: *app.App, allocator: std.mem.Allocator, req: Request) Response {
-    const token = bearerToken(req.authorization) orelse return unauthorized(allocator);
-    const info = oauth.verifyAccessToken(&app_state.conn, allocator, token) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-    if (info == null) return unauthorized(allocator);
-
-    const q = queryString(req.target);
-
-    var ids: std.ArrayListUnmanaged([]const u8) = .empty;
-    defer ids.deinit(allocator);
-
-    var it = std.mem.splitScalar(u8, q, '&');
-    while (it.next()) |pair_raw| {
-        if (pair_raw.len == 0) continue;
-        const eq = std.mem.indexOfScalar(u8, pair_raw, '=') orelse continue;
-
-        const key = pair_raw[0..eq];
-        const value = pair_raw[eq + 1 ..];
-        if (value.len == 0) continue;
-
-        if (std.mem.eql(u8, key, "id") or std.mem.eql(u8, key, "id[]") or std.mem.eql(u8, key, "id%5B%5D")) {
-            ids.append(allocator, value) catch
-                return .{ .status = .internal_server_error, .body = "internal server error\n" };
-        }
-    }
-
-    const Rel = struct {
-        id: []const u8,
-        following: bool = false,
-        followed_by: bool = false,
-        requested: bool = false,
-    };
-    var rels: std.ArrayListUnmanaged(Rel) = .empty;
-    defer rels.deinit(allocator);
-
-    for (ids.items) |id_str| {
-        var following = false;
-        var requested = false;
-
-        const id_num = std.fmt.parseInt(i64, id_str, 10) catch null;
-        if (id_num != null and id_num.? >= remote_actor_id_base) {
-            const rowid = id_num.? - remote_actor_id_base;
-            if (rowid > 0) {
-                const actor = remote_actors.lookupByRowId(&app_state.conn, allocator, rowid) catch null;
-                if (actor) |a| {
-                    const f = follows.lookupByUserAndRemoteActorId(&app_state.conn, allocator, info.?.user_id, a.id) catch null;
-                    if (f) |follow| {
-                        following = follow.state == .accepted;
-                        requested = follow.state == .pending;
-                    }
-                }
-            }
-        }
-
-        rels.append(allocator, .{ .id = id_str, .following = following, .requested = requested }) catch
-            return .{ .status = .internal_server_error, .body = "internal server error\n" };
-    }
-
-    const body = std.json.Stringify.valueAlloc(allocator, rels.items, .{}) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-
-    return .{
-        .content_type = "application/json; charset=utf-8",
-        .body = body,
-    };
-}
-
-const RelationshipPayload = struct {
-    id: []const u8,
-    following: bool,
-    followed_by: bool = false,
-    requested: bool,
-};
-
-fn relationshipPayload(id: []const u8, state: ?follows.FollowState) RelationshipPayload {
-    const following = state != null and state.? == .accepted;
-    const requested = state != null and state.? == .pending;
-    return .{ .id = id, .following = following, .requested = requested };
-}
-
-fn accountFollow(app_state: *app.App, allocator: std.mem.Allocator, req: Request, path: []const u8) Response {
-    const token = bearerToken(req.authorization) orelse return unauthorized(allocator);
-    const info = oauth.verifyAccessToken(&app_state.conn, allocator, token) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-    if (info == null) return unauthorized(allocator);
-
-    const prefix = "/api/v1/accounts/";
-    const suffix = "/follow";
-    if (!std.mem.startsWith(u8, path, prefix)) return .{ .status = .not_found, .body = "not found\n" };
-    if (!std.mem.endsWith(u8, path, suffix)) return .{ .status = .not_found, .body = "not found\n" };
-
-    const id_part = path[prefix.len .. path.len - suffix.len];
-    if (id_part.len == 0) return .{ .status = .not_found, .body = "not found\n" };
-    if (std.mem.indexOfScalar(u8, id_part, '/') != null) return .{ .status = .not_found, .body = "not found\n" };
-
-    const account_id = std.fmt.parseInt(i64, id_part, 10) catch
-        return .{ .status = .not_found, .body = "not found\n" };
-
-    if (account_id < remote_actor_id_base) {
-        return jsonOk(allocator, relationshipPayload(id_part, null));
-    }
-
-    const rowid = account_id - remote_actor_id_base;
-    if (rowid <= 0) return .{ .status = .not_found, .body = "not found\n" };
-
-    const actor = remote_actors.lookupByRowId(&app_state.conn, allocator, rowid) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-    if (actor == null) return .{ .status = .not_found, .body = "not found\n" };
-
-    const existing = follows.lookupByUserAndRemoteActorId(&app_state.conn, allocator, info.?.user_id, actor.?.id) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-    if (existing) |f| {
-        return jsonOk(allocator, relationshipPayload(id_part, f.state));
-    }
-
-    const base = baseUrlAlloc(app_state, allocator) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-
-    var id_bytes: [16]u8 = undefined;
-    std.crypto.random.bytes(&id_bytes);
-    const id_hex = std.fmt.bytesToHex(id_bytes, .lower);
-    const follow_activity_id = std.fmt.allocPrint(allocator, "{s}/follows/{s}", .{ base, id_hex[0..] }) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-
-    _ = follows.createPending(&app_state.conn, info.?.user_id, actor.?.id, follow_activity_id) catch |err| switch (err) {
-        error.Sqlite => {
-            const f = follows.lookupByUserAndRemoteActorId(&app_state.conn, allocator, info.?.user_id, actor.?.id) catch null;
-            if (f) |existing_follow| {
-                return jsonOk(allocator, relationshipPayload(id_part, existing_follow.state));
-            }
-            return .{ .status = .internal_server_error, .body = "internal server error\n" };
-        },
-    };
-
-    background.sendFollow(app_state, allocator, info.?.user_id, actor.?.id, follow_activity_id);
-
-    return jsonOk(allocator, relationshipPayload(id_part, .pending));
-}
-
-fn accountUnfollow(app_state: *app.App, allocator: std.mem.Allocator, req: Request, path: []const u8) Response {
-    const token = bearerToken(req.authorization) orelse return unauthorized(allocator);
-    const info = oauth.verifyAccessToken(&app_state.conn, allocator, token) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-    if (info == null) return unauthorized(allocator);
-
-    const prefix = "/api/v1/accounts/";
-    const suffix = "/unfollow";
-    if (!std.mem.startsWith(u8, path, prefix)) return .{ .status = .not_found, .body = "not found\n" };
-    if (!std.mem.endsWith(u8, path, suffix)) return .{ .status = .not_found, .body = "not found\n" };
-
-    const id_part = path[prefix.len .. path.len - suffix.len];
-    if (id_part.len == 0) return .{ .status = .not_found, .body = "not found\n" };
-    if (std.mem.indexOfScalar(u8, id_part, '/') != null) return .{ .status = .not_found, .body = "not found\n" };
-
-    const account_id = std.fmt.parseInt(i64, id_part, 10) catch
-        return .{ .status = .not_found, .body = "not found\n" };
-
-    if (account_id < remote_actor_id_base) {
-        return jsonOk(allocator, relationshipPayload(id_part, null));
-    }
-
-    const rowid = account_id - remote_actor_id_base;
-    if (rowid <= 0) return .{ .status = .not_found, .body = "not found\n" };
-
-    const actor = remote_actors.lookupByRowId(&app_state.conn, allocator, rowid) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-    if (actor == null) return .{ .status = .not_found, .body = "not found\n" };
-
-    _ = follows.deleteByUserAndRemoteActorId(&app_state.conn, info.?.user_id, actor.?.id) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-
-    return jsonOk(allocator, relationshipPayload(id_part, null));
-}
-
-fn accountStatuses(app_state: *app.App, allocator: std.mem.Allocator, req: Request, path: []const u8) Response {
-    const prefix = "/api/v1/accounts/";
-    const suffix = "/statuses";
-    if (!std.mem.startsWith(u8, path, prefix)) return .{ .status = .not_found, .body = "not found\n" };
-    if (!std.mem.endsWith(u8, path, suffix)) return .{ .status = .not_found, .body = "not found\n" };
-
-    const id_part = path[prefix.len .. path.len - suffix.len];
-    if (id_part.len == 0) return .{ .status = .not_found, .body = "not found\n" };
-    if (std.mem.indexOfScalar(u8, id_part, '/') != null) return .{ .status = .not_found, .body = "not found\n" };
-
-    const account_id = std.fmt.parseInt(i64, id_part, 10) catch
-        return .{ .status = .not_found, .body = "not found\n" };
-
-    if (account_id >= remote_actor_id_base) {
-        return jsonOk(allocator, [_]i32{});
-    }
-
-    const user = users.lookupUserById(&app_state.conn, allocator, account_id) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-    if (user == null) return .{ .status = .not_found, .body = "not found\n" };
-
-    const q = queryString(req.target);
-    var params = form.parse(allocator, q) catch form.Form{ .map = .empty };
-
-    const pinned: bool = blk: {
-        const s = params.get("pinned") orelse break :blk false;
-        if (std.ascii.eqlIgnoreCase(s, "true")) break :blk true;
-        if (std.mem.eql(u8, s, "1")) break :blk true;
-        break :blk false;
-    };
-
-    const only_media: bool = blk: {
-        const s = params.get("only_media") orelse break :blk false;
-        if (std.ascii.eqlIgnoreCase(s, "true")) break :blk true;
-        if (std.mem.eql(u8, s, "1")) break :blk true;
-        break :blk false;
-    };
-
-    if (pinned or only_media) {
-        return jsonOk(allocator, [_]i32{});
-    }
-
-    const limit: usize = blk: {
-        const lim_str = params.get("limit") orelse break :blk 20;
-        break :blk std.fmt.parseInt(usize, lim_str, 10) catch 20;
-    };
-
-    const max_id: ?i64 = blk: {
-        const s = params.get("max_id") orelse break :blk null;
-        break :blk std.fmt.parseInt(i64, s, 10) catch null;
-    };
-
-    const include_all: bool = blk: {
-        const token = bearerToken(req.authorization) orelse break :blk false;
-        const info = oauth.verifyAccessToken(&app_state.conn, allocator, token) catch break :blk false;
-        if (info == null) break :blk false;
-        break :blk info.?.user_id == user.?.id;
-    };
-
-    const list = statuses.listByUser(&app_state.conn, allocator, user.?.id, limit, max_id) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-
-    var payloads: std.ArrayListUnmanaged(StatusPayload) = .empty;
-    defer payloads.deinit(allocator);
-
-    for (list) |st| {
-        if (!include_all and !isPubliclyVisibleVisibility(st.visibility)) continue;
-        payloads.append(allocator, makeStatusPayload(app_state, allocator, user.?, st)) catch
-            return .{ .status = .internal_server_error, .body = "internal server error\n" };
-    }
-
-    const body = std.json.Stringify.valueAlloc(allocator, payloads.items, .{}) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-
-    return .{
-        .content_type = "application/json; charset=utf-8",
-        .body = body,
-    };
-}
-
-fn accountFollowers(app_state: *app.App, allocator: std.mem.Allocator, req: Request, path: []const u8) Response {
-    const prefix = "/api/v1/accounts/";
-    const suffix = "/followers";
-    if (!std.mem.startsWith(u8, path, prefix)) return .{ .status = .not_found, .body = "not found\n" };
-    if (!std.mem.endsWith(u8, path, suffix)) return .{ .status = .not_found, .body = "not found\n" };
-
-    const id_part = path[prefix.len .. path.len - suffix.len];
-    if (id_part.len == 0) return .{ .status = .not_found, .body = "not found\n" };
-    if (std.mem.indexOfScalar(u8, id_part, '/') != null) return .{ .status = .not_found, .body = "not found\n" };
-
-    const account_id = std.fmt.parseInt(i64, id_part, 10) catch
-        return .{ .status = .not_found, .body = "not found\n" };
-
-    if (account_id >= remote_actor_id_base) {
-        return jsonOk(allocator, [_]i32{});
-    }
-
-    const user = users.lookupUserById(&app_state.conn, allocator, account_id) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-    if (user == null) return .{ .status = .not_found, .body = "not found\n" };
-
-    const q = queryString(req.target);
-    var params = form.parse(allocator, q) catch form.Form{ .map = .empty };
-    const limit: usize = blk: {
-        const lim_str = params.get("limit") orelse break :blk 40;
-        const parsed = std.fmt.parseInt(usize, lim_str, 10) catch 40;
-        break :blk @min(parsed, 200);
-    };
-
-    const ids = followers.listAcceptedRemoteActorIds(&app_state.conn, allocator, user.?.id, limit) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-
-    var accounts: std.ArrayListUnmanaged(AccountPayload) = .empty;
-    defer accounts.deinit(allocator);
-
-    for (ids) |actor_id| {
-        const actor = remote_actors.lookupById(&app_state.conn, allocator, actor_id) catch
-            return .{ .status = .internal_server_error, .body = "internal server error\n" };
-        if (actor == null) continue;
-
-        const api_id = remoteAccountApiIdAlloc(app_state, allocator, actor.?.id);
-        accounts.append(allocator, makeRemoteAccountPayload(app_state, allocator, api_id, actor.?)) catch
-            return .{ .status = .internal_server_error, .body = "internal server error\n" };
-    }
-
-    return jsonOk(allocator, accounts.items);
-}
-
-fn accountFollowing(app_state: *app.App, allocator: std.mem.Allocator, req: Request, path: []const u8) Response {
-    const prefix = "/api/v1/accounts/";
-    const suffix = "/following";
-    if (!std.mem.startsWith(u8, path, prefix)) return .{ .status = .not_found, .body = "not found\n" };
-    if (!std.mem.endsWith(u8, path, suffix)) return .{ .status = .not_found, .body = "not found\n" };
-
-    const id_part = path[prefix.len .. path.len - suffix.len];
-    if (id_part.len == 0) return .{ .status = .not_found, .body = "not found\n" };
-    if (std.mem.indexOfScalar(u8, id_part, '/') != null) return .{ .status = .not_found, .body = "not found\n" };
-
-    const account_id = std.fmt.parseInt(i64, id_part, 10) catch
-        return .{ .status = .not_found, .body = "not found\n" };
-
-    if (account_id >= remote_actor_id_base) {
-        return jsonOk(allocator, [_]i32{});
-    }
-
-    const user = users.lookupUserById(&app_state.conn, allocator, account_id) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-    if (user == null) return .{ .status = .not_found, .body = "not found\n" };
-
-    const q = queryString(req.target);
-    var params = form.parse(allocator, q) catch form.Form{ .map = .empty };
-    const limit: usize = blk: {
-        const lim_str = params.get("limit") orelse break :blk 40;
-        const parsed = std.fmt.parseInt(usize, lim_str, 10) catch 40;
-        break :blk @min(parsed, 200);
-    };
-
-    const ids = follows.listAcceptedRemoteActorIds(&app_state.conn, allocator, user.?.id, limit) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-
-    var accounts: std.ArrayListUnmanaged(AccountPayload) = .empty;
-    defer accounts.deinit(allocator);
-
-    for (ids) |actor_id| {
-        const actor = remote_actors.lookupById(&app_state.conn, allocator, actor_id) catch
-            return .{ .status = .internal_server_error, .body = "internal server error\n" };
-        if (actor == null) continue;
-
-        const api_id = remoteAccountApiIdAlloc(app_state, allocator, actor.?.id);
-        accounts.append(allocator, makeRemoteAccountPayload(app_state, allocator, api_id, actor.?)) catch
-            return .{ .status = .internal_server_error, .body = "internal server error\n" };
-    }
-
-    return jsonOk(allocator, accounts.items);
-}
-
-fn accountByUser(app_state: *app.App, allocator: std.mem.Allocator, user: users.User) Response {
-    return accounts_api.accountByUser(app_state, allocator, user);
 }
 
 fn apiFollow(app_state: *app.App, allocator: std.mem.Allocator, req: Request) Response {
