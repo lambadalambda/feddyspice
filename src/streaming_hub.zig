@@ -69,6 +69,10 @@ pub const Hub = struct {
         self.publish(user_id, .user, "delete", status_id);
     }
 
+    pub fn publishNotification(self: *Hub, user_id: i64, notification_json: []const u8) void {
+        self.publish(user_id, .user, "notification", notification_json);
+    }
+
     fn publish(self: *Hub, user_id: i64, stream: Stream, event: []const u8, payload: []const u8) void {
         self.mutex.lock();
         defer self.mutex.unlock();
@@ -222,4 +226,22 @@ test "Hub publishes update events to matching subscribers" {
 
     try std.testing.expectEqualStrings("{\"event\":\"update\",\"payload\":\"{\\\"id\\\":\\\"1\\\"}\"}", msg_a);
     try std.testing.expect(sub_b.pop() == null);
+}
+
+test "Hub publishes notification events to matching subscribers" {
+    var hub = Hub.init(std.testing.allocator);
+    defer hub.deinit();
+
+    const sub = try hub.subscribe(1, &.{.user});
+    defer hub.unsubscribe(sub);
+
+    hub.publishNotification(1, "{\"id\":\"n1\"}");
+
+    const msg = sub.pop() orelse {
+        try std.testing.expect(false);
+        return;
+    };
+    defer std.testing.allocator.free(msg);
+
+    try std.testing.expectEqualStrings("{\"event\":\"notification\",\"payload\":\"{\\\"id\\\":\\\"n1\\\"}\"}", msg);
 }
