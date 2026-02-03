@@ -75,6 +75,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Background follow delivery logs (`SendFollowJob`) and thread-spawn failure logs for background jobs.
 - SQLite-backed media attachments schema + DB helpers (including unguessable public URLs) for `POST /api/v1/media` and status attachments.
 - Remote account profile media (avatars/headers) are parsed from ActivityPub actor documents and exposed via the Mastodon API.
+- Remote status attachments are parsed from inbound ActivityPub notes and exposed via `media_attachments` in the Mastodon API.
 
 ### Fixed
 

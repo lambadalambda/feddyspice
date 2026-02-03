@@ -9,6 +9,7 @@ pub const RemoteStatus = struct {
     remote_uri: []const u8,
     remote_actor_id: []const u8,
     content_html: []const u8,
+    attachments_json: ?[]const u8 = null,
     visibility: []const u8,
     created_at: []const u8,
     deleted_at: ?[]const u8,
@@ -30,7 +31,7 @@ fn nextNegativeId(conn: *db.Db) db.Error!i64 {
 
 pub fn lookup(conn: *db.Db, allocator: std.mem.Allocator, id: i64) Error!?RemoteStatus {
     var stmt = try conn.prepareZ(
-        "SELECT id, remote_uri, remote_actor_id, content_html, visibility, created_at, deleted_at FROM remote_statuses WHERE id = ?1 AND deleted_at IS NULL LIMIT 1;\x00",
+        "SELECT id, remote_uri, remote_actor_id, content_html, visibility, created_at, deleted_at, attachments_json FROM remote_statuses WHERE id = ?1 AND deleted_at IS NULL LIMIT 1;\x00",
     );
     defer stmt.finalize();
     try stmt.bindInt64(1, id);
@@ -45,6 +46,7 @@ pub fn lookup(conn: *db.Db, allocator: std.mem.Allocator, id: i64) Error!?Remote
         .remote_uri = try allocator.dupe(u8, stmt.columnText(1)),
         .remote_actor_id = try allocator.dupe(u8, stmt.columnText(2)),
         .content_html = try allocator.dupe(u8, stmt.columnText(3)),
+        .attachments_json = if (stmt.columnType(7) == .null) null else try allocator.dupe(u8, stmt.columnText(7)),
         .visibility = try allocator.dupe(u8, stmt.columnText(4)),
         .created_at = try allocator.dupe(u8, stmt.columnText(5)),
         .deleted_at = if (stmt.columnType(6) == .null) null else try allocator.dupe(u8, stmt.columnText(6)),
@@ -53,7 +55,7 @@ pub fn lookup(conn: *db.Db, allocator: std.mem.Allocator, id: i64) Error!?Remote
 
 pub fn lookupIncludingDeleted(conn: *db.Db, allocator: std.mem.Allocator, id: i64) Error!?RemoteStatus {
     var stmt = try conn.prepareZ(
-        "SELECT id, remote_uri, remote_actor_id, content_html, visibility, created_at, deleted_at FROM remote_statuses WHERE id = ?1 LIMIT 1;\x00",
+        "SELECT id, remote_uri, remote_actor_id, content_html, visibility, created_at, deleted_at, attachments_json FROM remote_statuses WHERE id = ?1 LIMIT 1;\x00",
     );
     defer stmt.finalize();
     try stmt.bindInt64(1, id);
@@ -68,6 +70,7 @@ pub fn lookupIncludingDeleted(conn: *db.Db, allocator: std.mem.Allocator, id: i6
         .remote_uri = try allocator.dupe(u8, stmt.columnText(1)),
         .remote_actor_id = try allocator.dupe(u8, stmt.columnText(2)),
         .content_html = try allocator.dupe(u8, stmt.columnText(3)),
+        .attachments_json = if (stmt.columnType(7) == .null) null else try allocator.dupe(u8, stmt.columnText(7)),
         .visibility = try allocator.dupe(u8, stmt.columnText(4)),
         .created_at = try allocator.dupe(u8, stmt.columnText(5)),
         .deleted_at = if (stmt.columnType(6) == .null) null else try allocator.dupe(u8, stmt.columnText(6)),
@@ -76,7 +79,7 @@ pub fn lookupIncludingDeleted(conn: *db.Db, allocator: std.mem.Allocator, id: i6
 
 pub fn lookupByUri(conn: *db.Db, allocator: std.mem.Allocator, remote_uri: []const u8) Error!?RemoteStatus {
     var stmt = try conn.prepareZ(
-        "SELECT id, remote_uri, remote_actor_id, content_html, visibility, created_at, deleted_at FROM remote_statuses WHERE remote_uri = ?1 AND deleted_at IS NULL LIMIT 1;\x00",
+        "SELECT id, remote_uri, remote_actor_id, content_html, visibility, created_at, deleted_at, attachments_json FROM remote_statuses WHERE remote_uri = ?1 AND deleted_at IS NULL LIMIT 1;\x00",
     );
     defer stmt.finalize();
     try stmt.bindText(1, remote_uri);
@@ -91,6 +94,7 @@ pub fn lookupByUri(conn: *db.Db, allocator: std.mem.Allocator, remote_uri: []con
         .remote_uri = try allocator.dupe(u8, stmt.columnText(1)),
         .remote_actor_id = try allocator.dupe(u8, stmt.columnText(2)),
         .content_html = try allocator.dupe(u8, stmt.columnText(3)),
+        .attachments_json = if (stmt.columnType(7) == .null) null else try allocator.dupe(u8, stmt.columnText(7)),
         .visibility = try allocator.dupe(u8, stmt.columnText(4)),
         .created_at = try allocator.dupe(u8, stmt.columnText(5)),
         .deleted_at = if (stmt.columnType(6) == .null) null else try allocator.dupe(u8, stmt.columnText(6)),
@@ -99,7 +103,7 @@ pub fn lookupByUri(conn: *db.Db, allocator: std.mem.Allocator, remote_uri: []con
 
 pub fn lookupByUriIncludingDeleted(conn: *db.Db, allocator: std.mem.Allocator, remote_uri: []const u8) Error!?RemoteStatus {
     var stmt = try conn.prepareZ(
-        "SELECT id, remote_uri, remote_actor_id, content_html, visibility, created_at, deleted_at FROM remote_statuses WHERE remote_uri = ?1 LIMIT 1;\x00",
+        "SELECT id, remote_uri, remote_actor_id, content_html, visibility, created_at, deleted_at, attachments_json FROM remote_statuses WHERE remote_uri = ?1 LIMIT 1;\x00",
     );
     defer stmt.finalize();
     try stmt.bindText(1, remote_uri);
@@ -114,6 +118,7 @@ pub fn lookupByUriIncludingDeleted(conn: *db.Db, allocator: std.mem.Allocator, r
         .remote_uri = try allocator.dupe(u8, stmt.columnText(1)),
         .remote_actor_id = try allocator.dupe(u8, stmt.columnText(2)),
         .content_html = try allocator.dupe(u8, stmt.columnText(3)),
+        .attachments_json = if (stmt.columnType(7) == .null) null else try allocator.dupe(u8, stmt.columnText(7)),
         .visibility = try allocator.dupe(u8, stmt.columnText(4)),
         .created_at = try allocator.dupe(u8, stmt.columnText(5)),
         .deleted_at = if (stmt.columnType(6) == .null) null else try allocator.dupe(u8, stmt.columnText(6)),
@@ -157,6 +162,7 @@ pub fn createIfNotExists(
     remote_uri: []const u8,
     remote_actor_id: []const u8,
     content_html: []const u8,
+    attachments_json: ?[]const u8,
     visibility: []const u8,
     created_at: []const u8,
 ) Error!RemoteStatus {
@@ -165,7 +171,7 @@ pub fn createIfNotExists(
     const id = try nextNegativeId(conn);
 
     var stmt = try conn.prepareZ(
-        "INSERT INTO remote_statuses(id, remote_uri, remote_actor_id, content_html, visibility, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6);\x00",
+        "INSERT INTO remote_statuses(id, remote_uri, remote_actor_id, content_html, attachments_json, visibility, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7);\x00",
     );
     defer stmt.finalize();
 
@@ -173,8 +179,13 @@ pub fn createIfNotExists(
     try stmt.bindText(2, remote_uri);
     try stmt.bindText(3, remote_actor_id);
     try stmt.bindText(4, content_html);
-    try stmt.bindText(5, visibility);
-    try stmt.bindText(6, created_at);
+    if (attachments_json) |aj| {
+        try stmt.bindText(5, aj);
+    } else {
+        try stmt.bindNull(5);
+    }
+    try stmt.bindText(6, visibility);
+    try stmt.bindText(7, created_at);
 
     switch (try stmt.step()) {
         .done => {},
@@ -188,7 +199,7 @@ pub fn listLatest(conn: *db.Db, allocator: std.mem.Allocator, limit: usize) Erro
     const lim: i64 = @intCast(@min(limit, 200));
 
     var stmt = try conn.prepareZ(
-        "SELECT id, remote_uri, remote_actor_id, content_html, visibility, created_at, deleted_at FROM remote_statuses WHERE deleted_at IS NULL ORDER BY id DESC LIMIT ?1;\x00",
+        "SELECT id, remote_uri, remote_actor_id, content_html, visibility, created_at, deleted_at, attachments_json FROM remote_statuses WHERE deleted_at IS NULL ORDER BY id DESC LIMIT ?1;\x00",
     );
     defer stmt.finalize();
     try stmt.bindInt64(1, lim);
@@ -205,6 +216,7 @@ pub fn listLatest(conn: *db.Db, allocator: std.mem.Allocator, limit: usize) Erro
                     .remote_uri = try allocator.dupe(u8, stmt.columnText(1)),
                     .remote_actor_id = try allocator.dupe(u8, stmt.columnText(2)),
                     .content_html = try allocator.dupe(u8, stmt.columnText(3)),
+                    .attachments_json = if (stmt.columnType(7) == .null) null else try allocator.dupe(u8, stmt.columnText(7)),
                     .visibility = try allocator.dupe(u8, stmt.columnText(4)),
                     .created_at = try allocator.dupe(u8, stmt.columnText(5)),
                     .deleted_at = if (stmt.columnType(6) == .null) null else try allocator.dupe(u8, stmt.columnText(6)),
@@ -230,7 +242,7 @@ pub fn listLatestBeforeCreatedAt(
 
     if (before_created_at == null) {
         var stmt = try conn.prepareZ(
-            "SELECT id, remote_uri, remote_actor_id, content_html, visibility, created_at, deleted_at FROM remote_statuses WHERE deleted_at IS NULL ORDER BY created_at DESC, id DESC LIMIT ?1;\x00",
+            "SELECT id, remote_uri, remote_actor_id, content_html, visibility, created_at, deleted_at, attachments_json FROM remote_statuses WHERE deleted_at IS NULL ORDER BY created_at DESC, id DESC LIMIT ?1;\x00",
         );
         defer stmt.finalize();
         try stmt.bindInt64(1, lim);
@@ -244,6 +256,7 @@ pub fn listLatestBeforeCreatedAt(
                         .remote_uri = try allocator.dupe(u8, stmt.columnText(1)),
                         .remote_actor_id = try allocator.dupe(u8, stmt.columnText(2)),
                         .content_html = try allocator.dupe(u8, stmt.columnText(3)),
+                        .attachments_json = if (stmt.columnType(7) == .null) null else try allocator.dupe(u8, stmt.columnText(7)),
                         .visibility = try allocator.dupe(u8, stmt.columnText(4)),
                         .created_at = try allocator.dupe(u8, stmt.columnText(5)),
                         .deleted_at = if (stmt.columnType(6) == .null) null else try allocator.dupe(u8, stmt.columnText(6)),
@@ -258,7 +271,7 @@ pub fn listLatestBeforeCreatedAt(
     const anchor_id = before_id orelse std.math.maxInt(i64);
 
     var stmt = try conn.prepareZ(
-        "SELECT id, remote_uri, remote_actor_id, content_html, visibility, created_at, deleted_at FROM remote_statuses WHERE deleted_at IS NULL AND (created_at < ?1 OR (created_at = ?1 AND id < ?2)) ORDER BY created_at DESC, id DESC LIMIT ?3;\x00",
+        "SELECT id, remote_uri, remote_actor_id, content_html, visibility, created_at, deleted_at, attachments_json FROM remote_statuses WHERE deleted_at IS NULL AND (created_at < ?1 OR (created_at = ?1 AND id < ?2)) ORDER BY created_at DESC, id DESC LIMIT ?3;\x00",
     );
     defer stmt.finalize();
     try stmt.bindText(1, before_created_at.?);
@@ -274,6 +287,7 @@ pub fn listLatestBeforeCreatedAt(
                     .remote_uri = try allocator.dupe(u8, stmt.columnText(1)),
                     .remote_actor_id = try allocator.dupe(u8, stmt.columnText(2)),
                     .content_html = try allocator.dupe(u8, stmt.columnText(3)),
+                    .attachments_json = if (stmt.columnType(7) == .null) null else try allocator.dupe(u8, stmt.columnText(7)),
                     .visibility = try allocator.dupe(u8, stmt.columnText(4)),
                     .created_at = try allocator.dupe(u8, stmt.columnText(5)),
                     .deleted_at = if (stmt.columnType(6) == .null) null else try allocator.dupe(u8, stmt.columnText(6)),
@@ -314,6 +328,7 @@ test "createIfNotExists assigns negative ids" {
         "https://remote.test/notes/1",
         "https://remote.test/users/bob",
         "<p>one</p>",
+        null,
         "public",
         "2020-01-01T00:00:00.000Z",
     );
@@ -323,6 +338,7 @@ test "createIfNotExists assigns negative ids" {
         "https://remote.test/notes/2",
         "https://remote.test/users/bob",
         "<p>two</p>",
+        null,
         "public",
         "2020-01-01T00:00:01.000Z",
     );

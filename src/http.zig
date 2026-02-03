@@ -1181,6 +1181,90 @@ fn jsonContainsIri(v: ?std.json.Value, needle: []const u8) bool {
     }
 }
 
+fn jsonFirstUrl(val: std.json.Value) ?[]const u8 {
+    switch (val) {
+        .string => |s| return if (s.len == 0) null else s,
+        .object => |o| {
+            if (o.get("url")) |u| {
+                if (jsonFirstUrl(u)) |s| return s;
+            }
+            if (o.get("href")) |h| {
+                if (h == .string and h.string.len > 0) return h.string;
+            }
+            return null;
+        },
+        .array => |arr| {
+            for (arr.items) |item| {
+                if (jsonFirstUrl(item)) |s| return s;
+            }
+            return null;
+        },
+        else => return null,
+    }
+}
+
+fn remoteAttachmentsJsonAlloc(allocator: std.mem.Allocator, note: std.json.ObjectMap) !?[]u8 {
+    const val = note.get("attachment") orelse return null;
+
+    const Attachment = struct {
+        url: []const u8,
+        kind: ?[]const u8 = null,
+        media_type: ?[]const u8 = null,
+        description: ?[]const u8 = null,
+        blurhash: ?[]const u8 = null,
+    };
+
+    var list: std.ArrayListUnmanaged(Attachment) = .empty;
+    defer list.deinit(allocator);
+
+    const helper = struct {
+        fn pushOne(
+            alloc: std.mem.Allocator,
+            out: *std.ArrayListUnmanaged(Attachment),
+            item: std.json.Value,
+        ) !void {
+            const url = jsonFirstUrl(item) orelse return;
+
+            var kind: ?[]const u8 = null;
+            var media_type: ?[]const u8 = null;
+            var description: ?[]const u8 = null;
+            var blurhash: ?[]const u8 = null;
+
+            if (item == .object) {
+                if (item.object.get("type")) |t| {
+                    if (t == .string and t.string.len > 0) kind = t.string;
+                }
+                if (item.object.get("mediaType")) |t| {
+                    if (t == .string and t.string.len > 0) media_type = t.string;
+                }
+                if (item.object.get("name")) |t| {
+                    if (t == .string and t.string.len > 0) description = t.string;
+                }
+                if (item.object.get("blurhash")) |t| {
+                    if (t == .string and t.string.len > 0) blurhash = t.string;
+                }
+            }
+
+            try out.append(alloc, .{
+                .url = url,
+                .kind = kind,
+                .media_type = media_type,
+                .description = description,
+                .blurhash = blurhash,
+            });
+        }
+    };
+
+    switch (val) {
+        .array => |arr| for (arr.items) |item| try helper.pushOne(allocator, &list, item),
+        else => try helper.pushOne(allocator, &list, val),
+    }
+
+    if (list.items.len == 0) return null;
+    const json = try std.json.Stringify.valueAlloc(allocator, list.items, .{});
+    return json;
+}
+
 fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: Request, path: []const u8) Response {
     const prefix = "/users/";
     const suffix = "/inbox";
@@ -1306,12 +1390,16 @@ fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: Request, pa
             break :blk "direct";
         };
 
+        const attachments_json = remoteAttachmentsJsonAlloc(allocator, obj.object) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
         const created = remote_statuses.createIfNotExists(
             &app_state.conn,
             allocator,
             note_id_val.string,
             remote_actor.?.id,
             content_val.string,
+            attachments_json,
             visibility,
             created_at,
         ) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
@@ -2393,6 +2481,68 @@ fn makeRemoteStatusPayload(
         .header_static = header_url,
     };
 
+    const attachments: []const MediaAttachmentPayload = blk: {
+        const aj = st.attachments_json orelse break :blk &.{};
+
+        var parsed = std.json.parseFromSlice(std.json.Value, allocator, aj, .{}) catch break :blk &.{};
+        defer parsed.deinit();
+
+        if (parsed.value != .array) break :blk &.{};
+        if (parsed.value.array.items.len == 0) break :blk &.{};
+
+        const out = allocator.alloc(MediaAttachmentPayload, parsed.value.array.items.len) catch break :blk &.{};
+        for (parsed.value.array.items, 0..) |item, i| {
+            if (item != .object) {
+                out[i] = .{
+                    .id = "0",
+                    .type = "unknown",
+                    .url = "",
+                    .preview_url = "",
+                    .description = null,
+                };
+                continue;
+            }
+
+            const url_val = item.object.get("url");
+            const url = if (url_val != null and url_val.? == .string) url_val.?.string else "";
+
+            const media_type_val = item.object.get("media_type");
+            const media_type = if (media_type_val != null and media_type_val.? == .string) media_type_val.?.string else null;
+
+            const kind_val = item.object.get("kind");
+            const kind = if (kind_val != null and kind_val.? == .string) kind_val.?.string else null;
+
+            const desc_val = item.object.get("description");
+            const desc = if (desc_val != null and desc_val.? == .string) desc_val.?.string else null;
+
+            const blurhash_val = item.object.get("blurhash");
+            const blurhash = if (blurhash_val != null and blurhash_val.? == .string) blurhash_val.?.string else null;
+
+            const typ = if (media_type) |mt|
+                mediaAttachmentType(mt)
+            else if (kind != null and std.mem.eql(u8, kind.?, "Image"))
+                "image"
+            else if (kind != null and std.mem.eql(u8, kind.?, "Video"))
+                "video"
+            else if (kind != null and std.mem.eql(u8, kind.?, "Audio"))
+                "audio"
+            else
+                "unknown";
+
+            const attachment_id_str = std.fmt.allocPrint(allocator, "{d}:{d}", .{ st.id, i }) catch "0";
+            out[i] = .{
+                .id = attachment_id_str,
+                .type = typ,
+                .url = url,
+                .preview_url = url,
+                .remote_url = if (url.len == 0) null else url,
+                .description = desc,
+                .blurhash = blurhash,
+            };
+        }
+        break :blk out;
+    };
+
     return .{
         .id = id_str,
         .created_at = st.created_at,
@@ -2402,7 +2552,7 @@ fn makeRemoteStatusPayload(
         .uri = st.remote_uri,
         .url = st.remote_uri,
         .account = acct,
-        .media_attachments = &.{},
+        .media_attachments = attachments,
     };
 }
 
@@ -6735,6 +6885,56 @@ test "POST /users/:name/inbox Delete publishes streaming delete" {
 
     try std.testing.expectEqualStrings("delete", env_delete.value.object.get("event").?.string);
     try std.testing.expectEqualStrings(remote_id, env_delete.value.object.get("payload").?.string);
+}
+
+test "POST /users/:name/inbox Create stores remote attachments and returns them in API payloads" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    _ = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    try remote_actors.upsert(&app_state.conn, .{
+        .id = "https://remote.test/users/bob",
+        .inbox = "https://remote.test/users/bob/inbox",
+        .shared_inbox = null,
+        .preferred_username = "bob",
+        .domain = "remote.test",
+        .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
+    });
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const create_body =
+        \\{"@context":"https://www.w3.org/ns/activitystreams","type":"Create","actor":"https://remote.test/users/bob","object":{"id":"https://remote.test/notes/1","type":"Note","content":"<p>Hello</p>","published":"2020-01-01T00:00:00.000Z","attachment":[{"type":"Document","mediaType":"image/png","url":"https://remote.test/media/a.png","name":"alt"}]}}
+    ;
+
+    const create_resp = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/users/alice/inbox",
+        .content_type = "application/activity+json",
+        .body = create_body,
+    });
+    try std.testing.expectEqual(std.http.Status.accepted, create_resp.status);
+
+    const actor = (try remote_actors.lookupById(&app_state.conn, a, "https://remote.test/users/bob")).?;
+    const st = (try remote_statuses.lookupByUri(&app_state.conn, a, "https://remote.test/notes/1")).?;
+
+    const status_resp = remoteStatusResponse(&app_state, a, actor, st);
+    try std.testing.expectEqual(std.http.Status.ok, status_resp.status);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, status_resp.body, .{});
+    defer parsed.deinit();
+
+    const attachments = parsed.value.object.get("media_attachments").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), attachments.len);
+    try std.testing.expectEqualStrings("image", attachments[0].object.get("type").?.string);
+    try std.testing.expectEqualStrings("https://remote.test/media/a.png", attachments[0].object.get("url").?.string);
+    try std.testing.expectEqualStrings("https://remote.test/media/a.png", attachments[0].object.get("preview_url").?.string);
+    try std.testing.expectEqualStrings("https://remote.test/media/a.png", attachments[0].object.get("remote_url").?.string);
+    try std.testing.expectEqualStrings("alt", attachments[0].object.get("description").?.string);
 }
 
 fn headerValue(headers: []const std.http.Header, name: []const u8) ?[]const u8 {
