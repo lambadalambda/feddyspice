@@ -32,7 +32,26 @@ cleanup() {
 trap cleanup EXIT
 
 compose --profile fedtest down -v --remove-orphans || true
-compose --profile fedtest run --rm --build fedtest
+compose --profile fedtest up -d --build \
+  gateway \
+  gateway_certs \
+  feddyspice_web \
+  pleroma_db \
+  pleroma_web \
+  mastodon_db \
+  mastodon_redis \
+  mastodon_init \
+  mastodon_web \
+  mastodon_sidekiq
+
+compose --profile fedtest up -d --wait --wait-timeout 600 \
+  feddyspice_web \
+  pleroma_web \
+  mastodon_web
+
+compose --profile fedtest run --rm --no-deps feddyspice_seed
+compose --profile fedtest run --rm --no-deps pleroma_seed
+compose --profile fedtest run --rm --no-deps fedtest
 '''
 
 [tasks."fed:logs"]
