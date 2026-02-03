@@ -11,6 +11,7 @@ const form = @import("../form.zig");
 const follows = @import("../follows.zig");
 const followers = @import("../followers.zig");
 const http_types = @import("../http_types.zig");
+const http_signatures = @import("../http_signatures.zig");
 const inbox_dedupe = @import("../inbox_dedupe.zig");
 const masto = @import("mastodon.zig");
 const remote_actors = @import("../remote_actors.zig");
@@ -48,6 +49,52 @@ fn trimTrailingSlash(s: []const u8) []const u8 {
     if (s.len == 0) return s;
     if (s[s.len - 1] == '/') return s[0 .. s.len - 1];
     return s;
+}
+
+const VerifyInboxError = error{ Unauthorized, Internal };
+
+fn verifyInboxSignature(
+    allocator: std.mem.Allocator,
+    req: http_types.Request,
+    actor: remote_actors.RemoteActor,
+) VerifyInboxError!void {
+    const sig_hdr = req.signature orelse return error.Unauthorized;
+    const host_hdr = req.host orelse return error.Unauthorized;
+    const date_hdr = req.date orelse return error.Unauthorized;
+    const digest_hdr = req.digest orelse return error.Unauthorized;
+
+    if (!http_signatures.digestHeaderHasSha256(req.body, digest_hdr)) return error.Unauthorized;
+
+    const ok = http_signatures.verifyRequestSignaturePem(
+        allocator,
+        actor.public_key_pem,
+        sig_hdr,
+        req.method,
+        req.target,
+        host_hdr,
+        date_hdr,
+        digest_hdr,
+    ) catch |err| switch (err) {
+        error.OutOfMemory => return error.Internal,
+        else => return error.Unauthorized,
+    };
+    if (!ok) return error.Unauthorized;
+}
+
+fn unauthorizedResponse() http_types.Response {
+    return .{ .status = .unauthorized, .body = "unauthorized\n" };
+}
+
+fn verifyInboxSignatureOrReject(
+    allocator: std.mem.Allocator,
+    req: http_types.Request,
+    actor: remote_actors.RemoteActor,
+) ?http_types.Response {
+    verifyInboxSignature(allocator, req, actor) catch |err| switch (err) {
+        error.Unauthorized => return unauthorizedResponse(),
+        error.Internal => return .{ .status = .internal_server_error, .body = "internal server error\n" },
+    };
+    return null;
 }
 
 pub fn actorGet(app_state: *app.App, allocator: std.mem.Allocator, path: []const u8) http_types.Response {
@@ -653,6 +700,8 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
             if (remote_actor == null) return .{ .status = .accepted, .body = "ignored\n" };
         }
 
+        if (verifyInboxSignatureOrReject(allocator, req, remote_actor.?)) |resp| return resp;
+
         const visibility: []const u8 = blk: {
             const has_recipients =
                 (parsed.value.object.get("to") != null) or
@@ -815,6 +864,8 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
             return .{ .status = .accepted, .body = "ignored\n" };
         }
 
+        if (verifyInboxSignatureOrReject(allocator, req, remote_actor.?)) |resp| return resp;
+
         const deleted = remote_statuses.markDeletedByUri(&app_state.conn, remote_status.?.remote_uri, deleted_at) catch
             return .{ .status = .internal_server_error, .body = "internal server error\n" };
         if (deleted) {
@@ -881,6 +932,11 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
             return .{ .status = .accepted, .body = "ignored\n" };
         }
 
+        const remote_actor = federation.ensureRemoteActorById(app_state, allocator, actor_val.string) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+        if (verifyInboxSignatureOrReject(allocator, req, remote_actor)) |resp| return resp;
+
         background.acceptInboundFollow(app_state, allocator, user.?.id, username, actor_val.string, follow_activity_id);
 
         dedupe_keep = true;
@@ -909,6 +965,13 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
             if (actor_val.string.len == 0) break :blk null;
             break :blk actor_val.string;
         };
+
+        if (actor_id == null) return .{ .status = .bad_request, .body = "missing actor\n" };
+
+        const remote_actor = federation.ensureRemoteActorById(app_state, allocator, actor_id.?) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+        if (verifyInboxSignatureOrReject(allocator, req, remote_actor)) |resp| return resp;
 
         if (activity_id != null and actor_id != null) {
             const inserted = inbox_dedupe.begin(&app_state.conn, activity_id.?, user.?.id, actor_id.?, received_at_ms) catch

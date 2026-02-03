@@ -42,6 +42,10 @@ pub fn serveOnce(app_state: *app.App, listener: *net.Server) !void {
     const path = targetPath(target);
     const content_type = request.head.content_type;
 
+    var host_hdr: ?[]const u8 = null;
+    var date_hdr: ?[]const u8 = null;
+    var digest_hdr: ?[]const u8 = null;
+    var signature_hdr: ?[]const u8 = null;
     var cookie: ?[]const u8 = null;
     var authorization: ?[]const u8 = null;
     var connection_hdr: ?[]const u8 = null;
@@ -52,6 +56,10 @@ pub fn serveOnce(app_state: *app.App, listener: *net.Server) !void {
 
     var it = request.iterateHeaders();
     while (it.next()) |h| {
+        if (std.ascii.eqlIgnoreCase(h.name, "host")) host_hdr = h.value;
+        if (std.ascii.eqlIgnoreCase(h.name, "date")) date_hdr = h.value;
+        if (std.ascii.eqlIgnoreCase(h.name, "digest")) digest_hdr = h.value;
+        if (std.ascii.eqlIgnoreCase(h.name, "signature")) signature_hdr = h.value;
         if (std.ascii.eqlIgnoreCase(h.name, "cookie")) cookie = h.value;
         if (std.ascii.eqlIgnoreCase(h.name, "authorization")) authorization = h.value;
         if (std.ascii.eqlIgnoreCase(h.name, "connection")) connection_hdr = h.value;
@@ -153,6 +161,10 @@ pub fn serveOnce(app_state: *app.App, listener: *net.Server) !void {
         .target = target,
         .content_type = content_type,
         .body = body,
+        .host = host_hdr,
+        .date = date_hdr,
+        .digest = digest_hdr,
+        .signature = signature_hdr,
         .cookie = cookie,
         .authorization = authorization,
     });

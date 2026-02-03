@@ -1025,6 +1025,37 @@ fn targetPath(target: []const u8) []const u8 {
     return raw[0..end];
 }
 
+fn signedInboxRequest(
+    allocator: std.mem.Allocator,
+    host: []const u8,
+    target: []const u8,
+    body: []const u8,
+    key_id: []const u8,
+    private_key_pem: []const u8,
+) !Request {
+    const http_signatures = @import("http_signatures.zig");
+    const signed = try http_signatures.signRequest(
+        allocator,
+        private_key_pem,
+        key_id,
+        .POST,
+        target,
+        host,
+        body,
+        0,
+    );
+    return .{
+        .method = .POST,
+        .target = target,
+        .content_type = "application/activity+json",
+        .body = body,
+        .host = host,
+        .date = signed.date,
+        .digest = signed.digest,
+        .signature = signed.signature,
+    };
+}
+
 test "GET /healthz -> 200" {
     var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
     defer app_state.deinit();
@@ -1336,25 +1367,31 @@ test "conversations: list/read/delete direct messages" {
     const token = try oauth.createAccessToken(&app_state.conn, a, app_creds.id, user_id, "read write");
     const auth_header = try std.fmt.allocPrint(a, "Bearer {s}", .{token});
 
+    const remote_kp = try @import("crypto_rsa.zig").generateRsaKeyPairPem(a, 512);
+    const remote_key_id = "https://remote.test/users/bob#main-key";
+
     try remote_actors.upsert(&app_state.conn, .{
         .id = "https://remote.test/users/bob",
         .inbox = "https://remote.test/users/bob/inbox",
         .shared_inbox = null,
         .preferred_username = "bob",
         .domain = "remote.test",
-        .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
+        .public_key_pem = remote_kp.public_key_pem,
     });
 
     const inbox_body1 =
         \\{"@context":"https://www.w3.org/ns/activitystreams","type":"Create","actor":"https://remote.test/users/bob","object":{"id":"https://remote.test/notes/1","type":"Note","to":["http://example.test/users/alice"],"content":"<p>DM 1</p>","published":"2020-01-01T00:00:00.000Z"}}
     ;
 
-    const inbox_resp1 = handle(&app_state, a, .{
-        .method = .POST,
-        .target = "/users/alice/inbox",
-        .content_type = "application/activity+json",
-        .body = inbox_body1,
-    });
+    const inbox_req1 = try signedInboxRequest(
+        a,
+        "example.test",
+        "/users/alice/inbox",
+        inbox_body1,
+        remote_key_id,
+        remote_kp.private_key_pem,
+    );
+    const inbox_resp1 = handle(&app_state, a, inbox_req1);
     try std.testing.expectEqual(std.http.Status.accepted, inbox_resp1.status);
 
     const list_resp1 = handle(&app_state, a, .{
@@ -1417,12 +1454,15 @@ test "conversations: list/read/delete direct messages" {
         \\{"@context":"https://www.w3.org/ns/activitystreams","type":"Create","actor":"https://remote.test/users/bob","object":{"id":"https://remote.test/notes/2","type":"Note","to":["http://example.test/users/alice"],"content":"<p>DM 2</p>","published":"2020-01-01T00:00:01.000Z"}}
     ;
 
-    const inbox_resp2 = handle(&app_state, a, .{
-        .method = .POST,
-        .target = "/users/alice/inbox",
-        .content_type = "application/activity+json",
-        .body = inbox_body2,
-    });
+    const inbox_req2 = try signedInboxRequest(
+        a,
+        "example.test",
+        "/users/alice/inbox",
+        inbox_body2,
+        remote_key_id,
+        remote_kp.private_key_pem,
+    );
+    const inbox_resp2 = handle(&app_state, a, inbox_req2);
     try std.testing.expectEqual(std.http.Status.accepted, inbox_resp2.status);
 
     const list_resp3 = handle(&app_state, a, .{
@@ -3252,25 +3292,31 @@ test "remote statuses: appear in home timeline and can be fetched" {
     const sub = try app_state.streaming.subscribe(user_id, &.{.user});
     defer app_state.streaming.unsubscribe(sub);
 
+    const remote_kp = try @import("crypto_rsa.zig").generateRsaKeyPairPem(a, 512);
+    const remote_key_id = "https://remote.test/users/bob#main-key";
+
     try remote_actors.upsert(&app_state.conn, .{
         .id = "https://remote.test/users/bob",
         .inbox = "https://remote.test/users/bob/inbox",
         .shared_inbox = null,
         .preferred_username = "bob",
         .domain = "remote.test",
-        .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
+        .public_key_pem = remote_kp.public_key_pem,
     });
 
     const inbox_body =
         \\{"@context":"https://www.w3.org/ns/activitystreams","type":"Create","actor":"https://remote.test/users/bob","object":{"id":"https://remote.test/notes/1","type":"Note","content":"<p>Remote</p>","published":"2999-01-01T00:00:00.000Z"}}
     ;
 
-    const inbox_resp = handle(&app_state, a, .{
-        .method = .POST,
-        .target = "/users/alice/inbox",
-        .content_type = "application/activity+json",
-        .body = inbox_body,
-    });
+    const inbox_req = try signedInboxRequest(
+        a,
+        "example.test",
+        "/users/alice/inbox",
+        inbox_body,
+        remote_key_id,
+        remote_kp.private_key_pem,
+    );
+    const inbox_resp = handle(&app_state, a, inbox_req);
     try std.testing.expectEqual(std.http.Status.accepted, inbox_resp.status);
 
     const msg = sub.pop() orelse {
@@ -3601,15 +3647,31 @@ test "POST /users/:name/inbox Follow stores follower and sends Accept" {
 
     _ = try actor_keys.ensureForUser(&app_state.conn, a, user_id);
 
+    const remote_kp = try @import("crypto_rsa.zig").generateRsaKeyPairPem(a, 512);
+
     const remote_actor_id = "https://remote.test/users/bob";
+    const remote_key_id = "https://remote.test/users/bob#main-key";
     const remote_inbox = "https://remote.test/users/bob/inbox";
     const follow_id = "https://remote.test/follows/1";
+
+    const actor_doc_json = try std.json.Stringify.valueAlloc(a, .{
+        .@"@context" = "https://www.w3.org/ns/activitystreams",
+        .id = remote_actor_id,
+        .type = "Person",
+        .preferredUsername = "bob",
+        .inbox = remote_inbox,
+        .publicKey = .{
+            .id = remote_key_id,
+            .owner = remote_actor_id,
+            .publicKeyPem = remote_kp.public_key_pem,
+        },
+    }, .{});
 
     try mock.pushExpected(.{
         .method = .GET,
         .url = remote_actor_id,
         .response_status = .ok,
-        .response_body = "{\"@context\":\"https://www.w3.org/ns/activitystreams\",\"id\":\"https://remote.test/users/bob\",\"type\":\"Person\",\"preferredUsername\":\"bob\",\"inbox\":\"https://remote.test/users/bob/inbox\",\"publicKey\":{\"id\":\"https://remote.test/users/bob#main-key\",\"owner\":\"https://remote.test/users/bob\",\"publicKeyPem\":\"-----BEGIN PUBLIC KEY-----\\n...\\n-----END PUBLIC KEY-----\\n\"}}",
+        .response_body = actor_doc_json,
     });
     try mock.pushExpected(.{ .method = .POST, .url = remote_inbox, .response_status = .accepted, .response_body = "" });
 
@@ -3619,12 +3681,15 @@ test "POST /users/:name/inbox Follow stores follower and sends Accept" {
         .{ follow_id, remote_actor_id },
     );
 
-    const resp = handle(&app_state, a, .{
-        .method = .POST,
-        .target = "/users/alice/inbox",
-        .content_type = "application/activity+json",
-        .body = follow_body,
-    });
+    const inbox_req = try signedInboxRequest(
+        a,
+        "example.test",
+        "/users/alice/inbox",
+        follow_body,
+        remote_key_id,
+        remote_kp.private_key_pem,
+    );
+    const resp = handle(&app_state, a, inbox_req);
     try std.testing.expectEqual(std.http.Status.accepted, resp.status);
 
     try background.runQueued(&app_state, a);
@@ -4408,38 +4473,46 @@ test "POST /users/:name/inbox Accept marks follow accepted" {
     const params = app_state.cfg.password_params;
     const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
 
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const remote_kp = try @import("crypto_rsa.zig").generateRsaKeyPairPem(a, 512);
+    const remote_actor_id = "https://remote.test/users/bob";
+    const remote_key_id = "https://remote.test/users/bob#main-key";
+
     try remote_actors.upsert(&app_state.conn, .{
-        .id = "https://remote.test/users/bob",
+        .id = remote_actor_id,
         .inbox = "https://remote.test/users/bob/inbox",
         .shared_inbox = null,
         .preferred_username = "bob",
         .domain = "remote.test",
-        .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
+        .public_key_pem = remote_kp.public_key_pem,
     });
 
     _ = try follows.createPending(
         &app_state.conn,
         user_id,
-        "https://remote.test/users/bob",
+        remote_actor_id,
         "http://example.test/follows/1",
     );
 
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-
     const body = try std.fmt.allocPrint(
         a,
-        "{{\"@context\":\"https://www.w3.org/ns/activitystreams\",\"type\":\"Accept\",\"actor\":\"https://remote.test/users/bob\",\"object\":\"http://example.test/follows/1\"}}",
-        .{},
+        "{{\"@context\":\"https://www.w3.org/ns/activitystreams\",\"type\":\"Accept\",\"actor\":\"{s}\",\"object\":\"http://example.test/follows/1\"}}",
+        .{remote_actor_id},
     );
 
-    const resp = handle(&app_state, a, .{
-        .method = .POST,
-        .target = "/users/alice/inbox",
-        .content_type = "application/activity+json",
-        .body = body,
-    });
+    const inbox_req = try signedInboxRequest(
+        a,
+        "example.test",
+        "/users/alice/inbox",
+        body,
+        remote_key_id,
+        remote_kp.private_key_pem,
+    );
+
+    const resp = handle(&app_state, a, inbox_req);
     try std.testing.expectEqual(std.http.Status.accepted, resp.status);
 
     const follow = (try follows.lookupByActivityId(&app_state.conn, a, "http://example.test/follows/1")).?;
@@ -4453,38 +4526,46 @@ test "POST /users/:name/inbox Accept marks follow accepted with trailing slash v
     const params = app_state.cfg.password_params;
     const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
 
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const remote_kp = try @import("crypto_rsa.zig").generateRsaKeyPairPem(a, 512);
+    const remote_actor_id = "https://remote.test/users/bob";
+    const remote_key_id = "https://remote.test/users/bob#main-key";
+
     try remote_actors.upsert(&app_state.conn, .{
-        .id = "https://remote.test/users/bob",
+        .id = remote_actor_id,
         .inbox = "https://remote.test/users/bob/inbox",
         .shared_inbox = null,
         .preferred_username = "bob",
         .domain = "remote.test",
-        .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
+        .public_key_pem = remote_kp.public_key_pem,
     });
 
     _ = try follows.createPending(
         &app_state.conn,
         user_id,
-        "https://remote.test/users/bob",
+        remote_actor_id,
         "http://example.test/follows/1",
     );
 
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-
     const body = try std.fmt.allocPrint(
         a,
-        "{{\"@context\":\"https://www.w3.org/ns/activitystreams\",\"type\":\"Accept\",\"actor\":\"https://remote.test/users/bob\",\"object\":\"http://example.test/follows/1/\"}}",
-        .{},
+        "{{\"@context\":\"https://www.w3.org/ns/activitystreams\",\"type\":\"Accept\",\"actor\":\"{s}\",\"object\":\"http://example.test/follows/1/\"}}",
+        .{remote_actor_id},
     );
 
-    const resp = handle(&app_state, a, .{
-        .method = .POST,
-        .target = "/users/alice/inbox",
-        .content_type = "application/activity+json",
-        .body = body,
-    });
+    const inbox_req = try signedInboxRequest(
+        a,
+        "example.test",
+        "/users/alice/inbox",
+        body,
+        remote_key_id,
+        remote_kp.private_key_pem,
+    );
+
+    const resp = handle(&app_state, a, inbox_req);
     try std.testing.expectEqual(std.http.Status.accepted, resp.status);
 
     const follow = (try follows.lookupByActivityId(&app_state.conn, a, "http://example.test/follows/1")).?;
@@ -4506,12 +4587,29 @@ test "POST /users/:name/inbox Create discovers actor when addressed" {
     const a = arena.allocator();
 
     const actor_id = "https://remote.test/users/bob";
+    const remote_key_id = "https://remote.test/users/bob#main-key";
+    const remote_kp = try @import("crypto_rsa.zig").generateRsaKeyPairPem(a, 512);
+
+    const actor_doc_json = try std.json.Stringify.valueAlloc(a, .{
+        .@"@context" = "https://www.w3.org/ns/activitystreams",
+        .id = actor_id,
+        .type = "Person",
+        .preferredUsername = "bob",
+        .inbox = "https://remote.test/users/bob/inbox",
+        .icon = .{ .type = "Image", .url = "https://remote.test/media/avatar.jpg" },
+        .image = .{ .type = "Image", .url = "https://remote.test/media/header.jpg" },
+        .publicKey = .{
+            .id = remote_key_id,
+            .owner = actor_id,
+            .publicKeyPem = remote_kp.public_key_pem,
+        },
+    }, .{});
 
     try mock.pushExpected(.{
         .method = .GET,
         .url = actor_id,
         .response_status = .ok,
-        .response_body = "{\"@context\":\"https://www.w3.org/ns/activitystreams\",\"id\":\"https://remote.test/users/bob\",\"type\":\"Person\",\"preferredUsername\":\"bob\",\"inbox\":\"https://remote.test/users/bob/inbox\",\"icon\":{\"type\":\"Image\",\"url\":\"https://remote.test/media/avatar.jpg\"},\"image\":{\"type\":\"Image\",\"url\":\"https://remote.test/media/header.jpg\"},\"publicKey\":{\"id\":\"https://remote.test/users/bob#main-key\",\"owner\":\"https://remote.test/users/bob\",\"publicKeyPem\":\"-----BEGIN PUBLIC KEY-----\\n...\\n-----END PUBLIC KEY-----\\n\"}}",
+        .response_body = actor_doc_json,
     });
 
     const body = try std.fmt.allocPrint(
@@ -4520,12 +4618,15 @@ test "POST /users/:name/inbox Create discovers actor when addressed" {
         .{actor_id},
     );
 
-    const resp = handle(&app_state, a, .{
-        .method = .POST,
-        .target = "/users/alice/inbox",
-        .content_type = "application/activity+json",
-        .body = body,
-    });
+    const inbox_req = try signedInboxRequest(
+        a,
+        "example.test",
+        "/users/alice/inbox",
+        body,
+        remote_key_id,
+        remote_kp.private_key_pem,
+    );
+    const resp = handle(&app_state, a, inbox_req);
     try std.testing.expectEqual(std.http.Status.accepted, resp.status);
     try std.testing.expectEqual(@as(usize, 1), mock.requests.items.len);
 
@@ -4551,12 +4652,27 @@ test "POST /users/:name/inbox Create discovers actor even when not addressed" {
     const a = arena.allocator();
 
     const actor_id = "https://remote.test/users/bob";
+    const remote_key_id = "https://remote.test/users/bob#main-key";
+    const remote_kp = try @import("crypto_rsa.zig").generateRsaKeyPairPem(a, 512);
+
+    const actor_doc_json = try std.json.Stringify.valueAlloc(a, .{
+        .@"@context" = "https://www.w3.org/ns/activitystreams",
+        .id = actor_id,
+        .type = "Person",
+        .preferredUsername = "bob",
+        .inbox = "https://remote.test/users/bob/inbox",
+        .publicKey = .{
+            .id = remote_key_id,
+            .owner = actor_id,
+            .publicKeyPem = remote_kp.public_key_pem,
+        },
+    }, .{});
 
     try mock.pushExpected(.{
         .method = .GET,
         .url = actor_id,
         .response_status = .ok,
-        .response_body = "{\"@context\":\"https://www.w3.org/ns/activitystreams\",\"id\":\"https://remote.test/users/bob\",\"type\":\"Person\",\"preferredUsername\":\"bob\",\"inbox\":\"https://remote.test/users/bob/inbox\",\"publicKey\":{\"id\":\"https://remote.test/users/bob#main-key\",\"owner\":\"https://remote.test/users/bob\",\"publicKeyPem\":\"-----BEGIN PUBLIC KEY-----\\n...\\n-----END PUBLIC KEY-----\\n\"}}",
+        .response_body = actor_doc_json,
     });
 
     const body = try std.fmt.allocPrint(
@@ -4565,12 +4681,15 @@ test "POST /users/:name/inbox Create discovers actor even when not addressed" {
         .{actor_id},
     );
 
-    const resp = handle(&app_state, a, .{
-        .method = .POST,
-        .target = "/users/alice/inbox",
-        .content_type = "application/activity+json",
-        .body = body,
-    });
+    const inbox_req = try signedInboxRequest(
+        a,
+        "example.test",
+        "/users/alice/inbox",
+        body,
+        remote_key_id,
+        remote_kp.private_key_pem,
+    );
+    const resp = handle(&app_state, a, inbox_req);
     try std.testing.expectEqual(std.http.Status.accepted, resp.status);
     try std.testing.expectEqual(@as(usize, 1), mock.requests.items.len);
 
@@ -4586,29 +4705,35 @@ test "POST /users/:name/inbox Create infers unlisted visibility when Public is i
     const params = app_state.cfg.password_params;
     _ = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
 
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const remote_kp = try @import("crypto_rsa.zig").generateRsaKeyPairPem(a, 512);
+    const remote_key_id = "https://remote.test/users/bob#main-key";
+
     try remote_actors.upsert(&app_state.conn, .{
         .id = "https://remote.test/users/bob",
         .inbox = "https://remote.test/users/bob/inbox",
         .shared_inbox = null,
         .preferred_username = "bob",
         .domain = "remote.test",
-        .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
+        .public_key_pem = remote_kp.public_key_pem,
     });
-
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
 
     const body =
         \\{"@context":"https://www.w3.org/ns/activitystreams","type":"Create","actor":"https://remote.test/users/bob","to":["https://remote.test/users/bob/followers"],"cc":["https://www.w3.org/ns/activitystreams#Public"],"object":{"id":"https://remote.test/notes/2","type":"Note","content":"<p>Hello</p>","published":"2020-01-01T00:00:00.000Z","to":["https://remote.test/users/bob/followers"],"cc":["https://www.w3.org/ns/activitystreams#Public"]}}
     ;
 
-    const resp = handle(&app_state, a, .{
-        .method = .POST,
-        .target = "/users/alice/inbox",
-        .content_type = "application/activity+json",
-        .body = body,
-    });
+    const inbox_req = try signedInboxRequest(
+        a,
+        "example.test",
+        "/users/alice/inbox",
+        body,
+        remote_key_id,
+        remote_kp.private_key_pem,
+    );
+    const resp = handle(&app_state, a, inbox_req);
     try std.testing.expectEqual(std.http.Status.accepted, resp.status);
 
     const st = (try remote_statuses.lookupByUri(&app_state.conn, a, "https://remote.test/notes/2")).?;
@@ -4622,29 +4747,35 @@ test "POST /users/:name/inbox Create stores remote status" {
     const params = app_state.cfg.password_params;
     _ = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
 
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const remote_kp = try @import("crypto_rsa.zig").generateRsaKeyPairPem(a, 512);
+    const remote_key_id = "https://remote.test/users/bob#main-key";
+
     try remote_actors.upsert(&app_state.conn, .{
         .id = "https://remote.test/users/bob",
         .inbox = "https://remote.test/users/bob/inbox",
         .shared_inbox = null,
         .preferred_username = "bob",
         .domain = "remote.test",
-        .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
+        .public_key_pem = remote_kp.public_key_pem,
     });
-
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
 
     const body =
         \\{"@context":"https://www.w3.org/ns/activitystreams","type":"Create","actor":"https://remote.test/users/bob","object":{"id":"https://remote.test/notes/1","type":"Note","content":"<p>Hello</p>","published":"2020-01-01T00:00:00.000Z"}}
     ;
 
-    const resp = handle(&app_state, a, .{
-        .method = .POST,
-        .target = "/users/alice/inbox",
-        .content_type = "application/activity+json",
-        .body = body,
-    });
+    const inbox_req = try signedInboxRequest(
+        a,
+        "example.test",
+        "/users/alice/inbox",
+        body,
+        remote_key_id,
+        remote_kp.private_key_pem,
+    );
+    const resp = handle(&app_state, a, inbox_req);
     try std.testing.expectEqual(std.http.Status.accepted, resp.status);
 
     const st = (try remote_statuses.lookupByUri(&app_state.conn, a, "https://remote.test/notes/1")).?;
@@ -4660,29 +4791,35 @@ test "POST /users/:name/inbox Delete marks remote status deleted" {
     const params = app_state.cfg.password_params;
     _ = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
 
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const remote_kp = try @import("crypto_rsa.zig").generateRsaKeyPairPem(a, 512);
+    const remote_key_id = "https://remote.test/users/bob#main-key";
+
     try remote_actors.upsert(&app_state.conn, .{
         .id = "https://remote.test/users/bob",
         .inbox = "https://remote.test/users/bob/inbox",
         .shared_inbox = null,
         .preferred_username = "bob",
         .domain = "remote.test",
-        .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
+        .public_key_pem = remote_kp.public_key_pem,
     });
-
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
 
     const create_body =
         \\{"@context":"https://www.w3.org/ns/activitystreams","type":"Create","actor":"https://remote.test/users/bob","object":{"id":"https://remote.test/notes/1","type":"Note","content":"<p>Hello</p>","published":"2020-01-01T00:00:00.000Z"}}
     ;
 
-    const create_resp = handle(&app_state, a, .{
-        .method = .POST,
-        .target = "/users/alice/inbox",
-        .content_type = "application/activity+json",
-        .body = create_body,
-    });
+    const create_req = try signedInboxRequest(
+        a,
+        "example.test",
+        "/users/alice/inbox",
+        create_body,
+        remote_key_id,
+        remote_kp.private_key_pem,
+    );
+    const create_resp = handle(&app_state, a, create_req);
     try std.testing.expectEqual(std.http.Status.accepted, create_resp.status);
     try std.testing.expect((try remote_statuses.lookupByUri(&app_state.conn, a, "https://remote.test/notes/1")) != null);
 
@@ -4691,12 +4828,15 @@ test "POST /users/:name/inbox Delete marks remote status deleted" {
         \\{"@context":"https://www.w3.org/ns/activitystreams","type":"Delete","actor":"https://remote.test/users/bob","object":{"id":"https://remote.test/notes/1","type":"Tombstone","deleted":"2020-01-01T00:00:02.000Z"}}
     ;
 
-    const delete_resp = handle(&app_state, a, .{
-        .method = .POST,
-        .target = "/users/alice/inbox",
-        .content_type = "application/activity+json",
-        .body = delete_body,
-    });
+    const delete_req = try signedInboxRequest(
+        a,
+        "example.test",
+        "/users/alice/inbox",
+        delete_body,
+        remote_key_id,
+        remote_kp.private_key_pem,
+    );
+    const delete_resp = handle(&app_state, a, delete_req);
     try std.testing.expectEqual(std.http.Status.accepted, delete_resp.status);
 
     try std.testing.expect((try remote_statuses.lookupByUri(&app_state.conn, a, "https://remote.test/notes/1")) == null);
@@ -4714,29 +4854,35 @@ test "POST /users/:name/inbox Delete publishes streaming delete" {
     const sub = try app_state.streaming.subscribe(user_id, &.{.user});
     defer app_state.streaming.unsubscribe(sub);
 
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const remote_kp = try @import("crypto_rsa.zig").generateRsaKeyPairPem(a, 512);
+    const remote_key_id = "https://remote.test/users/bob#main-key";
+
     try remote_actors.upsert(&app_state.conn, .{
         .id = "https://remote.test/users/bob",
         .inbox = "https://remote.test/users/bob/inbox",
         .shared_inbox = null,
         .preferred_username = "bob",
         .domain = "remote.test",
-        .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
+        .public_key_pem = remote_kp.public_key_pem,
     });
-
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
 
     const create_body =
         \\{"@context":"https://www.w3.org/ns/activitystreams","type":"Create","actor":"https://remote.test/users/bob","object":{"id":"https://remote.test/notes/1","type":"Note","content":"<p>Hello</p>","published":"2020-01-01T00:00:00.000Z"}}
     ;
 
-    const create_resp = handle(&app_state, a, .{
-        .method = .POST,
-        .target = "/users/alice/inbox",
-        .content_type = "application/activity+json",
-        .body = create_body,
-    });
+    const create_req = try signedInboxRequest(
+        a,
+        "example.test",
+        "/users/alice/inbox",
+        create_body,
+        remote_key_id,
+        remote_kp.private_key_pem,
+    );
+    const create_resp = handle(&app_state, a, create_req);
     try std.testing.expectEqual(std.http.Status.accepted, create_resp.status);
 
     // Drain the create update and capture the remote API id.
@@ -4759,12 +4905,15 @@ test "POST /users/:name/inbox Delete publishes streaming delete" {
         \\{"@context":"https://www.w3.org/ns/activitystreams","type":"Delete","actor":"https://remote.test/users/bob","object":"https://remote.test/notes/1"}
     ;
 
-    const delete_resp = handle(&app_state, a, .{
-        .method = .POST,
-        .target = "/users/alice/inbox",
-        .content_type = "application/activity+json",
-        .body = delete_body,
-    });
+    const delete_req = try signedInboxRequest(
+        a,
+        "example.test",
+        "/users/alice/inbox",
+        delete_body,
+        remote_key_id,
+        remote_kp.private_key_pem,
+    );
+    const delete_resp = handle(&app_state, a, delete_req);
     try std.testing.expectEqual(std.http.Status.accepted, delete_resp.status);
 
     const msg_delete = sub.pop() orelse {
@@ -4787,29 +4936,35 @@ test "POST /users/:name/inbox Create stores remote attachments and returns them 
     const params = app_state.cfg.password_params;
     _ = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
 
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const remote_kp = try @import("crypto_rsa.zig").generateRsaKeyPairPem(a, 512);
+    const remote_key_id = "https://remote.test/users/bob#main-key";
+
     try remote_actors.upsert(&app_state.conn, .{
         .id = "https://remote.test/users/bob",
         .inbox = "https://remote.test/users/bob/inbox",
         .shared_inbox = null,
         .preferred_username = "bob",
         .domain = "remote.test",
-        .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
+        .public_key_pem = remote_kp.public_key_pem,
     });
-
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
 
     const create_body =
         \\{"@context":"https://www.w3.org/ns/activitystreams","type":"Create","actor":"https://remote.test/users/bob","object":{"id":"https://remote.test/notes/1","type":"Note","content":"<p>Hello</p>","published":"2020-01-01T00:00:00.000Z","attachment":[{"type":"Document","mediaType":"image/png","url":"https://remote.test/media/a.png","name":"alt"}]}}
     ;
 
-    const create_resp = handle(&app_state, a, .{
-        .method = .POST,
-        .target = "/users/alice/inbox",
-        .content_type = "application/activity+json",
-        .body = create_body,
-    });
+    const create_req = try signedInboxRequest(
+        a,
+        "example.test",
+        "/users/alice/inbox",
+        create_body,
+        remote_key_id,
+        remote_kp.private_key_pem,
+    );
+    const create_resp = handle(&app_state, a, create_req);
     try std.testing.expectEqual(std.http.Status.accepted, create_resp.status);
 
     const actor = (try remote_actors.lookupById(&app_state.conn, a, "https://remote.test/users/bob")).?;

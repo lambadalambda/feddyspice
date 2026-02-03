@@ -4,11 +4,60 @@ const crypto_rsa = @import("crypto_rsa.zig");
 
 pub const Error = crypto_rsa.Error;
 
+pub const VerifyError = crypto_rsa.Error || std.Io.Writer.Error || error{
+    InvalidEncoding,
+    InvalidSignatureHeader,
+    UnsupportedSignedHeaders,
+};
+
 pub const SignedHeaders = struct {
     date: []const u8,
     digest: []const u8,
     signature: []const u8,
 };
+
+pub const ParsedSignature = struct {
+    key_id: []const u8,
+    algorithm: ?[]const u8 = null,
+    headers: ?[]const u8 = null,
+    signature_b64: []const u8,
+};
+
+pub fn parseSignatureHeader(value: []const u8) ?ParsedSignature {
+    var key_id: ?[]const u8 = null;
+    var algorithm: ?[]const u8 = null;
+    var headers: ?[]const u8 = null;
+    var signature_b64: ?[]const u8 = null;
+
+    var it = std.mem.splitScalar(u8, value, ',');
+    while (it.next()) |part_raw| {
+        const part = std.mem.trim(u8, part_raw, " \t");
+        if (part.len == 0) continue;
+
+        const eq = std.mem.indexOfScalar(u8, part, '=') orelse continue;
+        const k = std.mem.trim(u8, part[0..eq], " \t");
+        var v = std.mem.trim(u8, part[eq + 1 ..], " \t");
+        if (v.len >= 2 and v[0] == '"' and v[v.len - 1] == '"') {
+            v = v[1 .. v.len - 1];
+        }
+
+        if (std.ascii.eqlIgnoreCase(k, "keyId")) key_id = v;
+        if (std.ascii.eqlIgnoreCase(k, "algorithm")) algorithm = v;
+        if (std.ascii.eqlIgnoreCase(k, "headers")) headers = v;
+        if (std.ascii.eqlIgnoreCase(k, "signature")) signature_b64 = v;
+    }
+
+    const kid = key_id orelse return null;
+    const sig = signature_b64 orelse return null;
+    if (kid.len == 0 or sig.len == 0) return null;
+
+    return .{
+        .key_id = kid,
+        .algorithm = algorithm,
+        .headers = headers,
+        .signature_b64 = sig,
+    };
+}
 
 pub fn digestHeaderValueAlloc(allocator: std.mem.Allocator, body: []const u8) Error![]u8 {
     var digest: [32]u8 = undefined;
@@ -104,12 +153,104 @@ fn base64EncodeAlloc(allocator: std.mem.Allocator, data: []const u8) std.mem.All
     return out;
 }
 
-fn base64DecodeAlloc(allocator: std.mem.Allocator, b64: []const u8) ![]u8 {
+fn base64DecodeAlloc(allocator: std.mem.Allocator, b64: []const u8) VerifyError![]u8 {
     const decoded_len = std.base64.standard.Decoder.calcSizeForSlice(b64) catch return error.InvalidEncoding;
     const out = try allocator.alloc(u8, decoded_len);
     errdefer allocator.free(out);
     std.base64.standard.Decoder.decode(out, b64) catch return error.InvalidEncoding;
     return out;
+}
+
+pub fn digestHeaderHasSha256(body: []const u8, digest_header_value: []const u8) bool {
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(body, &digest, .{});
+
+    const b64_len = comptime std.base64.standard.Encoder.calcSize(digest.len);
+    var b64_buf: [b64_len]u8 = undefined;
+    const expected_b64 = std.base64.standard.Encoder.encode(b64_buf[0..], &digest);
+
+    var it = std.mem.splitScalar(u8, digest_header_value, ',');
+    while (it.next()) |part_raw| {
+        const part = std.mem.trim(u8, part_raw, " \t");
+        if (part.len < "SHA-256=".len) continue;
+        if (!std.ascii.eqlIgnoreCase(part[0.."SHA-256=".len], "SHA-256=")) continue;
+
+        const got_b64 = std.mem.trim(u8, part["SHA-256=".len..], " \t");
+        if (std.mem.eql(u8, got_b64, expected_b64)) return true;
+    }
+
+    return false;
+}
+
+fn signingStringFromHeadersAlloc(
+    allocator: std.mem.Allocator,
+    headers: []const u8,
+    method: std.http.Method,
+    target: []const u8,
+    host: []const u8,
+    date: []const u8,
+    digest: []const u8,
+) VerifyError![]u8 {
+    var method_buf: [16]u8 = undefined;
+    const method_upper = @tagName(method);
+    const method_lower = std.ascii.lowerString(method_buf[0..method_upper.len], method_upper);
+
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+
+    var first: bool = true;
+    var it = std.mem.tokenizeAny(u8, headers, " \t");
+    while (it.next()) |h| {
+        if (first) {
+            first = false;
+        } else {
+            try aw.writer.writeByte('\n');
+        }
+
+        if (std.ascii.eqlIgnoreCase(h, "(request-target)")) {
+            try aw.writer.print("(request-target): {s} {s}", .{ method_lower, target });
+        } else if (std.ascii.eqlIgnoreCase(h, "host")) {
+            try aw.writer.print("host: {s}", .{host});
+        } else if (std.ascii.eqlIgnoreCase(h, "date")) {
+            try aw.writer.print("date: {s}", .{date});
+        } else if (std.ascii.eqlIgnoreCase(h, "digest")) {
+            try aw.writer.print("digest: {s}", .{digest});
+        } else {
+            return error.UnsupportedSignedHeaders;
+        }
+    }
+
+    if (first) return error.InvalidSignatureHeader;
+
+    const out = try aw.toOwnedSlice();
+    aw.deinit();
+    return out;
+}
+
+pub fn verifyRequestSignaturePem(
+    allocator: std.mem.Allocator,
+    public_key_pem: []const u8,
+    signature_header_value: []const u8,
+    method: std.http.Method,
+    target: []const u8,
+    host: []const u8,
+    date: []const u8,
+    digest: []const u8,
+) VerifyError!bool {
+    const parsed = parseSignatureHeader(signature_header_value) orelse return error.InvalidSignatureHeader;
+
+    if (parsed.algorithm) |alg| {
+        if (!std.ascii.eqlIgnoreCase(alg, "rsa-sha256")) return false;
+    }
+
+    const headers = parsed.headers orelse return error.InvalidSignatureHeader;
+    const signing_string = try signingStringFromHeadersAlloc(allocator, headers, method, target, host, date, digest);
+    defer allocator.free(signing_string);
+
+    const sig_bytes = try base64DecodeAlloc(allocator, parsed.signature_b64);
+    defer allocator.free(sig_bytes);
+
+    return try crypto_rsa.verifyRsaSha256Pem(public_key_pem, signing_string, sig_bytes);
 }
 
 pub fn signRequest(
@@ -168,15 +309,48 @@ test "signRequest builds verifiable signature" {
         0,
     );
 
-    // Reconstruct signing string and verify the signature.
-    const signing_string = try signingStringAlloc(a, .POST, "/inbox", "example.test", signed.date, signed.digest);
+    try std.testing.expect(digestHeaderHasSha256(body, signed.digest));
+    try std.testing.expect(try verifyRequestSignaturePem(
+        a,
+        kp.public_key_pem,
+        signed.signature,
+        .POST,
+        "/inbox",
+        "example.test",
+        signed.date,
+        signed.digest,
+    ));
+}
 
-    const sig_prefix = "signature=\"";
-    const sig_b64 = std.mem.indexOf(u8, signed.signature, sig_prefix) orelse return error.TestUnexpectedResult;
-    const sig_b64_start = sig_b64 + sig_prefix.len;
-    const sig_b64_end = std.mem.indexOfPos(u8, signed.signature, sig_b64_start, "\"") orelse
-        return error.TestUnexpectedResult;
-    const sig_bytes = try base64DecodeAlloc(a, signed.signature[sig_b64_start..sig_b64_end]);
+test "verifyRequestSignaturePem returns false on wrong digest value" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
 
-    try std.testing.expect(try crypto_rsa.verifyRsaSha256Pem(kp.public_key_pem, signing_string, sig_bytes));
+    const kp = try crypto_rsa.generateRsaKeyPairPem(a, 512);
+
+    const body = "{\"hello\":\"world\"}";
+    const key_id = "http://example.test/users/alice#main-key";
+    const signed = try signRequest(
+        a,
+        kp.private_key_pem,
+        key_id,
+        .POST,
+        "/inbox",
+        "example.test",
+        body,
+        0,
+    );
+
+    try std.testing.expect(!digestHeaderHasSha256("tampered", signed.digest));
+    try std.testing.expect(!(try verifyRequestSignaturePem(
+        a,
+        kp.public_key_pem,
+        signed.signature,
+        .POST,
+        "/inbox",
+        "example.test",
+        signed.date,
+        "SHA-256=totally-wrong",
+    )));
 }
