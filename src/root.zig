@@ -29,6 +29,7 @@ pub const jobs_db = @import("jobs_db.zig");
 pub const job_worker = @import("job_worker.zig");
 pub const inbox_dedupe = @import("inbox_dedupe.zig");
 pub const websocket = @import("websocket.zig");
+pub const streaming_hub = @import("streaming_hub.zig");
 
 test {
     std.testing.refAllDecls(@This());
