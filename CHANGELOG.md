@@ -164,6 +164,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `POST /api/v1/accounts/:id/unfollow` now sends ActivityPub `Undo(Follow)` to the remote inbox (previously local-only).
 - Inbox handling now supports ActivityPub `Undo(Follow)` to remove inbound followers.
 - `POST /api/v1/statuses/:id/{favourite,unfavourite}` now federates `Like` / `Undo(Like)` for remote statuses.
+- `POST /api/v1/statuses/:id/{reblog,unreblog}` now federates `Announce` / `Undo(Announce)` for remote statuses.
 - Inbound ActivityPub `Create` distinguishes `unlisted` (Public in `cc`) from `public` (Public in `to`).
 - `mise run fed:test` is more reliable by bringing up the fedbox stack explicitly before running the test runner.
 - Outbound HTTP requests enforce basic SSRF protections (DNS-based) by blocking private/loopback/link-local/multicast ranges by default; fedbox enables private ranges via `FEDDYSPICE_ALLOW_PRIVATE_NETWORKS=true`.

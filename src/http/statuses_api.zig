@@ -189,6 +189,12 @@ pub fn statusActionNoop(
             background.sendLike(app_state, allocator, info.?.user_id, actor.?.id, st.?.remote_uri);
         } else if (std.mem.eql(u8, suffix, "/unfavourite")) {
             background.sendUndoLike(app_state, allocator, info.?.user_id, actor.?.id, st.?.remote_uri);
+        } else if (std.mem.eql(u8, suffix, "/reblog")) {
+            const publicish = std.mem.eql(u8, st.?.visibility, "public") or std.mem.eql(u8, st.?.visibility, "unlisted");
+            if (publicish) background.sendAnnounce(app_state, allocator, info.?.user_id, actor.?.id, st.?.remote_uri);
+        } else if (std.mem.eql(u8, suffix, "/unreblog")) {
+            const publicish = std.mem.eql(u8, st.?.visibility, "public") or std.mem.eql(u8, st.?.visibility, "unlisted");
+            if (publicish) background.sendUndoAnnounce(app_state, allocator, info.?.user_id, actor.?.id, st.?.remote_uri);
         }
 
         return remoteStatusResponse(app_state, allocator, actor.?, st.?);

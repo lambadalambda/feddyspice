@@ -28,6 +28,12 @@ pub fn runJob(app_state: *app.App, allocator: std.mem.Allocator, job: jobs.Job) 
         .send_undo_like => |j| {
             try federation.sendUndoLikeActivity(app_state, allocator, j.user_id, j.remote_actor_id, j.remote_status_uri);
         },
+        .send_announce => |j| {
+            try federation.sendAnnounceActivity(app_state, allocator, j.user_id, j.remote_actor_id, j.remote_status_uri);
+        },
+        .send_undo_announce => |j| {
+            try federation.sendUndoAnnounceActivity(app_state, allocator, j.user_id, j.remote_actor_id, j.remote_status_uri);
+        },
         .accept_inbound_follow => |j| {
             try federation.acceptInboundFollow(
                 app_state,
@@ -323,6 +329,142 @@ pub fn sendUndoLike(
 
     var t = std.Thread.spawn(.{}, SendUndoLikeJob.run, .{job}) catch |err| {
         app_state.logger.err("sendUndoLike: thread spawn failed err={any}", .{err});
+        return;
+    };
+    t.detach();
+}
+
+pub fn sendAnnounce(
+    app_state: *app.App,
+    allocator: std.mem.Allocator,
+    user_id: i64,
+    remote_actor_id: []const u8,
+    remote_status_uri: []const u8,
+) void {
+    switch (app_state.jobs_mode) {
+        .sync => {
+            federation.sendAnnounceActivity(app_state, allocator, user_id, remote_actor_id, remote_status_uri) catch |err| {
+                app_state.logger.err("sendAnnounce: sync deliver failed remote_actor_id={s} err={any}", .{ remote_actor_id, err });
+            };
+            return;
+        },
+        .disabled => {
+            const remote_actor_id_copy = app_state.allocator.dupe(u8, remote_actor_id) catch return;
+            errdefer app_state.allocator.free(remote_actor_id_copy);
+            const remote_status_uri_copy = app_state.allocator.dupe(u8, remote_status_uri) catch return;
+            errdefer app_state.allocator.free(remote_status_uri_copy);
+            app_state.jobs_queue.push(app_state.allocator, .{
+                .send_announce = .{
+                    .user_id = user_id,
+                    .remote_actor_id = remote_actor_id_copy,
+                    .remote_status_uri = remote_status_uri_copy,
+                },
+            }) catch {};
+            return;
+        },
+        .spawn => {},
+    }
+
+    if (jobs_db.enqueue(&app_state.conn, allocator, .{
+        .send_announce = .{
+            .user_id = user_id,
+            .remote_actor_id = @constCast(remote_actor_id),
+            .remote_status_uri = @constCast(remote_status_uri),
+        },
+    }, .{})) |_| {
+        return;
+    } else |err| {
+        app_state.logger.err("sendAnnounce: enqueue failed remote_actor_id={s} err={any}", .{ remote_actor_id, err });
+        // Fallback to per-job thread execution.
+    }
+
+    const job = std.heap.page_allocator.create(SendAnnounceJob) catch return;
+    errdefer std.heap.page_allocator.destroy(job);
+
+    const remote_actor_id_copy = std.heap.page_allocator.dupe(u8, remote_actor_id) catch return;
+    errdefer std.heap.page_allocator.free(remote_actor_id_copy);
+
+    const remote_status_uri_copy = std.heap.page_allocator.dupe(u8, remote_status_uri) catch return;
+    errdefer std.heap.page_allocator.free(remote_status_uri_copy);
+
+    job.* = .{
+        .cfg = app_state.cfg,
+        .logger = app_state.logger,
+        .user_id = user_id,
+        .remote_actor_id = remote_actor_id_copy,
+        .remote_status_uri = remote_status_uri_copy,
+    };
+
+    var t = std.Thread.spawn(.{}, SendAnnounceJob.run, .{job}) catch |err| {
+        app_state.logger.err("sendAnnounce: thread spawn failed err={any}", .{err});
+        return;
+    };
+    t.detach();
+}
+
+pub fn sendUndoAnnounce(
+    app_state: *app.App,
+    allocator: std.mem.Allocator,
+    user_id: i64,
+    remote_actor_id: []const u8,
+    remote_status_uri: []const u8,
+) void {
+    switch (app_state.jobs_mode) {
+        .sync => {
+            federation.sendUndoAnnounceActivity(app_state, allocator, user_id, remote_actor_id, remote_status_uri) catch |err| {
+                app_state.logger.err("sendUndoAnnounce: sync deliver failed remote_actor_id={s} err={any}", .{ remote_actor_id, err });
+            };
+            return;
+        },
+        .disabled => {
+            const remote_actor_id_copy = app_state.allocator.dupe(u8, remote_actor_id) catch return;
+            errdefer app_state.allocator.free(remote_actor_id_copy);
+            const remote_status_uri_copy = app_state.allocator.dupe(u8, remote_status_uri) catch return;
+            errdefer app_state.allocator.free(remote_status_uri_copy);
+            app_state.jobs_queue.push(app_state.allocator, .{
+                .send_undo_announce = .{
+                    .user_id = user_id,
+                    .remote_actor_id = remote_actor_id_copy,
+                    .remote_status_uri = remote_status_uri_copy,
+                },
+            }) catch {};
+            return;
+        },
+        .spawn => {},
+    }
+
+    if (jobs_db.enqueue(&app_state.conn, allocator, .{
+        .send_undo_announce = .{
+            .user_id = user_id,
+            .remote_actor_id = @constCast(remote_actor_id),
+            .remote_status_uri = @constCast(remote_status_uri),
+        },
+    }, .{})) |_| {
+        return;
+    } else |err| {
+        app_state.logger.err("sendUndoAnnounce: enqueue failed remote_actor_id={s} err={any}", .{ remote_actor_id, err });
+        // Fallback to per-job thread execution.
+    }
+
+    const job = std.heap.page_allocator.create(SendUndoAnnounceJob) catch return;
+    errdefer std.heap.page_allocator.destroy(job);
+
+    const remote_actor_id_copy = std.heap.page_allocator.dupe(u8, remote_actor_id) catch return;
+    errdefer std.heap.page_allocator.free(remote_actor_id_copy);
+
+    const remote_status_uri_copy = std.heap.page_allocator.dupe(u8, remote_status_uri) catch return;
+    errdefer std.heap.page_allocator.free(remote_status_uri_copy);
+
+    job.* = .{
+        .cfg = app_state.cfg,
+        .logger = app_state.logger,
+        .user_id = user_id,
+        .remote_actor_id = remote_actor_id_copy,
+        .remote_status_uri = remote_status_uri_copy,
+    };
+
+    var t = std.Thread.spawn(.{}, SendUndoAnnounceJob.run, .{job}) catch |err| {
+        app_state.logger.err("sendUndoAnnounce: thread spawn failed err={any}", .{err});
         return;
     };
     t.detach();
@@ -689,6 +831,98 @@ const SendUndoLikeJob = struct {
 
         federation.sendUndoLikeActivity(&thread_app, a, job.user_id, job.remote_actor_id, job.remote_status_uri) catch |err| {
             job.logger.err("SendUndoLikeJob: deliver failed remote_actor_id={s} err={any}", .{ job.remote_actor_id, err });
+            return;
+        };
+    }
+};
+
+const SendAnnounceJob = struct {
+    cfg: config.Config,
+    logger: *log.Logger,
+    user_id: i64,
+    remote_actor_id: []u8,
+    remote_status_uri: []u8,
+
+    fn run(job: *@This()) void {
+        defer {
+            std.heap.page_allocator.free(job.remote_actor_id);
+            std.heap.page_allocator.free(job.remote_status_uri);
+            std.heap.page_allocator.destroy(job);
+        }
+
+        var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+
+        var conn = db.Db.open(a, job.cfg.db_path) catch return;
+        defer conn.close();
+
+        var hub: streaming_hub.Hub = streaming_hub.Hub.init(std.heap.page_allocator);
+        defer hub.deinit();
+
+        var thread_app: app.App = .{
+            .allocator = a,
+            .cfg = job.cfg,
+            .conn = conn,
+            .logger = job.logger,
+            .jobs_mode = .sync,
+            .jobs_queue = .{},
+            .streaming = &hub,
+            .transport = undefined,
+            .null_transport = transport.NullTransport.init(),
+            .real_transport = transport.RealTransport.init(a, job.cfg) catch return,
+        };
+        thread_app.transport = thread_app.real_transport.transport();
+        defer thread_app.transport.deinit();
+
+        federation.sendAnnounceActivity(&thread_app, a, job.user_id, job.remote_actor_id, job.remote_status_uri) catch |err| {
+            job.logger.err("SendAnnounceJob: deliver failed remote_actor_id={s} err={any}", .{ job.remote_actor_id, err });
+            return;
+        };
+    }
+};
+
+const SendUndoAnnounceJob = struct {
+    cfg: config.Config,
+    logger: *log.Logger,
+    user_id: i64,
+    remote_actor_id: []u8,
+    remote_status_uri: []u8,
+
+    fn run(job: *@This()) void {
+        defer {
+            std.heap.page_allocator.free(job.remote_actor_id);
+            std.heap.page_allocator.free(job.remote_status_uri);
+            std.heap.page_allocator.destroy(job);
+        }
+
+        var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+
+        var conn = db.Db.open(a, job.cfg.db_path) catch return;
+        defer conn.close();
+
+        var hub: streaming_hub.Hub = streaming_hub.Hub.init(std.heap.page_allocator);
+        defer hub.deinit();
+
+        var thread_app: app.App = .{
+            .allocator = a,
+            .cfg = job.cfg,
+            .conn = conn,
+            .logger = job.logger,
+            .jobs_mode = .sync,
+            .jobs_queue = .{},
+            .streaming = &hub,
+            .transport = undefined,
+            .null_transport = transport.NullTransport.init(),
+            .real_transport = transport.RealTransport.init(a, job.cfg) catch return,
+        };
+        thread_app.transport = thread_app.real_transport.transport();
+        defer thread_app.transport.deinit();
+
+        federation.sendUndoAnnounceActivity(&thread_app, a, job.user_id, job.remote_actor_id, job.remote_status_uri) catch |err| {
+            job.logger.err("SendUndoAnnounceJob: deliver failed remote_actor_id={s} err={any}", .{ job.remote_actor_id, err });
             return;
         };
     }

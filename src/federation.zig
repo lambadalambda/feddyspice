@@ -754,6 +754,152 @@ pub fn sendUndoLikeActivity(
     try deliverSignedInboxPostOkDiscardBody(app_state, allocator, keys.private_key_pem, key_id, inbox_url, body);
 }
 
+pub fn sendAnnounceActivity(
+    app_state: *app.App,
+    allocator: std.mem.Allocator,
+    user_id: i64,
+    remote_actor_id: []const u8,
+    remote_status_uri: []const u8,
+) Error!void {
+    const author = (try remote_actors.lookupById(&app_state.conn, allocator, remote_actor_id)) orelse
+        return error.RemoteActorMissing;
+
+    const local_user = (try users.lookupUserById(&app_state.conn, allocator, user_id)) orelse
+        return error.InvalidHandle;
+
+    const base = try baseUrlAlloc(app_state, allocator);
+    const local_actor_id = try std.fmt.allocPrint(allocator, "{s}/users/{s}", .{ base, local_user.username });
+    const key_id = try std.fmt.allocPrint(allocator, "{s}#main-key", .{local_actor_id});
+    const followers_url = try std.fmt.allocPrint(allocator, "{s}/users/{s}/followers", .{ base, local_user.username });
+
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(remote_status_uri, &digest, .{});
+    const hex = std.fmt.bytesToHex(digest, .lower);
+    const announce_id = try std.fmt.allocPrint(allocator, "{s}/users/{s}/announces/{s}", .{ base, local_user.username, hex[0..] });
+
+    const public_iri = "https://www.w3.org/ns/activitystreams#Public";
+
+    const to = [_][]const u8{public_iri};
+    const cc = [_][]const u8{ followers_url, author.id };
+
+    const payload = .{
+        .@"@context" = "https://www.w3.org/ns/activitystreams",
+        .id = announce_id,
+        .type = "Announce",
+        .actor = local_actor_id,
+        .object = remote_status_uri,
+        .to = to[0..],
+        .cc = cc[0..],
+    };
+    const body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch
+        return error.OutOfMemory;
+
+    const follower_ids = try followers.listAcceptedRemoteActorIds(&app_state.conn, allocator, user_id, 200);
+
+    var deliver_ids: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer deliver_ids.deinit(allocator);
+    for (follower_ids) |id| try deliver_ids.append(allocator, id);
+    var has_author: bool = false;
+    for (deliver_ids.items) |existing| {
+        if (std.mem.eql(u8, existing, author.id)) {
+            has_author = true;
+            break;
+        }
+    }
+    if (!has_author) try deliver_ids.append(allocator, author.id);
+
+    const keys = try actor_keys.ensureForUser(&app_state.conn, allocator, user_id);
+
+    for (deliver_ids.items) |deliver_actor_id| {
+        const actor = if (std.mem.eql(u8, deliver_actor_id, author.id)) author else blk: {
+            const a = remote_actors.lookupById(&app_state.conn, allocator, deliver_actor_id) catch null;
+            break :blk a orelse continue;
+        };
+        const inbox_url = deliveryInboxUrl(actor);
+        deliverSignedInboxPostOkDiscardBody(app_state, allocator, keys.private_key_pem, key_id, inbox_url, body) catch |err| {
+            app_state.logger.err("sendAnnounceActivity: deliver failed inbox={s} err={any}", .{ inbox_url, err });
+            continue;
+        };
+    }
+}
+
+pub fn sendUndoAnnounceActivity(
+    app_state: *app.App,
+    allocator: std.mem.Allocator,
+    user_id: i64,
+    remote_actor_id: []const u8,
+    remote_status_uri: []const u8,
+) Error!void {
+    const author = (try remote_actors.lookupById(&app_state.conn, allocator, remote_actor_id)) orelse
+        return error.RemoteActorMissing;
+
+    const local_user = (try users.lookupUserById(&app_state.conn, allocator, user_id)) orelse
+        return error.InvalidHandle;
+
+    const base = try baseUrlAlloc(app_state, allocator);
+    const local_actor_id = try std.fmt.allocPrint(allocator, "{s}/users/{s}", .{ base, local_user.username });
+    const key_id = try std.fmt.allocPrint(allocator, "{s}#main-key", .{local_actor_id});
+    const followers_url = try std.fmt.allocPrint(allocator, "{s}/users/{s}/followers", .{ base, local_user.username });
+
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(remote_status_uri, &digest, .{});
+    const hex = std.fmt.bytesToHex(digest, .lower);
+    const announce_id = try std.fmt.allocPrint(allocator, "{s}/users/{s}/announces/{s}", .{ base, local_user.username, hex[0..] });
+
+    const public_iri = "https://www.w3.org/ns/activitystreams#Public";
+
+    const to = [_][]const u8{public_iri};
+    const cc = [_][]const u8{ followers_url, author.id };
+
+    const undo_id = try std.fmt.allocPrint(allocator, "{s}#undo", .{announce_id});
+    const payload = .{
+        .@"@context" = "https://www.w3.org/ns/activitystreams",
+        .id = undo_id,
+        .type = "Undo",
+        .actor = local_actor_id,
+        .to = to[0..],
+        .cc = cc[0..],
+        .object = .{
+            .id = announce_id,
+            .type = "Announce",
+            .actor = local_actor_id,
+            .object = remote_status_uri,
+            .to = to[0..],
+            .cc = cc[0..],
+        },
+    };
+    const body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch
+        return error.OutOfMemory;
+
+    const follower_ids = try followers.listAcceptedRemoteActorIds(&app_state.conn, allocator, user_id, 200);
+
+    var deliver_ids: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer deliver_ids.deinit(allocator);
+    for (follower_ids) |id| try deliver_ids.append(allocator, id);
+    var has_author: bool = false;
+    for (deliver_ids.items) |existing| {
+        if (std.mem.eql(u8, existing, author.id)) {
+            has_author = true;
+            break;
+        }
+    }
+    if (!has_author) try deliver_ids.append(allocator, author.id);
+
+    const keys = try actor_keys.ensureForUser(&app_state.conn, allocator, user_id);
+
+    for (deliver_ids.items) |deliver_actor_id| {
+        const actor = if (std.mem.eql(u8, deliver_actor_id, author.id)) author else blk: {
+            const a = remote_actors.lookupById(&app_state.conn, allocator, deliver_actor_id) catch null;
+            break :blk a orelse continue;
+        };
+        const inbox_url = deliveryInboxUrl(actor);
+        deliverSignedInboxPostOkDiscardBody(app_state, allocator, keys.private_key_pem, key_id, inbox_url, body) catch |err| {
+            app_state.logger.err("sendUndoAnnounceActivity: deliver failed inbox={s} err={any}", .{ inbox_url, err });
+            continue;
+        };
+    }
+}
+
 pub fn followHandle(app_state: *app.App, allocator: std.mem.Allocator, user_id: i64, handle: []const u8) Error!FollowResult {
     const actor = try resolveRemoteActorByHandle(app_state, allocator, handle);
 

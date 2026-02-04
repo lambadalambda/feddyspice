@@ -23,6 +23,8 @@ pub const Job = union(enum) {
     send_undo_follow: SendUndoFollow,
     send_like: SendLike,
     send_undo_like: SendUndoLike,
+    send_announce: SendAnnounce,
+    send_undo_announce: SendUndoAnnounce,
     accept_inbound_follow: AcceptInboundFollow,
     deliver_status: DeliverStatus,
     deliver_delete: DeliverDelete,
@@ -33,6 +35,8 @@ pub const Job = union(enum) {
             .send_undo_follow => |*j| j.deinit(allocator),
             .send_like => |*j| j.deinit(allocator),
             .send_undo_like => |*j| j.deinit(allocator),
+            .send_announce => |*j| j.deinit(allocator),
+            .send_undo_announce => |*j| j.deinit(allocator),
             .accept_inbound_follow => |*j| j.deinit(allocator),
             .deliver_status => {},
             .deliver_delete => {},
@@ -83,6 +87,30 @@ pub const SendUndoLike = struct {
     remote_status_uri: []u8,
 
     pub fn deinit(self: *SendUndoLike, allocator: std.mem.Allocator) void {
+        allocator.free(self.remote_actor_id);
+        allocator.free(self.remote_status_uri);
+        self.* = undefined;
+    }
+};
+
+pub const SendAnnounce = struct {
+    user_id: i64,
+    remote_actor_id: []u8,
+    remote_status_uri: []u8,
+
+    pub fn deinit(self: *SendAnnounce, allocator: std.mem.Allocator) void {
+        allocator.free(self.remote_actor_id);
+        allocator.free(self.remote_status_uri);
+        self.* = undefined;
+    }
+};
+
+pub const SendUndoAnnounce = struct {
+    user_id: i64,
+    remote_actor_id: []u8,
+    remote_status_uri: []u8,
+
+    pub fn deinit(self: *SendUndoAnnounce, allocator: std.mem.Allocator) void {
         allocator.free(self.remote_actor_id);
         allocator.free(self.remote_status_uri);
         self.* = undefined;
