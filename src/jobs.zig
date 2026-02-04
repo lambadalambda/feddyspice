@@ -21,6 +21,8 @@ pub fn modeFromString(s: []const u8) Mode {
 pub const Job = union(enum) {
     send_follow: SendFollow,
     send_undo_follow: SendUndoFollow,
+    send_like: SendLike,
+    send_undo_like: SendUndoLike,
     accept_inbound_follow: AcceptInboundFollow,
     deliver_status: DeliverStatus,
     deliver_delete: DeliverDelete,
@@ -29,6 +31,8 @@ pub const Job = union(enum) {
         switch (job.*) {
             .send_follow => |*j| j.deinit(allocator),
             .send_undo_follow => |*j| j.deinit(allocator),
+            .send_like => |*j| j.deinit(allocator),
+            .send_undo_like => |*j| j.deinit(allocator),
             .accept_inbound_follow => |*j| j.deinit(allocator),
             .deliver_status => {},
             .deliver_delete => {},
@@ -57,6 +61,30 @@ pub const SendUndoFollow = struct {
     pub fn deinit(self: *SendUndoFollow, allocator: std.mem.Allocator) void {
         allocator.free(self.remote_actor_id);
         allocator.free(self.follow_activity_id);
+        self.* = undefined;
+    }
+};
+
+pub const SendLike = struct {
+    user_id: i64,
+    remote_actor_id: []u8,
+    remote_status_uri: []u8,
+
+    pub fn deinit(self: *SendLike, allocator: std.mem.Allocator) void {
+        allocator.free(self.remote_actor_id);
+        allocator.free(self.remote_status_uri);
+        self.* = undefined;
+    }
+};
+
+pub const SendUndoLike = struct {
+    user_id: i64,
+    remote_actor_id: []u8,
+    remote_status_uri: []u8,
+
+    pub fn deinit(self: *SendUndoLike, allocator: std.mem.Allocator) void {
+        allocator.free(self.remote_actor_id);
+        allocator.free(self.remote_status_uri);
         self.* = undefined;
     }
 };

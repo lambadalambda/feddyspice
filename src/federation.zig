@@ -670,6 +670,90 @@ pub fn sendUndoFollowActivity(
     try deliverSignedInboxPostOkDiscardBody(app_state, allocator, keys.private_key_pem, key_id, inbox_url, undo_body);
 }
 
+pub fn sendLikeActivity(
+    app_state: *app.App,
+    allocator: std.mem.Allocator,
+    user_id: i64,
+    remote_actor_id: []const u8,
+    remote_status_uri: []const u8,
+) Error!void {
+    const actor = (try remote_actors.lookupById(&app_state.conn, allocator, remote_actor_id)) orelse
+        return error.RemoteActorMissing;
+
+    const local_user = (try users.lookupUserById(&app_state.conn, allocator, user_id)) orelse
+        return error.InvalidHandle;
+
+    const base = try baseUrlAlloc(app_state, allocator);
+    const local_actor_id = try std.fmt.allocPrint(allocator, "{s}/users/{s}", .{ base, local_user.username });
+    const key_id = try std.fmt.allocPrint(allocator, "{s}#main-key", .{local_actor_id});
+
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(remote_status_uri, &digest, .{});
+    const hex = std.fmt.bytesToHex(digest, .lower);
+    const like_id = try std.fmt.allocPrint(allocator, "{s}/users/{s}/likes/{s}", .{ base, local_user.username, hex[0..] });
+
+    const to = [_][]const u8{actor.id};
+    const payload = .{
+        .@"@context" = "https://www.w3.org/ns/activitystreams",
+        .id = like_id,
+        .type = "Like",
+        .actor = local_actor_id,
+        .object = remote_status_uri,
+        .to = to[0..],
+    };
+    const body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch
+        return error.OutOfMemory;
+
+    const inbox_url = deliveryInboxUrl(actor);
+    const keys = try actor_keys.ensureForUser(&app_state.conn, allocator, user_id);
+    try deliverSignedInboxPostOkDiscardBody(app_state, allocator, keys.private_key_pem, key_id, inbox_url, body);
+}
+
+pub fn sendUndoLikeActivity(
+    app_state: *app.App,
+    allocator: std.mem.Allocator,
+    user_id: i64,
+    remote_actor_id: []const u8,
+    remote_status_uri: []const u8,
+) Error!void {
+    const actor = (try remote_actors.lookupById(&app_state.conn, allocator, remote_actor_id)) orelse
+        return error.RemoteActorMissing;
+
+    const local_user = (try users.lookupUserById(&app_state.conn, allocator, user_id)) orelse
+        return error.InvalidHandle;
+
+    const base = try baseUrlAlloc(app_state, allocator);
+    const local_actor_id = try std.fmt.allocPrint(allocator, "{s}/users/{s}", .{ base, local_user.username });
+    const key_id = try std.fmt.allocPrint(allocator, "{s}#main-key", .{local_actor_id});
+
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(remote_status_uri, &digest, .{});
+    const hex = std.fmt.bytesToHex(digest, .lower);
+    const like_id = try std.fmt.allocPrint(allocator, "{s}/users/{s}/likes/{s}", .{ base, local_user.username, hex[0..] });
+
+    const undo_id = try std.fmt.allocPrint(allocator, "{s}#undo", .{like_id});
+    const to = [_][]const u8{actor.id};
+    const payload = .{
+        .@"@context" = "https://www.w3.org/ns/activitystreams",
+        .id = undo_id,
+        .type = "Undo",
+        .actor = local_actor_id,
+        .to = to[0..],
+        .object = .{
+            .id = like_id,
+            .type = "Like",
+            .actor = local_actor_id,
+            .object = remote_status_uri,
+        },
+    };
+    const body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch
+        return error.OutOfMemory;
+
+    const inbox_url = deliveryInboxUrl(actor);
+    const keys = try actor_keys.ensureForUser(&app_state.conn, allocator, user_id);
+    try deliverSignedInboxPostOkDiscardBody(app_state, allocator, keys.private_key_pem, key_id, inbox_url, body);
+}
+
 pub fn followHandle(app_state: *app.App, allocator: std.mem.Allocator, user_id: i64, handle: []const u8) Error!FollowResult {
     const actor = try resolveRemoteActorByHandle(app_state, allocator, handle);
 

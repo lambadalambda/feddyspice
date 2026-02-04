@@ -185,6 +185,12 @@ pub fn statusActionNoop(
             return .{ .status = .internal_server_error, .body = "internal server error\n" };
         if (actor == null) return .{ .status = .not_found, .body = "not found\n" };
 
+        if (std.mem.eql(u8, suffix, "/favourite")) {
+            background.sendLike(app_state, allocator, info.?.user_id, actor.?.id, st.?.remote_uri);
+        } else if (std.mem.eql(u8, suffix, "/unfavourite")) {
+            background.sendUndoLike(app_state, allocator, info.?.user_id, actor.?.id, st.?.remote_uri);
+        }
+
         return remoteStatusResponse(app_state, allocator, actor.?, st.?);
     }
 
