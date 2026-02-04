@@ -6154,6 +6154,70 @@ test "POST /users/:name/inbox Create stores inReplyTo mapping to local statuses"
     );
 }
 
+test "POST /users/:name/inbox Update(Person) updates remote actor fields" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    _ = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const remote_kp = try @import("crypto_rsa.zig").generateRsaKeyPairPem(a, 512);
+    const remote_key_id = "https://remote.test/users/bob#main-key";
+    const remote_actor_id = "https://remote.test/users/bob";
+
+    try remote_actors.upsert(&app_state.conn, .{
+        .id = remote_actor_id,
+        .inbox = "https://remote.test/users/bob/inbox",
+        .shared_inbox = null,
+        .preferred_username = "bob",
+        .domain = "remote.test",
+        .public_key_pem = remote_kp.public_key_pem,
+    });
+
+    const update_body = try std.json.Stringify.valueAlloc(
+        a,
+        .{
+            .@"@context" = "https://www.w3.org/ns/activitystreams",
+            .id = "https://remote.test/updates/1",
+            .type = "Update",
+            .actor = remote_actor_id,
+            .object = .{
+                .id = remote_actor_id,
+                .type = "Person",
+                .preferredUsername = "bob",
+                .inbox = "https://remote.test/users/bob/inbox2",
+                .endpoints = .{ .sharedInbox = "https://remote.test/inbox" },
+                .publicKey = .{ .publicKeyPem = remote_kp.public_key_pem },
+                .icon = .{ .type = "Image", .url = "https://remote.test/avatar2.png" },
+                .image = .{ .type = "Image", .url = "https://remote.test/header2.png" },
+            },
+        },
+        .{},
+    );
+
+    const inbox_req = try signedInboxRequest(
+        a,
+        "example.test",
+        "/users/alice/inbox",
+        update_body,
+        remote_key_id,
+        remote_kp.private_key_pem,
+    );
+    const inbox_resp = handle(&app_state, a, inbox_req);
+    try std.testing.expectEqual(std.http.Status.accepted, inbox_resp.status);
+
+    const actor2 = (try remote_actors.lookupById(&app_state.conn, a, remote_actor_id)).?;
+    try std.testing.expectEqualStrings("https://remote.test/users/bob/inbox2", actor2.inbox);
+    try std.testing.expect(actor2.shared_inbox != null);
+    try std.testing.expectEqualStrings("https://remote.test/inbox", actor2.shared_inbox.?);
+    try std.testing.expectEqualStrings("https://remote.test/avatar2.png", actor2.avatar_url.?);
+    try std.testing.expectEqualStrings("https://remote.test/header2.png", actor2.header_url.?);
+}
+
 test "POST /users/:name/inbox Like creates favourite notification" {
     var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
     defer app_state.deinit();

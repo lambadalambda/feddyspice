@@ -171,6 +171,28 @@ fn verifyInboxSignatureOrReject(
     return null;
 }
 
+fn jsonFirstUrlString(val: std.json.Value) ?[]const u8 {
+    switch (val) {
+        .string => |s| return if (s.len == 0) null else s,
+        .object => |o| {
+            if (o.get("url")) |u| {
+                if (jsonFirstUrlString(u)) |s| return s;
+            }
+            if (o.get("href")) |h| {
+                if (h == .string and h.string.len > 0) return h.string;
+            }
+            return null;
+        },
+        .array => |arr| {
+            for (arr.items) |item| {
+                if (jsonFirstUrlString(item)) |s| return s;
+            }
+            return null;
+        },
+        else => return null,
+    }
+}
+
 pub fn actorGet(app_state: *app.App, allocator: std.mem.Allocator, path: []const u8) http_types.Response {
     const username = path["/users/".len..];
     if (username.len == 0) return .{ .status = .not_found, .body = "not found\n" };
@@ -983,6 +1005,124 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
 
         dedupe_keep = true;
         return .{ .status = .accepted, .body = "ok\n" };
+    }
+
+    if (std.mem.eql(u8, typ.string, "Update")) {
+        const actor_val = parsed.value.object.get("actor") orelse
+            return .{ .status = .bad_request, .body = "missing actor\n" };
+        if (actor_val != .string) return .{ .status = .bad_request, .body = "invalid actor\n" };
+
+        const received_at_ms: i64 = std.time.milliTimestamp();
+        var dedupe_activity_id: ?[]const u8 = null;
+        var dedupe_keep: bool = false;
+        defer {
+            if (dedupe_activity_id) |id| {
+                if (!dedupe_keep) inbox_dedupe.clear(&app_state.conn, id) catch {};
+            }
+        }
+
+        const activity_id = blk: {
+            const id_val = parsed.value.object.get("id") orelse break :blk null;
+            if (id_val != .string) break :blk null;
+            if (id_val.string.len == 0) break :blk null;
+            break :blk trimTrailingSlash(id_val.string);
+        };
+
+        const dedupe_id = activity_id orelse inbox_dedupe.fallbackKeyAlloc(allocator, actor_val.string, req.body) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        const inserted = inbox_dedupe.begin(&app_state.conn, dedupe_id, user.?.id, actor_val.string, received_at_ms) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        if (!inserted) return .{ .status = .accepted, .body = "duplicate\n" };
+        dedupe_activity_id = dedupe_id;
+
+        const remote_actor = federation.ensureRemoteActorById(app_state, allocator, actor_val.string) catch null;
+        if (remote_actor == null) return .{ .status = .accepted, .body = "ignored\n" };
+
+        const now_sec: i64 = std.time.timestamp();
+        const max_clock_skew_sec: i64 = @intCast(app_state.cfg.signature_max_clock_skew_sec);
+        if (verifyInboxSignatureOrReject(allocator, req, remote_actor.?, now_sec, max_clock_skew_sec)) |resp| return resp;
+
+        const obj_val = parsed.value.object.get("object") orelse
+            return .{ .status = .bad_request, .body = "missing object\n" };
+        if (obj_val != .object) return .{ .status = .accepted, .body = "ignored\n" };
+
+        const obj_id_val = obj_val.object.get("id") orelse return .{ .status = .accepted, .body = "ignored\n" };
+        if (obj_id_val != .string) return .{ .status = .accepted, .body = "ignored\n" };
+
+        const obj_type_val = obj_val.object.get("type") orelse return .{ .status = .accepted, .body = "ignored\n" };
+        if (obj_type_val != .string) return .{ .status = .accepted, .body = "ignored\n" };
+
+        if (std.mem.eql(u8, obj_type_val.string, "Person")) {
+            if (!std.mem.eql(u8, trimTrailingSlash(obj_id_val.string), trimTrailingSlash(remote_actor.?.id))) {
+                return .{ .status = .accepted, .body = "ignored\n" };
+            }
+
+            var inbox_url: []const u8 = remote_actor.?.inbox;
+            if (obj_val.object.get("inbox")) |inbox_val| {
+                if (inbox_val == .string and util_url.isHttpOrHttpsUrl(inbox_val.string)) {
+                    inbox_url = inbox_val.string;
+                }
+            }
+
+            var shared_inbox: ?[]const u8 = remote_actor.?.shared_inbox;
+            if (obj_val.object.get("endpoints")) |endpoints_val| {
+                if (endpoints_val == .object) {
+                    if (endpoints_val.object.get("sharedInbox")) |si| {
+                        if (si == .string and util_url.isHttpOrHttpsUrl(si.string)) {
+                            shared_inbox = si.string;
+                        }
+                    }
+                }
+            }
+
+            var preferred_username: []const u8 = remote_actor.?.preferred_username;
+            if (obj_val.object.get("preferredUsername")) |user_val| {
+                if (user_val == .string and user_val.string.len > 0) {
+                    preferred_username = user_val.string;
+                }
+            }
+
+            var public_key_pem: []const u8 = remote_actor.?.public_key_pem;
+            if (obj_val.object.get("publicKey")) |pk_val| {
+                if (pk_val == .object) {
+                    if (pk_val.object.get("publicKeyPem")) |pem_val| {
+                        if (pem_val == .string and pem_val.string.len > 0) {
+                            public_key_pem = pem_val.string;
+                        }
+                    }
+                }
+            }
+
+            var avatar_url: ?[]const u8 = remote_actor.?.avatar_url;
+            if (obj_val.object.get("icon")) |icon_val| {
+                if (jsonFirstUrlString(icon_val)) |u| {
+                    if (util_url.isHttpOrHttpsUrl(u)) avatar_url = u;
+                }
+            }
+
+            var header_url: ?[]const u8 = remote_actor.?.header_url;
+            if (obj_val.object.get("image")) |image_val| {
+                if (jsonFirstUrlString(image_val)) |u| {
+                    if (util_url.isHttpOrHttpsUrl(u)) header_url = u;
+                }
+            }
+
+            remote_actors.upsert(&app_state.conn, .{
+                .id = remote_actor.?.id,
+                .inbox = inbox_url,
+                .shared_inbox = shared_inbox,
+                .preferred_username = preferred_username,
+                .domain = remote_actor.?.domain,
+                .public_key_pem = public_key_pem,
+                .avatar_url = avatar_url,
+                .header_url = header_url,
+            }) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+            dedupe_keep = true;
+            return .{ .status = .accepted, .body = "ok\n" };
+        }
+
+        return .{ .status = .accepted, .body = "ignored\n" };
     }
 
     if (std.mem.eql(u8, typ.string, "Like") or std.mem.eql(u8, typ.string, "Announce")) {
