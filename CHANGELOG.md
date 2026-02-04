@@ -67,6 +67,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Streaming health endpoint (`GET /api/v1/streaming/health`).
 - Account lookup + profile endpoint (`GET /api/v1/accounts/lookup`, `GET /api/v1/accounts/:id`).
 - Accounts relationships endpoint (`GET /api/v1/accounts/relationships`).
+- Account block/mute action endpoints (`POST /api/v1/accounts/:id/{block,unblock,mute,unmute}`) (no-op).
 - Account statuses endpoint (`GET /api/v1/accounts/:id/statuses`).
 - Account followers/following endpoints (`GET /api/v1/accounts/:id/followers`, `GET /api/v1/accounts/:id/following`).
 - Soft-delete support for local + remote statuses (`deleted_at`).

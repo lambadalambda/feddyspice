@@ -47,7 +47,7 @@ This is a “rough backlog” based on Mastodon’s `config/routes/api.rb` and P
 - [ ] Add lists/filters CRUD (or robust stubs): `GET/POST/PUT/DELETE /api/v1/lists*` and `GET/POST/PUT/DELETE /api/v1/filters*`.
 - [x] Add favourites/bookmarks index endpoints: `GET /api/v1/favourites` and `GET /api/v1/bookmarks`.
 - [x] Add blocks/mutes index endpoints: `GET /api/v1/blocks` and `GET /api/v1/mutes`.
-- [ ] Add account block/mute actions: `POST /api/v1/accounts/:id/(block|unblock|mute|unmute)` (no-op acceptable for single-user, but avoid 404).
+- [x] Add account block/mute actions: `POST /api/v1/accounts/:id/(block|unblock|mute|unmute)` (no-op acceptable for single-user, but avoid 404).
 - [x] Add reporting stub: `POST /api/v1/reports`.
 - [x] Add media deletion: `DELETE /api/v1/media/:id` (and match Mastodon’s “return attachment” semantics).
 - [ ] Add tags endpoints: `GET /api/v1/tags/:id` and `POST /api/v1/tags/:id/(follow|unfollow)` (even if empty/422 for unknown tags).

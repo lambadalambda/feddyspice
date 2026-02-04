@@ -388,18 +388,11 @@ pub fn accountRelationships(app_state: *app.App, allocator: std.mem.Allocator, r
         }
     }
 
-    const Rel = struct {
-        id: []const u8,
-        following: bool = false,
-        followed_by: bool = false,
-        requested: bool = false,
-    };
-    var rels: std.ArrayListUnmanaged(Rel) = .empty;
+    var rels: std.ArrayListUnmanaged(RelationshipPayload) = .empty;
     defer rels.deinit(allocator);
 
     for (ids.items) |id_str| {
-        var following = false;
-        var requested = false;
+        var state: ?follows.FollowState = null;
 
         const id_num = std.fmt.parseInt(i64, id_str, 10) catch null;
         if (id_num != null and id_num.? >= remote_actor_id_base) {
@@ -409,14 +402,13 @@ pub fn accountRelationships(app_state: *app.App, allocator: std.mem.Allocator, r
                 if (actor) |a| {
                     const f = follows.lookupByUserAndRemoteActorId(&app_state.conn, allocator, info.?.user_id, a.id) catch null;
                     if (f) |follow| {
-                        following = follow.state == .accepted;
-                        requested = follow.state == .pending;
+                        state = follow.state;
                     }
                 }
             }
         }
 
-        rels.append(allocator, .{ .id = id_str, .following = following, .requested = requested }) catch
+        rels.append(allocator, relationshipPayload(id_str, state)) catch
             return .{ .status = .internal_server_error, .body = "internal server error\n" };
     }
 
@@ -428,12 +420,57 @@ const RelationshipPayload = struct {
     following: bool,
     followed_by: bool = false,
     requested: bool,
+    blocking: bool = false,
+    muting: bool = false,
 };
 
 fn relationshipPayload(id: []const u8, state: ?follows.FollowState) RelationshipPayload {
     const following = state != null and state.? == .accepted;
     const requested = state != null and state.? == .pending;
     return .{ .id = id, .following = following, .requested = requested };
+}
+
+pub fn accountBlockMuteNoop(
+    app_state: *app.App,
+    allocator: std.mem.Allocator,
+    req: http_types.Request,
+    path: []const u8,
+    suffix: []const u8,
+) http_types.Response {
+    const token = common.bearerToken(req.authorization) orelse return common.unauthorized(allocator);
+    const info = oauth.verifyAccessToken(&app_state.conn, allocator, token) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (info == null) return common.unauthorized(allocator);
+
+    const prefix = "/api/v1/accounts/";
+    if (!std.mem.startsWith(u8, path, prefix)) return .{ .status = .not_found, .body = "not found\n" };
+    if (!std.mem.endsWith(u8, path, suffix)) return .{ .status = .not_found, .body = "not found\n" };
+
+    const id_part = path[prefix.len .. path.len - suffix.len];
+    if (id_part.len == 0) return .{ .status = .not_found, .body = "not found\n" };
+    if (std.mem.indexOfScalar(u8, id_part, '/') != null) return .{ .status = .not_found, .body = "not found\n" };
+
+    const account_id = std.fmt.parseInt(i64, id_part, 10) catch
+        return .{ .status = .not_found, .body = "not found\n" };
+
+    var state: ?follows.FollowState = null;
+    if (account_id >= remote_actor_id_base) {
+        const rowid = account_id - remote_actor_id_base;
+        if (rowid <= 0) return .{ .status = .not_found, .body = "not found\n" };
+
+        const actor = remote_actors.lookupByRowId(&app_state.conn, allocator, rowid) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        if (actor == null) return .{ .status = .not_found, .body = "not found\n" };
+
+        const f = follows.lookupByUserAndRemoteActorId(&app_state.conn, allocator, info.?.user_id, actor.?.id) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        if (f) |follow| state = follow.state;
+    }
+
+    var rel = relationshipPayload(id_part, state);
+    if (std.mem.eql(u8, suffix, "/block")) rel.blocking = true;
+    if (std.mem.eql(u8, suffix, "/mute")) rel.muting = true;
+    return common.jsonOk(allocator, rel);
 }
 
 pub fn accountFollow(app_state: *app.App, allocator: std.mem.Allocator, req: http_types.Request, path: []const u8) http_types.Response {

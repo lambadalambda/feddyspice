@@ -323,6 +323,22 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
         return accounts_api.accountUnfollow(app_state, allocator, req, path);
     }
 
+    if (req.method == .POST and std.mem.startsWith(u8, path, "/api/v1/accounts/") and std.mem.endsWith(u8, path, "/block")) {
+        return accounts_api.accountBlockMuteNoop(app_state, allocator, req, path, "/block");
+    }
+
+    if (req.method == .POST and std.mem.startsWith(u8, path, "/api/v1/accounts/") and std.mem.endsWith(u8, path, "/unblock")) {
+        return accounts_api.accountBlockMuteNoop(app_state, allocator, req, path, "/unblock");
+    }
+
+    if (req.method == .POST and std.mem.startsWith(u8, path, "/api/v1/accounts/") and std.mem.endsWith(u8, path, "/mute")) {
+        return accounts_api.accountBlockMuteNoop(app_state, allocator, req, path, "/mute");
+    }
+
+    if (req.method == .POST and std.mem.startsWith(u8, path, "/api/v1/accounts/") and std.mem.endsWith(u8, path, "/unmute")) {
+        return accounts_api.accountBlockMuteNoop(app_state, allocator, req, path, "/unmute");
+    }
+
     if (req.method == .GET and std.mem.startsWith(u8, path, "/api/v1/accounts/")) {
         const rest = path["/api/v1/accounts/".len..];
         if (std.mem.indexOfScalar(u8, rest, '/') == null) {
@@ -4086,6 +4102,68 @@ test "POST /api/v1/accounts/:id/unfollow deletes follow and delivers Undo(Follow
     const obj = delivered_json.value.object.get("object").?.object;
     try std.testing.expectEqualStrings("Follow", obj.get("type").?.string);
     try std.testing.expectEqualStrings(follow_activity_id, obj.get("id").?.string);
+}
+
+test "POST /api/v1/accounts/:id/(block|unblock|mute|unmute) returns relationship" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const remote_actor_id = "http://remote.test/users/bob";
+    try remote_actors.upsert(&app_state.conn, .{
+        .id = remote_actor_id,
+        .inbox = "http://remote.test/users/bob/inbox",
+        .shared_inbox = null,
+        .preferred_username = "bob",
+        .domain = "remote.test",
+        .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
+    });
+
+    const rowid = (try remote_actors.lookupRowIdById(&app_state.conn, remote_actor_id)).?;
+    const account_id_str = try std.fmt.allocPrint(a, "{d}", .{remote_actor_id_base + rowid});
+
+    const app_creds = try oauth.createApp(
+        &app_state.conn,
+        a,
+        "pl-fe",
+        "urn:ietf:wg:oauth:2.0:oob",
+        "read follow",
+        "",
+    );
+    const token = try oauth.createAccessToken(&app_state.conn, a, app_creds.id, user_id, "read follow");
+    const auth_header = try std.fmt.allocPrint(a, "Bearer {s}", .{token});
+
+    const cases = [_]struct {
+        suffix: []const u8,
+        key: []const u8,
+        want: bool,
+    }{
+        .{ .suffix = "/block", .key = "blocking", .want = true },
+        .{ .suffix = "/unblock", .key = "blocking", .want = false },
+        .{ .suffix = "/mute", .key = "muting", .want = true },
+        .{ .suffix = "/unmute", .key = "muting", .want = false },
+    };
+
+    for (cases) |tc| {
+        const target = try std.fmt.allocPrint(a, "/api/v1/accounts/{s}{s}", .{ account_id_str, tc.suffix });
+        const resp = handle(&app_state, a, .{
+            .method = .POST,
+            .target = target,
+            .authorization = auth_header,
+        });
+        try std.testing.expectEqual(std.http.Status.ok, resp.status);
+
+        var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, resp.body, .{});
+        defer parsed.deinit();
+        try std.testing.expectEqualStrings(account_id_str, parsed.value.object.get("id").?.string);
+        try std.testing.expect(parsed.value.object.get(tc.key).?.bool == tc.want);
+    }
 }
 
 test "GET /.well-known/webfinger returns actor self link" {
