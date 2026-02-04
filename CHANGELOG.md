@@ -107,6 +107,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Added `src/http/timelines_api.zig` and moved timeline endpoints (`GET /api/v1/timelines/home`, `GET /api/v1/timelines/public`).
 - Added `src/http/activitypub_api.zig` and moved ActivityPub endpoints (`/users/:name` actor, inbox, outbox, followers/following, object endpoints).
 - DRY: refactored signed ActivityPub inbox POST deliveries into shared helpers in `src/federation.zig`.
+- Reduced per-request allocations in `src/server.zig` by building response headers on the stack or request arena instead of `page_allocator`.
 
 ### Fixed
 

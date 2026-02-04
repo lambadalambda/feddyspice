@@ -90,7 +90,7 @@ pub fn serveOnce(app_state: *app.App, listener: *net.Server) !void {
         const token = token_q orelse bearerToken(authorization) orelse "";
         if (token.len == 0) {
             const resp: routes.Response = .{ .status = .unauthorized, .body = "unauthorized\n" };
-            try writeResponse(&request, resp);
+            try writeResponse(alloc, &request, resp);
             logAccess(app_state, conn.address, method, target, resp.status, start_ms);
             return;
         }
@@ -98,7 +98,7 @@ pub fn serveOnce(app_state: *app.App, listener: *net.Server) !void {
         const info = oauth.verifyAccessToken(&app_state.conn, alloc, token) catch null;
         if (info == null) {
             const resp: routes.Response = .{ .status = .unauthorized, .body = "unauthorized\n" };
-            try writeResponse(&request, resp);
+            try writeResponse(alloc, &request, resp);
             logAccess(app_state, conn.address, method, target, resp.status, start_ms);
             return;
         }
@@ -113,7 +113,7 @@ pub fn serveOnce(app_state: *app.App, listener: *net.Server) !void {
 
         const sub = app_state.streaming.subscribe(info.?.user_id, streams) catch {
             const resp: routes.Response = .{ .status = .internal_server_error, .body = "internal server error\n" };
-            try writeResponse(&request, resp);
+            try writeResponse(alloc, &request, resp);
             logAccess(app_state, conn.address, method, target, resp.status, start_ms);
             return;
         };
@@ -154,7 +154,7 @@ pub fn serveOnce(app_state: *app.App, listener: *net.Server) !void {
                 .status = .payload_too_large,
                 .body = "payload too large\n",
             };
-            try writeResponse(&request, resp);
+            try writeResponse(alloc, &request, resp);
             logAccess(app_state, conn.address, method, target, resp.status, start_ms);
             return;
         }
@@ -177,7 +177,7 @@ pub fn serveOnce(app_state: *app.App, listener: *net.Server) !void {
         .authorization = authorization,
     });
 
-    try writeResponse(&request, resp);
+    try writeResponse(alloc, &request, resp);
     logAccess(app_state, conn.address, method, target, resp.status, start_ms);
 }
 
@@ -373,7 +373,7 @@ fn drainIncoming(stream: *net.Stream, writer: anytype, buf: []u8, used: *usize) 
     return false;
 }
 
-fn writeResponse(request: *http.Server.Request, resp: routes.Response) !void {
+fn writeResponse(allocator: std.mem.Allocator, request: *http.Server.Request, resp: routes.Response) !void {
     const cors_headers = [_]http.Header{
         .{ .name = "access-control-allow-origin", .value = "*" },
         .{ .name = "access-control-allow-methods", .value = "GET, POST, PUT, PATCH, DELETE, OPTIONS" },
@@ -383,8 +383,11 @@ fn writeResponse(request: *http.Server.Request, resp: routes.Response) !void {
     };
 
     const header_count: usize = 1 + cors_headers.len + resp.headers.len;
-    var headers = try std.heap.page_allocator.alloc(http.Header, header_count);
-    defer std.heap.page_allocator.free(headers);
+    var stack_headers: [16]http.Header = undefined;
+    const headers = if (header_count <= stack_headers.len)
+        stack_headers[0..header_count]
+    else
+        try allocator.alloc(http.Header, header_count);
 
     headers[0] = .{ .name = "content-type", .value = resp.content_type };
     for (cors_headers, 0..) |h, i| headers[i + 1] = h;
