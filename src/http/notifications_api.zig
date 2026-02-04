@@ -67,6 +67,18 @@ fn makeNotificationPayload(
     };
 }
 
+pub fn notificationJsonByIdAlloc(
+    app_state: *app.App,
+    allocator: std.mem.Allocator,
+    user_id: i64,
+    notification_id: i64,
+) ?[]u8 {
+    const n = notifications.lookupById(&app_state.conn, allocator, user_id, notification_id) catch return null;
+    if (n == null) return null;
+    const payload = makeNotificationPayload(app_state, allocator, n.?) orelse return null;
+    return std.json.Stringify.valueAlloc(allocator, payload, .{}) catch null;
+}
+
 pub fn notificationsGet(app_state: *app.App, allocator: std.mem.Allocator, req: http_types.Request) http_types.Response {
     const token = common.bearerToken(req.authorization) orelse return common.unauthorized(allocator);
     const info = oauth.verifyAccessToken(&app_state.conn, allocator, token) catch

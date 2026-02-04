@@ -14,9 +14,12 @@ const http_types = @import("../http_types.zig");
 const http_signatures = @import("../http_signatures.zig");
 const inbox_dedupe = @import("../inbox_dedupe.zig");
 const masto = @import("mastodon.zig");
+const notifications = @import("../notifications.zig");
+const notifications_api = @import("notifications_api.zig");
 const remote_actors = @import("../remote_actors.zig");
 const remote_statuses = @import("../remote_statuses.zig");
 const rate_limit = @import("../rate_limit.zig");
+const status_reactions = @import("../status_reactions.zig");
 const statuses = @import("../statuses.zig");
 const urls = @import("urls.zig");
 const users = @import("../users.zig");
@@ -982,6 +985,88 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
         return .{ .status = .accepted, .body = "ok\n" };
     }
 
+    if (std.mem.eql(u8, typ.string, "Like") or std.mem.eql(u8, typ.string, "Announce")) {
+        const actor_val = parsed.value.object.get("actor") orelse
+            return .{ .status = .bad_request, .body = "missing actor\n" };
+        if (actor_val != .string) return .{ .status = .bad_request, .body = "invalid actor\n" };
+
+        const obj_val = parsed.value.object.get("object") orelse
+            return .{ .status = .bad_request, .body = "missing object\n" };
+
+        const object_iri: []const u8 = switch (obj_val) {
+            .string => |s| s,
+            .object => |o| blk: {
+                const id_val = o.get("id") orelse break :blk "";
+                if (id_val != .string) break :blk "";
+                break :blk id_val.string;
+            },
+            else => "",
+        };
+        if (object_iri.len == 0) return .{ .status = .bad_request, .body = "invalid object\n" };
+
+        const received_at_ms: i64 = std.time.milliTimestamp();
+        var dedupe_activity_id: ?[]const u8 = null;
+        var dedupe_keep: bool = false;
+        defer {
+            if (dedupe_activity_id) |id| {
+                if (!dedupe_keep) inbox_dedupe.clear(&app_state.conn, id) catch {};
+            }
+        }
+
+        const activity_id = blk: {
+            const id_val = parsed.value.object.get("id") orelse break :blk null;
+            if (id_val != .string) break :blk null;
+            if (id_val.string.len == 0) break :blk null;
+            break :blk trimTrailingSlash(id_val.string);
+        };
+
+        const dedupe_id = activity_id orelse inbox_dedupe.fallbackKeyAlloc(allocator, actor_val.string, req.body) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        const inserted = inbox_dedupe.begin(&app_state.conn, dedupe_id, user.?.id, actor_val.string, received_at_ms) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        if (!inserted) return .{ .status = .accepted, .body = "duplicate\n" };
+        dedupe_activity_id = dedupe_id;
+
+        const remote_actor = federation.ensureRemoteActorById(app_state, allocator, actor_val.string) catch null;
+        if (remote_actor == null) return .{ .status = .accepted, .body = "ignored\n" };
+
+        const now_sec: i64 = std.time.timestamp();
+        const max_clock_skew_sec: i64 = @intCast(app_state.cfg.signature_max_clock_skew_sec);
+        if (verifyInboxSignatureOrReject(allocator, req, remote_actor.?, now_sec, max_clock_skew_sec)) |resp| return resp;
+
+        const trimmed = stripQueryAndFragment(trimTrailingSlash(object_iri));
+        if (!util_url.isHttpOrHttpsUrl(trimmed)) return .{ .status = .accepted, .body = "ignored\n" };
+
+        const status_id = localStatusIdFromIri(app_state, trimmed) orelse return .{ .status = .accepted, .body = "ignored\n" };
+
+        const st = statuses.lookup(&app_state.conn, allocator, status_id) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        if (st == null) return .{ .status = .accepted, .body = "ignored\n" };
+        if (st.?.user_id != user.?.id) return .{ .status = .accepted, .body = "ignored\n" };
+
+        const kind = if (std.mem.eql(u8, typ.string, "Like")) "favourite" else "reblog";
+        const activated = status_reactions.activate(
+            &app_state.conn,
+            st.?.id,
+            remote_actor.?.id,
+            kind,
+            activity_id,
+            received_at_ms,
+        ) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+        if (activated) {
+            const notif_id = notifications.create(&app_state.conn, user.?.id, kind, remote_actor.?.id, st.?.id) catch
+                return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+            if (notifications_api.notificationJsonByIdAlloc(app_state, allocator, user.?.id, notif_id)) |notif_json| {
+                app_state.streaming.publishNotification(user.?.id, notif_json);
+            }
+        }
+
+        dedupe_keep = true;
+        return .{ .status = .accepted, .body = "ok\n" };
+    }
+
     if (std.mem.eql(u8, typ.string, "Delete")) {
         const actor_val = parsed.value.object.get("actor") orelse
             return .{ .status = .bad_request, .body = "missing actor\n" };
@@ -1225,40 +1310,89 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
         }.f;
 
         var is_undo_follow: bool = false;
+        var handled_reaction: bool = false;
         switch (obj_val) {
-            .string => |follow_activity_id| {
+            .string => |undo_object_id| {
                 const existing = followers.lookupByRemoteActorId(&app_state.conn, allocator, user.?.id, remote_actor.?.id) catch
                     return .{ .status = .internal_server_error, .body = "internal server error\n" };
                 if (existing) |f| {
-                    is_undo_follow = std.mem.eql(u8, trimSlash(f.follow_activity_id), trimSlash(follow_activity_id));
+                    is_undo_follow = std.mem.eql(u8, trimSlash(f.follow_activity_id), trimSlash(undo_object_id));
+                }
+
+                if (!is_undo_follow) {
+                    const trimmed_id = trimTrailingSlash(undo_object_id);
+                    if (trimmed_id.len > 0) {
+                        _ = status_reactions.undoByActivityId(&app_state.conn, remote_actor.?.id, trimmed_id, received_at_ms) catch
+                            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+                        handled_reaction = true;
+                    }
                 }
             },
             .object => |o| {
                 const t = o.get("type") orelse return .{ .status = .accepted, .body = "ignored\n" };
                 if (t != .string) return .{ .status = .accepted, .body = "ignored\n" };
-                if (!std.mem.eql(u8, t.string, "Follow")) return .{ .status = .accepted, .body = "ignored\n" };
+                if (std.mem.eql(u8, t.string, "Follow")) {
+                    const inner_actor_val = o.get("actor") orelse return .{ .status = .accepted, .body = "ignored\n" };
+                    const inner_object_val = o.get("object") orelse return .{ .status = .accepted, .body = "ignored\n" };
+                    if (inner_actor_val != .string) return .{ .status = .accepted, .body = "ignored\n" };
+                    if (inner_object_val != .string) return .{ .status = .accepted, .body = "ignored\n" };
 
-                const inner_actor_val = o.get("actor") orelse return .{ .status = .accepted, .body = "ignored\n" };
-                const inner_object_val = o.get("object") orelse return .{ .status = .accepted, .body = "ignored\n" };
-                if (inner_actor_val != .string) return .{ .status = .accepted, .body = "ignored\n" };
-                if (inner_object_val != .string) return .{ .status = .accepted, .body = "ignored\n" };
+                    if (!std.mem.eql(u8, trimSlash(inner_actor_val.string), trimSlash(remote_actor.?.id))) {
+                        return .{ .status = .accepted, .body = "ignored\n" };
+                    }
+                    if (!std.mem.eql(u8, trimSlash(inner_object_val.string), trimSlash(expected_actor_id))) {
+                        return .{ .status = .accepted, .body = "ignored\n" };
+                    }
 
-                if (!std.mem.eql(u8, trimSlash(inner_actor_val.string), trimSlash(remote_actor.?.id))) {
+                    is_undo_follow = true;
+                } else if (std.mem.eql(u8, t.string, "Like") or std.mem.eql(u8, t.string, "Announce")) {
+                    const inner_actor_val = o.get("actor") orelse return .{ .status = .accepted, .body = "ignored\n" };
+                    if (inner_actor_val != .string) return .{ .status = .accepted, .body = "ignored\n" };
+                    if (!std.mem.eql(u8, trimSlash(inner_actor_val.string), trimSlash(remote_actor.?.id))) {
+                        return .{ .status = .accepted, .body = "ignored\n" };
+                    }
+
+                    const inner_object_val = o.get("object") orelse return .{ .status = .accepted, .body = "ignored\n" };
+                    const inner_object_iri: []const u8 = switch (inner_object_val) {
+                        .string => |s| s,
+                        .object => |io| blk: {
+                            const id_val = io.get("id") orelse break :blk "";
+                            if (id_val != .string) break :blk "";
+                            break :blk id_val.string;
+                        },
+                        else => "",
+                    };
+                    if (inner_object_iri.len == 0) return .{ .status = .accepted, .body = "ignored\n" };
+
+                    const trimmed = stripQueryAndFragment(trimTrailingSlash(inner_object_iri));
+                    if (!util_url.isHttpOrHttpsUrl(trimmed)) return .{ .status = .accepted, .body = "ignored\n" };
+
+                    const status_id = localStatusIdFromIri(app_state, trimmed) orelse return .{ .status = .accepted, .body = "ignored\n" };
+                    const st = statuses.lookup(&app_state.conn, allocator, status_id) catch
+                        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+                    if (st == null) return .{ .status = .accepted, .body = "ignored\n" };
+                    if (st.?.user_id != user.?.id) return .{ .status = .accepted, .body = "ignored\n" };
+
+                    const kind = if (std.mem.eql(u8, t.string, "Like")) "favourite" else "reblog";
+                    _ = status_reactions.undo(&app_state.conn, st.?.id, remote_actor.?.id, kind, received_at_ms) catch
+                        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+                    handled_reaction = true;
+                } else {
                     return .{ .status = .accepted, .body = "ignored\n" };
                 }
-                if (!std.mem.eql(u8, trimSlash(inner_object_val.string), trimSlash(expected_actor_id))) {
-                    return .{ .status = .accepted, .body = "ignored\n" };
-                }
-
-                is_undo_follow = true;
             },
             else => return .{ .status = .bad_request, .body = "invalid object\n" },
         }
 
-        if (!is_undo_follow) return .{ .status = .accepted, .body = "ignored\n" };
+        if (is_undo_follow) {
+            _ = followers.deleteByRemoteActorId(&app_state.conn, user.?.id, remote_actor.?.id) catch
+                return .{ .status = .internal_server_error, .body = "internal server error\n" };
 
-        _ = followers.deleteByRemoteActorId(&app_state.conn, user.?.id, remote_actor.?.id) catch
-            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+            dedupe_keep = true;
+            return .{ .status = .accepted, .body = "ok\n" };
+        }
+
+        if (!handled_reaction) return .{ .status = .accepted, .body = "ignored\n" };
 
         dedupe_keep = true;
         return .{ .status = .accepted, .body = "ok\n" };

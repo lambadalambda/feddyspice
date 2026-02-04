@@ -6154,6 +6154,328 @@ test "POST /users/:name/inbox Create stores inReplyTo mapping to local statuses"
     );
 }
 
+test "POST /users/:name/inbox Like creates favourite notification" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const app_creds = try oauth.createApp(
+        &app_state.conn,
+        a,
+        "pl-fe",
+        "urn:ietf:wg:oauth:2.0:oob",
+        "read",
+        "",
+    );
+    const token = try oauth.createAccessToken(&app_state.conn, a, app_creds.id, user_id, "read");
+    const auth_header = try std.fmt.allocPrint(a, "Bearer {s}", .{token});
+
+    const st = try statuses.create(&app_state.conn, a, user_id, "hello", "public", null);
+    const note_id = try std.fmt.allocPrint(a, "http://example.test/users/alice/statuses/{d}", .{st.id});
+
+    const sub = try app_state.streaming.subscribe(user_id, &.{.user});
+    defer app_state.streaming.unsubscribe(sub);
+
+    const remote_kp = try @import("crypto_rsa.zig").generateRsaKeyPairPem(a, 512);
+    const remote_key_id = "https://remote.test/users/bob#main-key";
+    const remote_actor_id = "https://remote.test/users/bob";
+
+    try remote_actors.upsert(&app_state.conn, .{
+        .id = remote_actor_id,
+        .inbox = "https://remote.test/users/bob/inbox",
+        .shared_inbox = null,
+        .preferred_username = "bob",
+        .domain = "remote.test",
+        .public_key_pem = remote_kp.public_key_pem,
+    });
+
+    const like_body = try std.fmt.allocPrint(
+        a,
+        \\{{"@context":"https://www.w3.org/ns/activitystreams","id":"https://remote.test/likes/1","type":"Like","actor":"{s}","object":"{s}"}}
+    ,
+        .{ remote_actor_id, note_id },
+    );
+
+    const inbox_req = try signedInboxRequest(
+        a,
+        "example.test",
+        "/users/alice/inbox",
+        like_body,
+        remote_key_id,
+        remote_kp.private_key_pem,
+    );
+    const inbox_resp = handle(&app_state, a, inbox_req);
+    try std.testing.expectEqual(std.http.Status.accepted, inbox_resp.status);
+
+    const msg = sub.pop() orelse {
+        try std.testing.expect(false);
+        return;
+    };
+    defer app_state.streaming.allocator.free(msg);
+
+    var env_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, msg, .{});
+    defer env_json.deinit();
+    try std.testing.expectEqualStrings("notification", env_json.value.object.get("event").?.string);
+
+    const notif_payload_str = env_json.value.object.get("payload").?.string;
+    var notif_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, notif_payload_str, .{});
+    defer notif_json.deinit();
+
+    try std.testing.expectEqualStrings("favourite", notif_json.value.object.get("type").?.string);
+    try std.testing.expectEqualStrings("bob", notif_json.value.object.get("account").?.object.get("username").?.string);
+    try std.testing.expectEqualStrings(
+        try std.fmt.allocPrint(a, "{d}", .{st.id}),
+        notif_json.value.object.get("status").?.object.get("id").?.string,
+    );
+
+    const list_resp = handle(&app_state, a, .{
+        .method = .GET,
+        .target = "/api/v1/notifications?limit=20",
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, list_resp.status);
+
+    var list_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, list_resp.body, .{});
+    defer list_json.deinit();
+    try std.testing.expect(list_json.value == .array);
+    try std.testing.expectEqual(@as(usize, 1), list_json.value.array.items.len);
+    try std.testing.expectEqualStrings("favourite", list_json.value.array.items[0].object.get("type").?.string);
+}
+
+test "POST /users/:name/inbox Like Undo by activity id re-enables notification" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const app_creds = try oauth.createApp(
+        &app_state.conn,
+        a,
+        "pl-fe",
+        "urn:ietf:wg:oauth:2.0:oob",
+        "read",
+        "",
+    );
+    const token = try oauth.createAccessToken(&app_state.conn, a, app_creds.id, user_id, "read");
+    const auth_header = try std.fmt.allocPrint(a, "Bearer {s}", .{token});
+
+    const st = try statuses.create(&app_state.conn, a, user_id, "hello", "public", null);
+    const note_id = try std.fmt.allocPrint(a, "http://example.test/users/alice/statuses/{d}", .{st.id});
+
+    const sub = try app_state.streaming.subscribe(user_id, &.{.user});
+    defer app_state.streaming.unsubscribe(sub);
+
+    const remote_kp = try @import("crypto_rsa.zig").generateRsaKeyPairPem(a, 512);
+    const remote_key_id = "https://remote.test/users/bob#main-key";
+    const remote_actor_id = "https://remote.test/users/bob";
+
+    try remote_actors.upsert(&app_state.conn, .{
+        .id = remote_actor_id,
+        .inbox = "https://remote.test/users/bob/inbox",
+        .shared_inbox = null,
+        .preferred_username = "bob",
+        .domain = "remote.test",
+        .public_key_pem = remote_kp.public_key_pem,
+    });
+
+    for ([_][]const u8{
+        "https://remote.test/likes/1",
+        "https://remote.test/likes/2",
+    }) |like_id| {
+        const like_body = try std.fmt.allocPrint(
+            a,
+            \\{{"@context":"https://www.w3.org/ns/activitystreams","id":"{s}","type":"Like","actor":"{s}","object":"{s}"}}
+        ,
+            .{ like_id, remote_actor_id, note_id },
+        );
+
+        const inbox_req = try signedInboxRequest(
+            a,
+            "example.test",
+            "/users/alice/inbox",
+            like_body,
+            remote_key_id,
+            remote_kp.private_key_pem,
+        );
+        const inbox_resp = handle(&app_state, a, inbox_req);
+        try std.testing.expectEqual(std.http.Status.accepted, inbox_resp.status);
+    }
+
+    const msg1 = sub.pop() orelse {
+        try std.testing.expect(false);
+        return;
+    };
+    defer app_state.streaming.allocator.free(msg1);
+
+    try std.testing.expect(sub.pop() == null);
+
+    const list1_resp = handle(&app_state, a, .{
+        .method = .GET,
+        .target = "/api/v1/notifications?limit=20",
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, list1_resp.status);
+
+    var list1_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, list1_resp.body, .{});
+    defer list1_json.deinit();
+    try std.testing.expect(list1_json.value == .array);
+    try std.testing.expectEqual(@as(usize, 1), list1_json.value.array.items.len);
+
+    const undo_body =
+        \\{"@context":"https://www.w3.org/ns/activitystreams","id":"https://remote.test/undo/1","type":"Undo","actor":"https://remote.test/users/bob","object":"https://remote.test/likes/2"}
+    ;
+    const undo_req = try signedInboxRequest(
+        a,
+        "example.test",
+        "/users/alice/inbox",
+        undo_body,
+        remote_key_id,
+        remote_kp.private_key_pem,
+    );
+    const undo_resp = handle(&app_state, a, undo_req);
+    try std.testing.expectEqual(std.http.Status.accepted, undo_resp.status);
+
+    try std.testing.expect(sub.pop() == null);
+
+    const like3_body = try std.fmt.allocPrint(
+        a,
+        \\{{"@context":"https://www.w3.org/ns/activitystreams","id":"https://remote.test/likes/3","type":"Like","actor":"{s}","object":"{s}"}}
+    ,
+        .{ remote_actor_id, note_id },
+    );
+    const like3_req = try signedInboxRequest(
+        a,
+        "example.test",
+        "/users/alice/inbox",
+        like3_body,
+        remote_key_id,
+        remote_kp.private_key_pem,
+    );
+    const like3_resp = handle(&app_state, a, like3_req);
+    try std.testing.expectEqual(std.http.Status.accepted, like3_resp.status);
+
+    const msg2 = sub.pop() orelse {
+        try std.testing.expect(false);
+        return;
+    };
+    defer app_state.streaming.allocator.free(msg2);
+
+    var env_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, msg2, .{});
+    defer env_json.deinit();
+    try std.testing.expectEqualStrings("notification", env_json.value.object.get("event").?.string);
+
+    const list2_resp = handle(&app_state, a, .{
+        .method = .GET,
+        .target = "/api/v1/notifications?limit=20",
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, list2_resp.status);
+
+    var list2_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, list2_resp.body, .{});
+    defer list2_json.deinit();
+    try std.testing.expect(list2_json.value == .array);
+    try std.testing.expectEqual(@as(usize, 2), list2_json.value.array.items.len);
+}
+
+test "POST /users/:name/inbox Announce creates reblog notification" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const app_creds = try oauth.createApp(
+        &app_state.conn,
+        a,
+        "pl-fe",
+        "urn:ietf:wg:oauth:2.0:oob",
+        "read",
+        "",
+    );
+    const token = try oauth.createAccessToken(&app_state.conn, a, app_creds.id, user_id, "read");
+    const auth_header = try std.fmt.allocPrint(a, "Bearer {s}", .{token});
+
+    const st = try statuses.create(&app_state.conn, a, user_id, "hello", "public", null);
+    const note_id = try std.fmt.allocPrint(a, "http://example.test/users/alice/statuses/{d}", .{st.id});
+
+    const sub = try app_state.streaming.subscribe(user_id, &.{.user});
+    defer app_state.streaming.unsubscribe(sub);
+
+    const remote_kp = try @import("crypto_rsa.zig").generateRsaKeyPairPem(a, 512);
+    const remote_key_id = "https://remote.test/users/bob#main-key";
+    const remote_actor_id = "https://remote.test/users/bob";
+
+    try remote_actors.upsert(&app_state.conn, .{
+        .id = remote_actor_id,
+        .inbox = "https://remote.test/users/bob/inbox",
+        .shared_inbox = null,
+        .preferred_username = "bob",
+        .domain = "remote.test",
+        .public_key_pem = remote_kp.public_key_pem,
+    });
+
+    const announce_body = try std.fmt.allocPrint(
+        a,
+        \\{{"@context":"https://www.w3.org/ns/activitystreams","id":"https://remote.test/announces/1","type":"Announce","actor":"{s}","object":"{s}"}}
+    ,
+        .{ remote_actor_id, note_id },
+    );
+
+    const inbox_req = try signedInboxRequest(
+        a,
+        "example.test",
+        "/users/alice/inbox",
+        announce_body,
+        remote_key_id,
+        remote_kp.private_key_pem,
+    );
+    const inbox_resp = handle(&app_state, a, inbox_req);
+    try std.testing.expectEqual(std.http.Status.accepted, inbox_resp.status);
+
+    const msg = sub.pop() orelse {
+        try std.testing.expect(false);
+        return;
+    };
+    defer app_state.streaming.allocator.free(msg);
+
+    var env_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, msg, .{});
+    defer env_json.deinit();
+    try std.testing.expectEqualStrings("notification", env_json.value.object.get("event").?.string);
+
+    const notif_payload_str = env_json.value.object.get("payload").?.string;
+    var notif_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, notif_payload_str, .{});
+    defer notif_json.deinit();
+    try std.testing.expectEqualStrings("reblog", notif_json.value.object.get("type").?.string);
+
+    const list_resp = handle(&app_state, a, .{
+        .method = .GET,
+        .target = "/api/v1/notifications?limit=20",
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, list_resp.status);
+
+    var list_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, list_resp.body, .{});
+    defer list_json.deinit();
+    try std.testing.expect(list_json.value == .array);
+    try std.testing.expectEqual(@as(usize, 1), list_json.value.array.items.len);
+    try std.testing.expectEqualStrings("reblog", list_json.value.array.items[0].object.get("type").?.string);
+}
+
 test "POST /users/:name/inbox Create without activity id is replay-deduped" {
     var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
     defer app_state.deinit();
