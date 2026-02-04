@@ -32,3 +32,25 @@ This file tracks “good future refactors” and known risks. Add items whenever
 - [x] Add outbound fetch storm protections (per-domain concurrency/backoff).
 - [x] Add regression tests for visibility/data leakage (direct/private never exposed via public timelines or unauthenticated endpoints).
 - [x] Document/decide media exposure expectations for non-public posts (capability URLs vs auth-gated). Decision: capability URLs (`/media/:token`) with unguessable tokens; access logs redact tokens.
+
+## Feature gaps (Mastodon/Pleroma parity)
+
+This is a “rough backlog” based on Mastodon’s `config/routes/api.rb` and Pleroma’s `lib/pleroma/web/router.ex`, focusing on commonly-used endpoints and payload fields.
+
+- [ ] Add app introspection: `GET /api/v1/apps/verify_credentials`.
+- [ ] Add v1 search aliases: `GET /api/v1/search` and `GET /api/v1/accounts/search` (can delegate to `/api/v2/search`).
+- [ ] Add missing discovery helpers: `GET /api/v1/trends` (alias to tags) and `GET /api/v1/suggestions` (+ `DELETE /api/v1/suggestions/:account_id`).
+- [ ] Add notification extras: `GET /api/v1/notifications/:id` and `GET /api/v1/notifications/unread_count`.
+- [ ] Add status auxiliary endpoints: `GET /api/v1/statuses/:id/reblogged_by`, `/favourited_by`, `/history`, `/source` (placeholders ok initially).
+- [ ] Add bulk status lookup: `GET /api/v1/statuses?ids[]=...` (Mastodon “hydrate by id list” pattern).
+- [ ] Add direct timeline: `GET /api/v1/timelines/direct` (DMs), and make `GET /api/v1/timelines/tag/:tag` return real results (currently stubbed empty).
+- [ ] Add lists/filters CRUD (or robust stubs): `GET/POST/PUT/DELETE /api/v1/lists*` and `GET/POST/PUT/DELETE /api/v1/filters*`.
+- [ ] Add favourites/bookmarks index endpoints: `GET /api/v1/favourites` and `GET /api/v1/bookmarks`.
+- [ ] Add blocks/mutes endpoints: `GET /api/v1/blocks`, `GET /api/v1/mutes`, and `POST /api/v1/accounts/:id/(block|unblock|mute|unmute)` (no-op acceptable for single-user, but avoid 404).
+- [ ] Add reporting stub: `POST /api/v1/reports`.
+- [ ] Add media deletion: `DELETE /api/v1/media/:id` (and match Mastodon’s “return attachment” semantics).
+- [ ] Add tags endpoints: `GET /api/v1/tags/:id` and `POST /api/v1/tags/:id/(follow|unfollow)` (even if empty/422 for unknown tags).
+- [ ] Flesh out `/api/v1/instance` and add missing instance endpoints used by clients: `/api/v1/instance/rules`, `/api/v1/instance/domain_blocks`, `/api/v1/instance/translation_languages`.
+- [ ] Fill out `/api/v1/preferences` with Mastodon-shaped keys (currently `{}`) for clients that assume keys exist.
+- [ ] Implement “interaction state” on statuses (instead of no-ops): favourites/boosts/bookmarks/pins/mutes + `Status` relationship booleans (`favourited`, `reblogged`, `bookmarked`, `pinned`, `muted`).
+- [ ] Federation parity: outbound `Create(Note)` includes `inReplyTo` for replies and `tag` mention objects; inbound remote `inReplyTo` stored/mapped to improve threads.
