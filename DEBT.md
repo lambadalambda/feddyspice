@@ -4,11 +4,11 @@ This file tracks “good future refactors” and known risks. Add items whenever
 
 ## Architecture / DRY
 
-- [ ] Finish splitting `src/http.zig` into a small router + feature modules (for maintainability and faster iteration).
+- [x] Finish splitting `src/http.zig` into a small router + feature modules (for maintainability and faster iteration).
   - [x] Shared helpers extracted to `src/util/*` (`htmlEscapeAlloc`/`textToHtmlAlloc`, URL builders, remote account API ID mapping).
   - [x] HTTP `Request`/`Response` types moved to `src/http_types.zig` to avoid import cycles while splitting handlers.
   - [x] Core handlers split into `src/http/*` (discovery/instance/pages/oauth/accounts/statuses/timelines/activitypub).
-  - [ ] Move remaining handlers still living in `src/http.zig` (media, notifications, conversations, misc compat endpoints).
+  - [x] Move remaining handlers still living in `src/http.zig` (media, notifications, conversations, follows, metrics, misc compat endpoints).
 - [x] DRY federation delivery code (“sign + POST” loops) via shared helpers in `src/federation.zig`.
 - [x] Store explicit recipient/mention metadata at post-create time (at least for `visibility=direct`) and base delivery on stored addressing rather than reparsing text.
 
