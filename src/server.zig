@@ -389,15 +389,30 @@ fn writeResponse(allocator: std.mem.Allocator, request: *http.Server.Request, re
     else
         try allocator.alloc(http.Header, header_count);
 
-    headers[0] = .{ .name = "content-type", .value = resp.content_type };
+    const content_type = if (headerValueIsSafe(resp.content_type)) resp.content_type else "application/octet-stream";
+    headers[0] = .{ .name = "content-type", .value = content_type };
+
     for (cors_headers, 0..) |h, i| headers[i + 1] = h;
-    for (resp.headers, 0..) |h, i| headers[1 + cors_headers.len + i] = h;
+
+    var used: usize = 1 + cors_headers.len;
+    for (resp.headers) |h| {
+        if (!headerValueIsSafe(h.value)) continue;
+        headers[used] = h;
+        used += 1;
+    }
 
     try request.respond(resp.body, .{
         .status = resp.status,
         .keep_alive = false,
-        .extra_headers = headers,
+        .extra_headers = headers[0..used],
     });
+}
+
+fn headerValueIsSafe(value: []const u8) bool {
+    for (value) |c| {
+        if (c == '\r' or c == '\n' or c == 0) return false;
+    }
+    return true;
 }
 
 fn logAccess(

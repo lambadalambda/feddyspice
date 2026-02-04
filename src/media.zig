@@ -40,6 +40,14 @@ pub const MediaMeta = struct {
     }
 };
 
+fn sanitizeContentType(content_type: []const u8) []const u8 {
+    if (content_type.len == 0) return "application/octet-stream";
+    for (content_type) |c| {
+        if (c == '\r' or c == '\n' or c == 0) return "application/octet-stream";
+    }
+    return content_type;
+}
+
 pub fn create(
     conn: *db.Db,
     allocator: std.mem.Allocator,
@@ -64,6 +72,8 @@ pub fn createWithToken(
     description: ?[]const u8,
     now_ms: i64,
 ) Error!MediaMeta {
+    const ct = sanitizeContentType(content_type);
+
     var stmt = try conn.prepareZ(
         "INSERT INTO media_attachments(user_id, public_token, content_type, data, description, created_at_ms, updated_at_ms)\n" ++
             "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6);\x00",
@@ -72,7 +82,7 @@ pub fn createWithToken(
 
     try stmt.bindInt64(1, user_id);
     try stmt.bindText(2, public_token);
-    try stmt.bindText(3, content_type);
+    try stmt.bindText(3, ct);
     try stmt.bindBlob(4, data);
     if (description) |d| {
         try stmt.bindText(5, d);
@@ -309,6 +319,41 @@ test "media: create/lookup and attach to status" {
     }
     try std.testing.expectEqual(@as(usize, 1), list.len);
     try std.testing.expectEqual(meta.id, list[0].id);
+}
+
+test "media: create sanitizes content_type" {
+    var conn = try db.Db.openZ(":memory:");
+    defer conn.close();
+
+    try @import("migrations.zig").migrate(&conn);
+
+    const params: @import("password.zig").Params = .{ .t = 1, .m = 8, .p = 1 };
+    const salt: @import("password.zig").Salt = .{0x01} ** @import("password.zig").SaltLen;
+
+    const user_id = try @import("users.zig").createWithSalt(
+        &conn,
+        std.testing.allocator,
+        "alice",
+        "password",
+        salt,
+        params,
+    );
+
+    var meta = try createWithToken(
+        &conn,
+        std.testing.allocator,
+        user_id,
+        "token123",
+        "image/png\r\nx: y",
+        "pngdata",
+        null,
+        1,
+    );
+    defer meta.deinit(std.testing.allocator);
+
+    var full = (try lookup(&conn, std.testing.allocator, meta.id)).?;
+    defer full.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("application/octet-stream", full.content_type);
 }
 
 test "media: pruneOrphansOlderThan deletes unattached only" {
