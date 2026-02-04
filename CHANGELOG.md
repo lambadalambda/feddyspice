@@ -143,6 +143,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `/api/v2/instance` now advertises the correct streaming base URL (`ws(s)://domain`, not a nested `/api/v1/streaming` path).
 - Streaming WebSocket events now include `stream` (e.g. `["user"]`) for multiplexed clients like pl-fe.
 - WebSocket streaming now echoes `Sec-WebSocket-Protocol` when the client requests it (pl-fe passes the access token as a subprotocol).
+- Streaming WebSocket auth accepts access tokens via `Sec-WebSocket-Protocol` (Elk/browser compatibility).
 - Form parsing deallocates owned key/value buffers correctly; multipart parsing can now extract file parts (for media uploads).
 - Fedbox Docker network creation is more reliable via a configurable subnet (`FEDBOX_SUBNET`).
 - Fedbox smoke tests handle API differences between servers (follow fallback + HTML content entity decoding).

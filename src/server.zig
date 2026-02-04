@@ -90,21 +90,47 @@ pub fn serveOnce(app_state: *app.App, listener: *net.Server) !void {
         var params = form.parse(alloc, q) catch form.Form{ .map = .empty };
         const stream_raw = params.get("stream") orelse "user";
 
-        const token_q = params.get("access_token") orelse params.get("token");
-        const token = token_q orelse bearerToken(authorization) orelse "";
-        if (token.len == 0) {
+        var selected_protocol: ?[]const u8 = null;
+
+        // Browser WebSockets can't send an Authorization header, so allow using
+        // Sec-WebSocket-Protocol as a token carrier (Elk / masto does this).
+        var info: ?oauth.AccessTokenInfo = null;
+        if (params.get("access_token") orelse params.get("token")) |token_q| {
+            if (token_q.len > 0) info = oauth.verifyAccessToken(&app_state.conn, alloc, token_q) catch null;
+        }
+
+        if (info == null) {
+            if (bearerToken(authorization)) |token_auth| {
+                if (token_auth.len > 0) info = oauth.verifyAccessToken(&app_state.conn, alloc, token_auth) catch null;
+            }
+        }
+
+        if (info == null) {
+            if (sec_ws_protocol) |hdr| {
+                var itp = std.mem.tokenizeScalar(u8, hdr, ',');
+                while (itp.next()) |raw| {
+                    const proto = std.mem.trim(u8, raw, " \t");
+                    if (proto.len == 0) continue;
+                    if (std.mem.indexOfAny(u8, proto, "\r\n") != null) continue;
+                    const maybe = oauth.verifyAccessToken(&app_state.conn, alloc, proto) catch null;
+                    if (maybe) |v| {
+                        info = v;
+                        selected_protocol = proto;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (info == null) {
             const resp: routes.Response = .{ .status = .unauthorized, .body = "unauthorized\n" };
             try writeResponse(alloc, &request, resp);
             logAccess(app_state, conn.address, method, target, resp.status, start_ms);
             return;
         }
 
-        const info = oauth.verifyAccessToken(&app_state.conn, alloc, token) catch null;
-        if (info == null) {
-            const resp: routes.Response = .{ .status = .unauthorized, .body = "unauthorized\n" };
-            try writeResponse(alloc, &request, resp);
-            logAccess(app_state, conn.address, method, target, resp.status, start_ms);
-            return;
+        if (selected_protocol == null) {
+            if (sec_ws_protocol) |hdr| selected_protocol = firstProtocolToken(hdr);
         }
 
         const streams: []const streaming_hub.Stream = blk: {
@@ -123,7 +149,7 @@ pub fn serveOnce(app_state: *app.App, listener: *net.Server) !void {
         };
         errdefer app_state.streaming.unsubscribe(sub);
 
-        try writeWebSocketHandshake(conn.stream.handle, sec_ws_key.?, sec_ws_protocol);
+        try writeWebSocketHandshake(conn.stream.handle, sec_ws_key.?, selected_protocol);
         logAccess(app_state, conn.address, method, target, .switching_protocols, start_ms);
 
         const handler = try std.heap.page_allocator.create(StreamingHandler);
@@ -205,8 +231,10 @@ fn targetQuery(target: []const u8) []const u8 {
 
 fn bearerToken(authorization: ?[]const u8) ?[]const u8 {
     const hdr = authorization orelse return null;
-    if (!std.mem.startsWith(u8, hdr, "Bearer ")) return null;
-    return hdr["Bearer ".len..];
+    const prefix = "Bearer ";
+    if (hdr.len < prefix.len) return null;
+    if (!std.ascii.eqlIgnoreCase(hdr[0..prefix.len], prefix)) return null;
+    return std.mem.trim(u8, hdr[prefix.len..], " \t");
 }
 
 fn isStreamingWebSocketRequest(
@@ -264,7 +292,7 @@ fn firstProtocolToken(hdr_value: []const u8) ?[]const u8 {
     return trimmed;
 }
 
-fn writeWebSocketHandshake(fd: std.posix.fd_t, sec_ws_key: []const u8, sec_ws_protocol: ?[]const u8) !void {
+fn writeWebSocketHandshake(fd: std.posix.fd_t, sec_ws_key: []const u8, selected_protocol: ?[]const u8) !void {
     const accept = websocket.computeAcceptKey(sec_ws_key);
     var buf: [512]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&buf);
@@ -274,8 +302,8 @@ fn writeWebSocketHandshake(fd: std.posix.fd_t, sec_ws_key: []const u8, sec_ws_pr
     try w.print("Upgrade: websocket\r\n", .{});
     try w.print("Connection: Upgrade\r\n", .{});
     try w.print("Sec-WebSocket-Accept: {s}\r\n", .{accept[0..]});
-    if (sec_ws_protocol) |hdr| {
-        if (firstProtocolToken(hdr)) |proto| {
+    if (selected_protocol) |proto| {
+        if (proto.len > 0 and std.mem.indexOfAny(u8, proto, "\r\n") == null) {
             try w.print("Sec-WebSocket-Protocol: {s}\r\n", .{proto});
         }
     }
@@ -634,6 +662,105 @@ test "serveOnce: WebSocket /api/v1/streaming upgrade receives update" {
                     "Sec-WebSocket-Protocol: {s}\r\n" ++
                     "\r\n",
                 .{ c.token, c.token },
+            );
+            defer std.testing.allocator.free(req);
+
+            try writeAll(stream.handle, req);
+
+            var buf: [4096]u8 = undefined;
+            var used: usize = 0;
+            while (used < buf.len) {
+                const n = try std.posix.read(stream.handle, buf[used..]);
+                if (n == 0) break;
+                used += n;
+                if (std.mem.indexOf(u8, buf[0..used], "\r\n\r\n") != null) break;
+            }
+
+            const head = buf[0..used];
+            c.got_101 = std.mem.startsWith(u8, head, "HTTP/1.1 101");
+            const expected_proto = try std.fmt.allocPrint(std.testing.allocator, "Sec-WebSocket-Protocol: {s}\r\n", .{c.token});
+            defer std.testing.allocator.free(expected_proto);
+            c.got_protocol = (std.mem.indexOf(u8, head, expected_proto) != null);
+
+            // Read a single text frame.
+            used = 0;
+            while (used < buf.len) {
+                const n = try std.posix.read(stream.handle, buf[used..]);
+                if (n == 0) break;
+                used += n;
+                const res = try websocket.tryParseFrame(buf[0..used]);
+                if (res) |r| {
+                    c.got_update = (r.frame.opcode == .text) and (std.mem.indexOf(u8, r.frame.payload, "\"event\":\"update\"") != null);
+                    break;
+                }
+            }
+        }
+    };
+
+    var t = try std.Thread.spawn(.{}, Client.run, .{&ctx});
+
+    try serveOnce(&app_state, &listener);
+    // Publish after the subscriber has been registered (during handshake handling).
+    app_state.streaming.publishUpdate(user_id, "{\"id\":\"1\"}");
+
+    t.join();
+
+    try std.testing.expect(ctx.got_101);
+    try std.testing.expect(ctx.got_protocol);
+    try std.testing.expect(ctx.got_update);
+
+    // The streaming handler thread is detached; wait for it to notice the client disconnect and unsubscribe.
+    var attempts: usize = 0;
+    while (attempts < 50 and app_state.streaming.subscriberCount() != 0) : (attempts += 1) {
+        std.Thread.sleep(10 * std.time.ns_per_ms);
+    }
+    try std.testing.expectEqual(@as(usize, 0), app_state.streaming.subscriberCount());
+}
+
+test "serveOnce: WebSocket /api/v1/streaming accepts token via Sec-WebSocket-Protocol" {
+    const listen_address = try net.Address.parseIp("127.0.0.1", 0);
+    var listener = try listen_address.listen(.{ .reuse_address = true });
+    defer listener.deinit();
+
+    const addr = listener.listen_address;
+
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params: @import("password.zig").Params = .{ .t = 1, .m = 8, .p = 1 };
+    const user_id = try @import("users.zig").create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const creds = try oauth.createApp(&app_state.conn, a, "elk", "urn:ietf:wg:oauth:2.0:oob", "read write follow", "");
+    const token = try oauth.createAccessToken(&app_state.conn, a, creds.id, user_id, "read write follow");
+
+    var ctx: struct {
+        addr: net.Address,
+        token: []const u8,
+        got_101: bool = false,
+        got_protocol: bool = false,
+        got_update: bool = false,
+    } = .{ .addr = addr, .token = token };
+
+    const Client = struct {
+        fn run(c: *@TypeOf(ctx)) !void {
+            var stream = try net.tcpConnectToAddress(c.addr);
+            defer stream.close();
+
+            const req = try std.fmt.allocPrint(
+                std.testing.allocator,
+                "GET /api/v1/streaming/?stream=user HTTP/1.1\r\n" ++
+                    "Host: example.test\r\n" ++
+                    "Upgrade: websocket\r\n" ++
+                    "Connection: Upgrade\r\n" ++
+                    "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" ++
+                    "Sec-WebSocket-Version: 13\r\n" ++
+                    "Sec-WebSocket-Protocol: mastodon, {s}\r\n" ++
+                    "\r\n",
+                .{c.token},
             );
             defer std.testing.allocator.free(req);
 
