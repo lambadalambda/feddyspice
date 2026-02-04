@@ -1,18 +1,40 @@
 const std = @import("std");
 
 const app = @import("../app.zig");
+const db = @import("../db.zig");
 const common = @import("common.zig");
 const http_types = @import("../http_types.zig");
 const url = @import("../util/url.zig");
 const version = @import("../version.zig");
 
+fn countOrZero(conn: *db.Db, sql: [:0]const u8) i64 {
+    var stmt = conn.prepareZ(sql) catch return 0;
+    defer stmt.finalize();
+
+    switch (stmt.step() catch return 0) {
+        .row => return stmt.columnInt64(0),
+        .done => return 0,
+    }
+}
+
 pub fn instanceV1(app_state: *app.App, allocator: std.mem.Allocator) http_types.Response {
+    const streaming_url = url.streamingBaseUrlAlloc(app_state, allocator) catch "";
+
+    const user_count = countOrZero(&app_state.conn, "SELECT COUNT(*) FROM users;\x00");
+    const status_count = countOrZero(&app_state.conn, "SELECT COUNT(*) FROM statuses WHERE deleted_at IS NULL;\x00");
+    const domain_count = countOrZero(&app_state.conn, "SELECT COUNT(DISTINCT domain) FROM remote_actors;\x00");
+
     const payload = .{
         .uri = app_state.cfg.domain,
         .title = "feddyspice",
         .short_description = "single-user server",
+        .description = "single-user server",
+        .email = "",
         .version = version.version,
         .registrations = true,
+        .urls = .{ .streaming_api = streaming_url },
+        .stats = .{ .user_count = user_count, .status_count = status_count, .domain_count = domain_count },
+        .languages = [_][]const u8{"en"},
     };
 
     return common.jsonOk(allocator, payload);

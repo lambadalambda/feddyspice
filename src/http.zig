@@ -661,6 +661,21 @@ test "GET /api/v1/instance -> 200 with uri" {
     defer parsed.deinit();
 
     try std.testing.expectEqualStrings("example.test", parsed.value.object.get("uri").?.string);
+    try std.testing.expect(parsed.value.object.get("stats") != null);
+    try std.testing.expect(parsed.value.object.get("urls") != null);
+    try std.testing.expect(parsed.value.object.get("languages") != null);
+
+    const stats_obj = parsed.value.object.get("stats").?.object;
+    try std.testing.expect(stats_obj.get("user_count") != null);
+    try std.testing.expect(stats_obj.get("status_count") != null);
+    try std.testing.expect(stats_obj.get("domain_count") != null);
+
+    const urls_obj = parsed.value.object.get("urls").?.object;
+    try std.testing.expectEqualStrings("ws://example.test", urls_obj.get("streaming_api").?.string);
+
+    const langs = parsed.value.object.get("languages").?.array.items;
+    try std.testing.expect(langs.len > 0);
+    try std.testing.expectEqualStrings("en", langs[0].string);
 }
 
 test "GET /api/v2/instance -> 200 with domain" {

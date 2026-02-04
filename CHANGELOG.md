@@ -16,6 +16,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - SQLite DB wrapper and migrations (including initial `users` table).
 - Password hashing (Argon2id) and single-user creation/login helpers.
 - App wiring and basic Mastodon-compatible instance endpoint (`/api/v1/instance`).
+- `/api/v1/instance` now includes `stats`, `urls.streaming_api`, and `languages` for client compatibility.
 - Added v1 instance helper endpoints (`/api/v1/instance/rules`, `/api/v1/instance/domain_blocks`, `/api/v1/instance/translation_languages`).
 - Minimal HTML signup/login and session cookies.
 - OAuth 2.0 app registration and authorization-code flow (`/api/v1/apps`, `/oauth/authorize`, `/oauth/token`).
