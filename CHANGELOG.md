@@ -59,6 +59,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Added Mastodon v1 search compatibility endpoints (`GET /api/v1/search`, `GET /api/v1/accounts/search`).
 - Added placeholder discovery endpoints (`GET /api/v1/trends`, `GET /api/v1/suggestions`, `DELETE /api/v1/suggestions/:account_id`).
 - Added placeholder endpoints (`GET /api/v1/favourites`, `GET /api/v1/bookmarks`, `GET /api/v1/blocks`, `GET /api/v1/mutes`, `POST /api/v1/reports`) for client compatibility.
+- Added status helper endpoints (`GET /api/v1/statuses/:id/reblogged_by`, `/favourited_by`, `/history`, `/source`) and bulk hydration (`GET /api/v1/statuses?ids[]=...`) for client compatibility.
 - `/api/v1/preferences` now returns Mastodon-shaped keys (posting/reading defaults) for client compatibility.
 - Notifications API endpoints (`GET /api/v1/notifications`, `GET /api/v1/notifications/:id`, `GET /api/v1/notifications/unread_count`, `POST /api/v1/notifications/clear`, `POST /api/v1/notifications/:id/dismiss`).
 - Streaming health endpoint (`GET /api/v1/streaming/health`).

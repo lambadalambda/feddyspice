@@ -14,6 +14,157 @@ const users = @import("../users.zig");
 
 const StatusPayload = masto.StatusPayload;
 
+pub fn statusesBulkGet(app_state: *app.App, allocator: std.mem.Allocator, req: http_types.Request) http_types.Response {
+    const token = common.bearerToken(req.authorization) orelse return common.unauthorized(allocator);
+    const info = oauth.verifyAccessToken(&app_state.conn, allocator, token) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (info == null) return common.unauthorized(allocator);
+
+    const q = common.queryString(req.target);
+
+    var ids: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer ids.deinit(allocator);
+
+    var it = std.mem.splitScalar(u8, q, '&');
+    while (it.next()) |pair_raw| {
+        if (pair_raw.len == 0) continue;
+        const eq = std.mem.indexOfScalar(u8, pair_raw, '=') orelse continue;
+        const key = pair_raw[0..eq];
+        const value = pair_raw[eq + 1 ..];
+        if (value.len == 0) continue;
+
+        if (std.mem.eql(u8, key, "ids") or std.mem.eql(u8, key, "ids[]") or std.mem.eql(u8, key, "ids%5B%5D")) {
+            ids.append(allocator, value) catch
+                return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        }
+    }
+
+    const user = users.lookupUserById(&app_state.conn, allocator, info.?.user_id) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (user == null) return common.unauthorized(allocator);
+
+    var payloads: std.ArrayListUnmanaged(StatusPayload) = .empty;
+    defer payloads.deinit(allocator);
+
+    for (ids.items) |id_str| {
+        const id = std.fmt.parseInt(i64, id_str, 10) catch continue;
+
+        if (id < 0) {
+            const st = remote_statuses.lookup(&app_state.conn, allocator, id) catch
+                return .{ .status = .internal_server_error, .body = "internal server error\n" };
+            if (st == null) continue;
+
+            const actor = remote_actors.lookupById(&app_state.conn, allocator, st.?.remote_actor_id) catch
+                return .{ .status = .internal_server_error, .body = "internal server error\n" };
+            if (actor == null) continue;
+
+            payloads.append(allocator, masto.makeRemoteStatusPayload(app_state, allocator, actor.?, st.?)) catch
+                return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        } else {
+            const st = statuses.lookup(&app_state.conn, allocator, id) catch
+                return .{ .status = .internal_server_error, .body = "internal server error\n" };
+            if (st == null) continue;
+
+            payloads.append(allocator, masto.makeStatusPayload(app_state, allocator, user.?, st.?)) catch
+                return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        }
+    }
+
+    return common.jsonOk(allocator, payloads.items);
+}
+
+pub fn statusAccountsListEmpty(app_state: *app.App, allocator: std.mem.Allocator, req: http_types.Request, path: []const u8) http_types.Response {
+    const token = common.bearerToken(req.authorization) orelse return common.unauthorized(allocator);
+    const info = oauth.verifyAccessToken(&app_state.conn, allocator, token) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (info == null) return common.unauthorized(allocator);
+
+    const prefix = "/api/v1/statuses/";
+    if (!std.mem.startsWith(u8, path, prefix)) return .{ .status = .not_found, .body = "not found\n" };
+
+    const suffix = if (std.mem.endsWith(u8, path, "/reblogged_by"))
+        "/reblogged_by"
+    else if (std.mem.endsWith(u8, path, "/favourited_by"))
+        "/favourited_by"
+    else
+        return .{ .status = .not_found, .body = "not found\n" };
+
+    const id_part = path[prefix.len .. path.len - suffix.len];
+    const id = std.fmt.parseInt(i64, id_part, 10) catch
+        return .{ .status = .not_found, .body = "not found\n" };
+
+    if (id < 0) {
+        const st = remote_statuses.lookup(&app_state.conn, allocator, id) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        if (st == null) return .{ .status = .not_found, .body = "not found\n" };
+    } else {
+        const st = statuses.lookup(&app_state.conn, allocator, id) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        if (st == null) return .{ .status = .not_found, .body = "not found\n" };
+    }
+
+    return common.jsonOk(allocator, [_]i32{});
+}
+
+pub fn statusHistoryEmpty(app_state: *app.App, allocator: std.mem.Allocator, req: http_types.Request, path: []const u8) http_types.Response {
+    const token = common.bearerToken(req.authorization) orelse return common.unauthorized(allocator);
+    const info = oauth.verifyAccessToken(&app_state.conn, allocator, token) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (info == null) return common.unauthorized(allocator);
+
+    const prefix = "/api/v1/statuses/";
+    const suffix = "/history";
+    if (!std.mem.startsWith(u8, path, prefix)) return .{ .status = .not_found, .body = "not found\n" };
+    if (!std.mem.endsWith(u8, path, suffix)) return .{ .status = .not_found, .body = "not found\n" };
+
+    const id_part = path[prefix.len .. path.len - suffix.len];
+    const id = std.fmt.parseInt(i64, id_part, 10) catch
+        return .{ .status = .not_found, .body = "not found\n" };
+
+    if (id < 0) {
+        const st = remote_statuses.lookup(&app_state.conn, allocator, id) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        if (st == null) return .{ .status = .not_found, .body = "not found\n" };
+    } else {
+        const st = statuses.lookup(&app_state.conn, allocator, id) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        if (st == null) return .{ .status = .not_found, .body = "not found\n" };
+    }
+
+    return common.jsonOk(allocator, [_]i32{});
+}
+
+pub fn statusSource(app_state: *app.App, allocator: std.mem.Allocator, req: http_types.Request, path: []const u8) http_types.Response {
+    const token = common.bearerToken(req.authorization) orelse return common.unauthorized(allocator);
+    const info = oauth.verifyAccessToken(&app_state.conn, allocator, token) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (info == null) return common.unauthorized(allocator);
+
+    const prefix = "/api/v1/statuses/";
+    const suffix = "/source";
+    if (!std.mem.startsWith(u8, path, prefix)) return .{ .status = .not_found, .body = "not found\n" };
+    if (!std.mem.endsWith(u8, path, suffix)) return .{ .status = .not_found, .body = "not found\n" };
+
+    const id_part = path[prefix.len .. path.len - suffix.len];
+    const id = std.fmt.parseInt(i64, id_part, 10) catch
+        return .{ .status = .not_found, .body = "not found\n" };
+
+    if (id < 0) return .{ .status = .not_found, .body = "not found\n" };
+
+    const st = statuses.lookup(&app_state.conn, allocator, id) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (st == null) return .{ .status = .not_found, .body = "not found\n" };
+
+    if (st.?.user_id != info.?.user_id) return .{ .status = .not_found, .body = "not found\n" };
+
+    const payload = .{
+        .id = id_part,
+        .text = st.?.text,
+        .spoiler_text = "",
+    };
+    return common.jsonOk(allocator, payload);
+}
+
 pub fn createStatus(app_state: *app.App, allocator: std.mem.Allocator, req: http_types.Request) http_types.Response {
     const token = common.bearerToken(req.authorization) orelse return common.unauthorized(allocator);
     const info = oauth.verifyAccessToken(&app_state.conn, allocator, token) catch

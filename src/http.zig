@@ -390,8 +390,28 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
         return timelines_api.homeTimeline(app_state, allocator, req);
     }
 
+    if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/statuses")) {
+        return statuses_api.statusesBulkGet(app_state, allocator, req);
+    }
+
     if (req.method == .GET and std.mem.startsWith(u8, path, "/api/v1/statuses/") and std.mem.endsWith(u8, path, "/context")) {
         return statuses_api.statusContext(app_state, allocator, req, path);
+    }
+
+    if (req.method == .GET and std.mem.startsWith(u8, path, "/api/v1/statuses/") and std.mem.endsWith(u8, path, "/reblogged_by")) {
+        return statuses_api.statusAccountsListEmpty(app_state, allocator, req, path);
+    }
+
+    if (req.method == .GET and std.mem.startsWith(u8, path, "/api/v1/statuses/") and std.mem.endsWith(u8, path, "/favourited_by")) {
+        return statuses_api.statusAccountsListEmpty(app_state, allocator, req, path);
+    }
+
+    if (req.method == .GET and std.mem.startsWith(u8, path, "/api/v1/statuses/") and std.mem.endsWith(u8, path, "/history")) {
+        return statuses_api.statusHistoryEmpty(app_state, allocator, req, path);
+    }
+
+    if (req.method == .GET and std.mem.startsWith(u8, path, "/api/v1/statuses/") and std.mem.endsWith(u8, path, "/source")) {
+        return statuses_api.statusSource(app_state, allocator, req, path);
     }
 
     if (req.method == .GET and std.mem.startsWith(u8, path, "/api/v1/statuses/")) {
@@ -2935,6 +2955,136 @@ test "statuses: create rejects more than 4 media attachments" {
     });
     try std.testing.expectEqual(std.http.Status.unprocessable_entity, create_resp.status);
     try std.testing.expectEqualStrings("too many media\n", create_resp.body);
+}
+
+test "statuses: auxiliary endpoints return JSON" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const app_creds = try oauth.createApp(
+        &app_state.conn,
+        a,
+        "pl-fe",
+        "urn:ietf:wg:oauth:2.0:oob",
+        "read write",
+        "",
+    );
+    const token = try oauth.createAccessToken(&app_state.conn, a, app_creds.id, user_id, "read write");
+    const auth_header = try std.fmt.allocPrint(a, "Bearer {s}", .{token});
+
+    const create_resp = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/api/v1/statuses",
+        .content_type = "application/x-www-form-urlencoded",
+        .body = "status=hello&visibility=public",
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, create_resp.status);
+    var create_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, create_resp.body, .{});
+    defer create_json.deinit();
+    const status_id = create_json.value.object.get("id").?.string;
+
+    const endpoints = [_]struct {
+        suffix: []const u8,
+        kind: enum { array, object },
+    }{
+        .{ .suffix = "/reblogged_by", .kind = .array },
+        .{ .suffix = "/favourited_by", .kind = .array },
+        .{ .suffix = "/history", .kind = .array },
+        .{ .suffix = "/source", .kind = .object },
+    };
+
+    for (endpoints) |tc| {
+        const target = try std.fmt.allocPrint(a, "/api/v1/statuses/{s}{s}", .{ status_id, tc.suffix });
+        const resp = handle(&app_state, a, .{
+            .method = .GET,
+            .target = target,
+            .authorization = auth_header,
+        });
+        try std.testing.expectEqual(std.http.Status.ok, resp.status);
+
+        var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, resp.body, .{});
+        defer parsed.deinit();
+
+        switch (tc.kind) {
+            .array => try std.testing.expect(parsed.value == .array),
+            .object => try std.testing.expect(parsed.value == .object),
+        }
+
+        if (std.mem.eql(u8, tc.suffix, "/source")) {
+            try std.testing.expectEqualStrings("hello", parsed.value.object.get("text").?.string);
+        }
+    }
+}
+
+test "statuses: GET /api/v1/statuses?ids[] hydrates statuses" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const app_creds = try oauth.createApp(
+        &app_state.conn,
+        a,
+        "pl-fe",
+        "urn:ietf:wg:oauth:2.0:oob",
+        "read write",
+        "",
+    );
+    const token = try oauth.createAccessToken(&app_state.conn, a, app_creds.id, user_id, "read write");
+    const auth_header = try std.fmt.allocPrint(a, "Bearer {s}", .{token});
+
+    const s1 = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/api/v1/statuses",
+        .content_type = "application/x-www-form-urlencoded",
+        .body = "status=one&visibility=public",
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, s1.status);
+    var s1_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, s1.body, .{});
+    defer s1_json.deinit();
+    const id1 = s1_json.value.object.get("id").?.string;
+
+    const s2 = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/api/v1/statuses",
+        .content_type = "application/x-www-form-urlencoded",
+        .body = "status=two&visibility=public",
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, s2.status);
+    var s2_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, s2.body, .{});
+    defer s2_json.deinit();
+    const id2 = s2_json.value.object.get("id").?.string;
+
+    const bulk_target = try std.fmt.allocPrint(a, "/api/v1/statuses?ids[]={s}&ids[]={s}", .{ id1, id2 });
+    const bulk = handle(&app_state, a, .{
+        .method = .GET,
+        .target = bulk_target,
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, bulk.status);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bulk.body, .{});
+    defer parsed.deinit();
+
+    try std.testing.expect(parsed.value == .array);
+    try std.testing.expectEqual(@as(usize, 2), parsed.value.array.items.len);
+    try std.testing.expectEqualStrings(id1, parsed.value.array.items[0].object.get("id").?.string);
+    try std.testing.expectEqualStrings(id2, parsed.value.array.items[1].object.get("id").?.string);
 }
 
 test "timelines: public timeline returns local statuses" {
