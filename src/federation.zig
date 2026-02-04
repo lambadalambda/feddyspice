@@ -164,6 +164,88 @@ fn requestTargetAlloc(allocator: std.mem.Allocator, uri: std.Uri) ![]u8 {
     return out;
 }
 
+const SignedDelivery = struct {
+    inbox_host_header: []const u8,
+    inbox_target: []const u8,
+    signed: http_signatures.SignedHeaders,
+};
+
+fn signInboxPost(
+    app_state: *app.App,
+    allocator: std.mem.Allocator,
+    private_key_pem: []const u8,
+    key_id: []const u8,
+    inbox_url: []const u8,
+    body: []const u8,
+) Error!SignedDelivery {
+    const inbox_uri = try std.Uri.parse(inbox_url);
+    const inbox_target = try requestTargetAlloc(allocator, inbox_uri);
+
+    const inbox_host_part = inbox_uri.host orelse return error.FollowSendFailed;
+    const inbox_host = try inbox_host_part.toRawMaybeAlloc(allocator);
+    const inbox_host_header = try hostHeaderAlloc(allocator, inbox_host, inbox_uri.port, app_state.cfg.scheme);
+
+    const signed = try http_signatures.signRequest(
+        allocator,
+        private_key_pem,
+        key_id,
+        .POST,
+        inbox_target,
+        inbox_host_header,
+        body,
+        std.time.timestamp(),
+    );
+
+    return .{
+        .inbox_host_header = inbox_host_header,
+        .inbox_target = inbox_target,
+        .signed = signed,
+    };
+}
+
+fn fetchSignedInboxPost(
+    app_state: *app.App,
+    allocator: std.mem.Allocator,
+    inbox_url: []const u8,
+    inbox_host_header: []const u8,
+    signed: http_signatures.SignedHeaders,
+    body: []const u8,
+) Error!transport.Response {
+    const extra_headers = [_]std.http.Header{
+        .{ .name = "accept", .value = "application/activity+json" },
+        .{ .name = "date", .value = signed.date },
+        .{ .name = "digest", .value = signed.digest },
+        .{ .name = "signature", .value = signed.signature },
+    };
+
+    return try app_state.transport.fetch(allocator, .{
+        .url = inbox_url,
+        .method = .POST,
+        .headers = .{
+            .host = .{ .override = inbox_host_header },
+            .content_type = .{ .override = "application/activity+json" },
+            .accept_encoding = .omit,
+            .user_agent = .{ .override = "feddyspice" },
+        },
+        .extra_headers = &extra_headers,
+        .payload = body,
+    });
+}
+
+fn deliverSignedInboxPostOkDiscardBody(
+    app_state: *app.App,
+    allocator: std.mem.Allocator,
+    private_key_pem: []const u8,
+    key_id: []const u8,
+    inbox_url: []const u8,
+    body: []const u8,
+) Error!void {
+    const delivery = try signInboxPost(app_state, allocator, private_key_pem, key_id, inbox_url, body);
+    const resp = try fetchSignedInboxPost(app_state, allocator, inbox_url, delivery.inbox_host_header, delivery.signed, body);
+    allocator.free(resp.body);
+    if (resp.status.class() != .success) return error.FollowSendFailed;
+}
+
 fn fetchBodySuccessAlloc(app_state: *app.App, allocator: std.mem.Allocator, opts: transport.FetchOptions) Error![]u8 {
     const resp = try app_state.transport.fetch(allocator, opts);
     if (resp.status.class() != .success) {
@@ -459,42 +541,10 @@ pub fn sendFollowActivity(
         return error.OutOfMemory;
 
     const inbox_url = deliveryInboxUrl(actor);
-    const inbox_uri = try std.Uri.parse(inbox_url);
-    const inbox_target = try requestTargetAlloc(allocator, inbox_uri);
-
-    const inbox_host = try inbox_uri.host.?.toRawMaybeAlloc(allocator);
-    const inbox_host_header = try hostHeaderAlloc(allocator, inbox_host, inbox_uri.port, app_state.cfg.scheme);
-
     const keys = try actor_keys.ensureForUser(&app_state.conn, allocator, user_id);
 
-    const signed = try http_signatures.signRequest(
-        allocator,
-        keys.private_key_pem,
-        key_id,
-        .POST,
-        inbox_target,
-        inbox_host_header,
-        follow_body,
-        std.time.timestamp(),
-    );
-
-    const resp = try app_state.transport.fetch(allocator, .{
-        .url = inbox_url,
-        .method = .POST,
-        .headers = .{
-            .host = .{ .override = inbox_host_header },
-            .content_type = .{ .override = "application/activity+json" },
-            .accept_encoding = .omit,
-            .user_agent = .{ .override = "feddyspice" },
-        },
-        .extra_headers = &.{
-            .{ .name = "accept", .value = "application/activity+json" },
-            .{ .name = "date", .value = signed.date },
-            .{ .name = "digest", .value = signed.digest },
-            .{ .name = "signature", .value = signed.signature },
-        },
-        .payload = follow_body,
-    });
+    const delivery = try signInboxPost(app_state, allocator, keys.private_key_pem, key_id, inbox_url, follow_body);
+    const resp = try fetchSignedInboxPost(app_state, allocator, inbox_url, delivery.inbox_host_header, delivery.signed, follow_body);
     defer allocator.free(resp.body);
 
     if (resp.status.class() != .success) {
@@ -563,42 +613,10 @@ pub fn acceptInboundFollow(
         return error.OutOfMemory;
 
     const inbox_url = deliveryInboxUrl(actor);
-    const inbox_uri = try std.Uri.parse(inbox_url);
-    const inbox_target = try requestTargetAlloc(allocator, inbox_uri);
-
-    const inbox_host = try inbox_uri.host.?.toRawMaybeAlloc(allocator);
-    const inbox_host_header = try hostHeaderAlloc(allocator, inbox_host, inbox_uri.port, app_state.cfg.scheme);
 
     const keys = try actor_keys.ensureForUser(&app_state.conn, allocator, user_id);
 
-    const signed = try http_signatures.signRequest(
-        allocator,
-        keys.private_key_pem,
-        key_id,
-        .POST,
-        inbox_target,
-        inbox_host_header,
-        accept_body,
-        std.time.timestamp(),
-    );
-
-    try fetchOkDiscardBody(app_state, allocator, .{
-        .url = inbox_url,
-        .method = .POST,
-        .headers = .{
-            .host = .{ .override = inbox_host_header },
-            .content_type = .{ .override = "application/activity+json" },
-            .accept_encoding = .omit,
-            .user_agent = .{ .override = "feddyspice" },
-        },
-        .extra_headers = &.{
-            .{ .name = "accept", .value = "application/activity+json" },
-            .{ .name = "date", .value = signed.date },
-            .{ .name = "digest", .value = signed.digest },
-            .{ .name = "signature", .value = signed.signature },
-        },
-        .payload = accept_body,
-    });
+    try deliverSignedInboxPostOkDiscardBody(app_state, allocator, keys.private_key_pem, key_id, inbox_url, accept_body);
 
     _ = try followers.markAcceptedByRemoteActorId(&app_state.conn, user_id, actor.id);
     const notif_id = try notifications.create(&app_state.conn, user_id, "follow", actor.id, null);
@@ -1251,4 +1269,42 @@ fn headerValue(headers: []const std.http.Header, name: []const u8) ?[]const u8 {
         if (std.ascii.eqlIgnoreCase(h.name, name)) return h.value;
     }
     return null;
+}
+
+test "signInboxPost includes query in request-target" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const kp = try @import("crypto_rsa.zig").generateRsaKeyPairPem(a, 512);
+    const body = "{\"hello\":\"world\"}";
+    const key_id = "http://example.test/users/alice#main-key";
+
+    const delivery = try signInboxPost(
+        &app_state,
+        a,
+        kp.private_key_pem,
+        key_id,
+        "http://remote.test:8080/inbox?x=1",
+        body,
+    );
+
+    try std.testing.expectEqualStrings("/inbox?x=1", delivery.inbox_target);
+
+    const signing_string = try http_signatures.signingStringAlloc(a, .POST, delivery.inbox_target, "remote.test:8080", delivery.signed.date, delivery.signed.digest);
+
+    const sig_prefix = "signature=\"";
+    const sig_b64_i = std.mem.indexOf(u8, delivery.signed.signature, sig_prefix) orelse return error.TestUnexpectedResult;
+    const sig_b64_start = sig_b64_i + sig_prefix.len;
+    const sig_b64_end = std.mem.indexOfPos(u8, delivery.signed.signature, sig_b64_start, "\"") orelse return error.TestUnexpectedResult;
+    const sig_b64 = delivery.signed.signature[sig_b64_start..sig_b64_end];
+
+    const sig_len = std.base64.standard.Decoder.calcSizeForSlice(sig_b64) catch return error.TestUnexpectedResult;
+    const sig_bytes = try a.alloc(u8, sig_len);
+    std.base64.standard.Decoder.decode(sig_bytes, sig_b64) catch return error.TestUnexpectedResult;
+
+    try std.testing.expect(try @import("crypto_rsa.zig").verifyRsaSha256Pem(kp.public_key_pem, signing_string, sig_bytes));
 }

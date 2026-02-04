@@ -106,6 +106,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Added `src/http/statuses_api.zig` and moved status endpoints (`POST /api/v1/statuses`, `GET /api/v1/statuses/:id`, `GET /api/v1/statuses/:id/context`, `DELETE /api/v1/statuses/:id`, and no-op action endpoints).
 - Added `src/http/timelines_api.zig` and moved timeline endpoints (`GET /api/v1/timelines/home`, `GET /api/v1/timelines/public`).
 - Added `src/http/activitypub_api.zig` and moved ActivityPub endpoints (`/users/:name` actor, inbox, outbox, followers/following, object endpoints).
+- DRY: refactored signed ActivityPub inbox POST deliveries into shared helpers in `src/federation.zig`.
 
 ### Fixed
 
