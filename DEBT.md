@@ -38,7 +38,7 @@ This file tracks “good future refactors” and known risks. Add items whenever
 This is a “rough backlog” based on Mastodon’s `config/routes/api.rb` and Pleroma’s `lib/pleroma/web/router.ex`, focusing on commonly-used endpoints and payload fields.
 
 - [ ] Add app introspection: `GET /api/v1/apps/verify_credentials`.
-- [ ] Add v1 search aliases: `GET /api/v1/search` and `GET /api/v1/accounts/search` (can delegate to `/api/v2/search`).
+- [x] Add v1 search aliases: `GET /api/v1/search` and `GET /api/v1/accounts/search` (can delegate to `/api/v2/search`).
 - [ ] Add missing discovery helpers: `GET /api/v1/trends` (alias to tags) and `GET /api/v1/suggestions` (+ `DELETE /api/v1/suggestions/:account_id`).
 - [ ] Add notification extras: `GET /api/v1/notifications/:id` and `GET /api/v1/notifications/unread_count`.
 - [ ] Add status auxiliary endpoints: `GET /api/v1/statuses/:id/reblogged_by`, `/favourited_by`, `/history`, `/source` (placeholders ok initially).

@@ -305,6 +305,37 @@ pub fn apiV2Search(app_state: *app.App, allocator: std.mem.Allocator, req: http_
     });
 }
 
+pub fn apiV1Search(app_state: *app.App, allocator: std.mem.Allocator, req: http_types.Request) http_types.Response {
+    return apiV2Search(app_state, allocator, req);
+}
+
+pub fn apiV1AccountsSearch(app_state: *app.App, allocator: std.mem.Allocator, req: http_types.Request) http_types.Response {
+    const q = common.queryString(req.target);
+    const q_param = common.parseQueryParam(allocator, q, "q") catch
+        return .{ .status = .bad_request, .body = "invalid query\n" };
+
+    const query_raw = q_param orelse return common.jsonOk(allocator, [_]i32{});
+    const query_trimmed = std.mem.trim(u8, query_raw, " \t\r\n");
+    if (query_trimmed.len == 0) return common.jsonOk(allocator, [_]i32{});
+
+    var accounts: std.ArrayListUnmanaged(masto.AccountPayload) = .empty;
+    defer accounts.deinit(allocator);
+
+    if (!std.mem.startsWith(u8, query_trimmed, "http://") and
+        !std.mem.startsWith(u8, query_trimmed, "https://") and
+        std.mem.indexOfScalar(u8, query_trimmed, '@') != null)
+    {
+        const actor = federation.resolveRemoteActorByHandle(app_state, allocator, query_trimmed) catch null;
+        if (actor) |a| {
+            const api_id = remoteAccountApiIdAlloc(app_state, allocator, a.id);
+            accounts.append(allocator, makeRemoteAccountPayload(app_state, allocator, api_id, a)) catch
+                return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        }
+    }
+
+    return common.jsonOk(allocator, accounts.items);
+}
+
 pub fn accountGet(app_state: *app.App, allocator: std.mem.Allocator, path: []const u8) http_types.Response {
     const prefix = "/api/v1/accounts/";
     if (!std.mem.startsWith(u8, path, prefix)) return .{ .status = .not_found, .body = "not found\n" };

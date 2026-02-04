@@ -223,6 +223,14 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
         return accounts_api.apiV2Search(app_state, allocator, req);
     }
 
+    if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/search")) {
+        return accounts_api.apiV1Search(app_state, allocator, req);
+    }
+
+    if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/accounts/search")) {
+        return accounts_api.apiV1AccountsSearch(app_state, allocator, req);
+    }
+
     if (req.method == .POST and std.mem.eql(u8, path, "/api/v1/apps")) {
         return oauth_api.registerApp(app_state, allocator, req);
     }
@@ -3363,6 +3371,98 @@ test "GET /api/v2/search resolves acct handle into an account" {
     defer parsed.deinit();
 
     const accounts = parsed.value.object.get("accounts").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), accounts.len);
+
+    const actor_id = "http://remote.test/users/bob";
+    const rowid = (try remote_actors.lookupRowIdById(&app_state.conn, actor_id)).?;
+    const expected_id = try std.fmt.allocPrint(a, "{d}", .{remote_actor_id_base + rowid});
+
+    try std.testing.expectEqualStrings(expected_id, accounts[0].object.get("id").?.string);
+    try std.testing.expectEqualStrings("bob@remote.test", accounts[0].object.get("acct").?.string);
+    try std.testing.expectEqualStrings(actor_id, accounts[0].object.get("url").?.string);
+}
+
+test "GET /api/v1/search resolves acct handle into an account" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    var mock = transport.MockTransport.init(std.testing.allocator);
+    app_state.transport = mock.transport();
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    try mock.pushExpected(.{
+        .method = .GET,
+        .url = "http://remote.test/.well-known/webfinger?resource=acct:bob@remote.test",
+        .response_status = .ok,
+        .response_body = "{\"subject\":\"acct:bob@remote.test\",\"links\":[{\"rel\":\"self\",\"type\":\"application/activity+json\",\"href\":\"http://remote.test/users/bob\"}]}",
+    });
+    try mock.pushExpected(.{
+        .method = .GET,
+        .url = "http://remote.test/users/bob",
+        .response_status = .ok,
+        .response_body = "{\"@context\":\"https://www.w3.org/ns/activitystreams\",\"id\":\"http://remote.test/users/bob\",\"type\":\"Person\",\"preferredUsername\":\"bob\",\"inbox\":\"http://remote.test/users/bob/inbox\",\"publicKey\":{\"id\":\"http://remote.test/users/bob#main-key\",\"owner\":\"http://remote.test/users/bob\",\"publicKeyPem\":\"-----BEGIN PUBLIC KEY-----\\n...\\n-----END PUBLIC KEY-----\\n\"}}",
+    });
+
+    const handle_str = "@bob@remote.test";
+    const q_enc = try percentEncodeAlloc(a, handle_str);
+
+    const target = try std.fmt.allocPrint(a, "/api/v1/search?q={s}&resolve=true&limit=1", .{q_enc});
+    const resp = handle(&app_state, a, .{ .method = .GET, .target = target });
+    try std.testing.expectEqual(std.http.Status.ok, resp.status);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, resp.body, .{});
+    defer parsed.deinit();
+
+    const accounts = parsed.value.object.get("accounts").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), accounts.len);
+
+    const actor_id = "http://remote.test/users/bob";
+    const rowid = (try remote_actors.lookupRowIdById(&app_state.conn, actor_id)).?;
+    const expected_id = try std.fmt.allocPrint(a, "{d}", .{remote_actor_id_base + rowid});
+
+    try std.testing.expectEqualStrings(expected_id, accounts[0].object.get("id").?.string);
+    try std.testing.expectEqualStrings("bob@remote.test", accounts[0].object.get("acct").?.string);
+    try std.testing.expectEqualStrings(actor_id, accounts[0].object.get("url").?.string);
+}
+
+test "GET /api/v1/accounts/search resolves acct handle into an account array" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    var mock = transport.MockTransport.init(std.testing.allocator);
+    app_state.transport = mock.transport();
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    try mock.pushExpected(.{
+        .method = .GET,
+        .url = "http://remote.test/.well-known/webfinger?resource=acct:bob@remote.test",
+        .response_status = .ok,
+        .response_body = "{\"subject\":\"acct:bob@remote.test\",\"links\":[{\"rel\":\"self\",\"type\":\"application/activity+json\",\"href\":\"http://remote.test/users/bob\"}]}",
+    });
+    try mock.pushExpected(.{
+        .method = .GET,
+        .url = "http://remote.test/users/bob",
+        .response_status = .ok,
+        .response_body = "{\"@context\":\"https://www.w3.org/ns/activitystreams\",\"id\":\"http://remote.test/users/bob\",\"type\":\"Person\",\"preferredUsername\":\"bob\",\"inbox\":\"http://remote.test/users/bob/inbox\",\"publicKey\":{\"id\":\"http://remote.test/users/bob#main-key\",\"owner\":\"http://remote.test/users/bob\",\"publicKeyPem\":\"-----BEGIN PUBLIC KEY-----\\n...\\n-----END PUBLIC KEY-----\\n\"}}",
+    });
+
+    const handle_str = "@bob@remote.test";
+    const q_enc = try percentEncodeAlloc(a, handle_str);
+
+    const target = try std.fmt.allocPrint(a, "/api/v1/accounts/search?q={s}&resolve=true&limit=1", .{q_enc});
+    const resp = handle(&app_state, a, .{ .method = .GET, .target = target });
+    try std.testing.expectEqual(std.http.Status.ok, resp.status);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, resp.body, .{});
+    defer parsed.deinit();
+
+    const accounts = parsed.value.array.items;
     try std.testing.expectEqual(@as(usize, 1), accounts.len);
 
     const actor_id = "http://remote.test/users/bob";
