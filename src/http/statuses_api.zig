@@ -334,7 +334,44 @@ pub fn statusContext(app_state: *app.App, allocator: std.mem.Allocator, req: htt
     var ancestors: std.ArrayListUnmanaged(StatusPayload) = .empty;
     defer ancestors.deinit(allocator);
 
-    if (id >= 0) {
+    if (id < 0) {
+        var cur_id: i64 = id;
+        var depth: usize = 0;
+        while (depth < 50) : (depth += 1) {
+            const cur = remote_statuses.lookup(&app_state.conn, allocator, cur_id) catch
+                return .{ .status = .internal_server_error, .body = "internal server error\n" };
+            if (cur == null) break;
+
+            const parent_id = cur.?.in_reply_to_id orelse break;
+
+            if (parent_id < 0) {
+                const parent_st = remote_statuses.lookup(&app_state.conn, allocator, parent_id) catch
+                    return .{ .status = .internal_server_error, .body = "internal server error\n" };
+                if (parent_st == null) break;
+
+                const actor = remote_actors.lookupById(&app_state.conn, allocator, parent_st.?.remote_actor_id) catch
+                    return .{ .status = .internal_server_error, .body = "internal server error\n" };
+                if (actor == null) break;
+
+                ancestors.append(allocator, masto.makeRemoteStatusPayloadForViewer(app_state, allocator, actor.?, parent_st.?, info.?.user_id)) catch
+                    return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+                cur_id = parent_id;
+                continue;
+            }
+
+            const parent_st = statuses.lookup(&app_state.conn, allocator, parent_id) catch
+                return .{ .status = .internal_server_error, .body = "internal server error\n" };
+            if (parent_st == null) break;
+            if (parent_st.?.user_id != info.?.user_id) break;
+
+            ancestors.append(allocator, masto.makeStatusPayloadForViewer(app_state, allocator, user.?, parent_st.?, info.?.user_id)) catch
+                return .{ .status = .internal_server_error, .body = "internal server error\n" };
+            break;
+        }
+
+        std.mem.reverse(StatusPayload, ancestors.items);
+    } else {
         var cur_id: i64 = id;
         var depth: usize = 0;
         while (depth < 50) : (depth += 1) {

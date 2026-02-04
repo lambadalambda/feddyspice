@@ -169,6 +169,11 @@ const migrations = [_]Migration{
         .name = "create_status_interactions",
         .sql = status_interactions_v24_sql,
     },
+    .{
+        .version = 25,
+        .name = "remote_status_in_reply_to",
+        .sql = remote_status_in_reply_to_v25_sql,
+    },
 };
 
 const schema_migrations_sql: [:0]const u8 =
@@ -498,6 +503,11 @@ const status_interactions_v24_sql: [:0]const u8 =
     \\CREATE INDEX IF NOT EXISTS status_interactions_user_id_pinned ON status_interactions(user_id, pinned, updated_at_ms DESC, status_id DESC);
 ++ "\x00";
 
+const remote_status_in_reply_to_v25_sql: [:0]const u8 =
+    \\ALTER TABLE remote_statuses ADD COLUMN in_reply_to_id INTEGER;
+    \\CREATE INDEX IF NOT EXISTS remote_statuses_in_reply_to_id_id ON remote_statuses(in_reply_to_id, id);
+++ "\x00";
+
 test "migrate: creates users table and records version" {
     var conn = try db.Db.openZ(":memory:");
     defer conn.close();
@@ -562,6 +572,8 @@ test "migrate: creates users table and records version" {
     try std.testing.expectEqual(@as(i64, 23), v_stmt.columnInt64(0));
     try std.testing.expectEqual(db.Stmt.Step.row, try v_stmt.step());
     try std.testing.expectEqual(@as(i64, 24), v_stmt.columnInt64(0));
+    try std.testing.expectEqual(db.Stmt.Step.row, try v_stmt.step());
+    try std.testing.expectEqual(@as(i64, 25), v_stmt.columnInt64(0));
     try std.testing.expectEqual(db.Stmt.Step.done, try v_stmt.step());
 }
 
@@ -576,6 +588,6 @@ test "migrate: is idempotent" {
     defer stmt.finalize();
 
     try std.testing.expectEqual(db.Stmt.Step.row, try stmt.step());
-    try std.testing.expectEqual(@as(i64, 24), stmt.columnInt64(0));
+    try std.testing.expectEqual(@as(i64, 25), stmt.columnInt64(0));
     try std.testing.expectEqual(db.Stmt.Step.done, try stmt.step());
 }

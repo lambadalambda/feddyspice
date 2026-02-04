@@ -2486,6 +2486,7 @@ test "statuses: favourite/unfavourite on remote status sends Like/Undo(Like)" {
         a,
         remote_uri,
         remote_actor_id,
+        null,
         "<p>hi</p>",
         null,
         "public",
@@ -2577,6 +2578,7 @@ test "statuses: reblog/unreblog on remote status sends Announce/Undo(Announce)" 
         a,
         remote_uri,
         remote_actor_id,
+        null,
         "<p>hi</p>",
         null,
         "public",
@@ -3416,6 +3418,7 @@ test "timelines: public timeline excludes unlisted/private/direct statuses (loca
         a,
         "https://remote.test/notes/1",
         "https://remote.test/users/bob",
+        null,
         "<p>Rpub</p>",
         null,
         "public",
@@ -3426,6 +3429,7 @@ test "timelines: public timeline excludes unlisted/private/direct statuses (loca
         a,
         "https://remote.test/notes/2",
         "https://remote.test/users/bob",
+        null,
         "<p>Rdm</p>",
         null,
         "direct",
@@ -3524,6 +3528,7 @@ test "timelines: direct timeline returns direct statuses only" {
         a,
         "https://remote.test/notes/1",
         "https://remote.test/users/bob",
+        null,
         "<p>Rpub</p>",
         null,
         "public",
@@ -3534,6 +3539,7 @@ test "timelines: direct timeline returns direct statuses only" {
         a,
         "https://remote.test/notes/2",
         "https://remote.test/users/bob",
+        null,
         "<p>Rdm</p>",
         null,
         "direct",
@@ -5878,6 +5884,104 @@ test "POST /users/:name/inbox Create stores remote status" {
     try std.testing.expect(st.id < 0);
     try std.testing.expectEqualStrings("<p>Hello</p>", st.content_html);
     try std.testing.expectEqualStrings("public", st.visibility);
+}
+
+test "POST /users/:name/inbox Create stores inReplyTo mapping to local statuses" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const parent = try statuses.create(&app_state.conn, a, user_id, "parent", "public", null);
+    const parent_url = try std.fmt.allocPrint(a, "http://example.test/users/alice/statuses/{d}", .{parent.id});
+
+    const remote_kp = try @import("crypto_rsa.zig").generateRsaKeyPairPem(a, 512);
+    const remote_key_id = "https://remote.test/users/bob#main-key";
+
+    try remote_actors.upsert(&app_state.conn, .{
+        .id = "https://remote.test/users/bob",
+        .inbox = "https://remote.test/users/bob/inbox",
+        .shared_inbox = null,
+        .preferred_username = "bob",
+        .domain = "remote.test",
+        .public_key_pem = remote_kp.public_key_pem,
+    });
+
+    const body = try std.fmt.allocPrint(
+        a,
+        \\{{"@context":"https://www.w3.org/ns/activitystreams","type":"Create","actor":"https://remote.test/users/bob","object":{{"id":"https://remote.test/notes/ir1","type":"Note","content":"<p>Reply</p>","published":"2020-01-01T00:00:00.000Z","inReplyTo":"{s}"}}}}
+    ,
+        .{parent_url},
+    );
+
+    const inbox_req = try signedInboxRequest(
+        a,
+        "example.test",
+        "/users/alice/inbox",
+        body,
+        remote_key_id,
+        remote_kp.private_key_pem,
+    );
+    const inbox_resp = handle(&app_state, a, inbox_req);
+    try std.testing.expectEqual(std.http.Status.accepted, inbox_resp.status);
+
+    const st = (try remote_statuses.lookupByUri(&app_state.conn, a, "https://remote.test/notes/ir1")).?;
+    try std.testing.expect(st.in_reply_to_id != null);
+    try std.testing.expectEqual(parent.id, st.in_reply_to_id.?);
+
+    const app_creds = try oauth.createApp(
+        &app_state.conn,
+        a,
+        "pl-fe",
+        "urn:ietf:wg:oauth:2.0:oob",
+        "read write",
+        "",
+    );
+    const token = try oauth.createAccessToken(&app_state.conn, a, app_creds.id, user_id, "read write");
+    const auth_header = try std.fmt.allocPrint(a, "Bearer {s}", .{token});
+
+    const get_target = try std.fmt.allocPrint(a, "/api/v1/statuses/{d}", .{st.id});
+    const get_resp = handle(&app_state, a, .{
+        .method = .GET,
+        .target = get_target,
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, get_resp.status);
+
+    var get_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, get_resp.body, .{});
+    defer get_json.deinit();
+
+    try std.testing.expectEqualStrings(
+        try std.fmt.allocPrint(a, "{d}", .{parent.id}),
+        get_json.value.object.get("in_reply_to_id").?.string,
+    );
+    try std.testing.expectEqualStrings(
+        try std.fmt.allocPrint(a, "{d}", .{user_id}),
+        get_json.value.object.get("in_reply_to_account_id").?.string,
+    );
+
+    const ctx_target = try std.fmt.allocPrint(a, "/api/v1/statuses/{d}/context", .{st.id});
+    const ctx_resp = handle(&app_state, a, .{
+        .method = .GET,
+        .target = ctx_target,
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, ctx_resp.status);
+
+    var ctx_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, ctx_resp.body, .{});
+    defer ctx_json.deinit();
+
+    const ancestors = ctx_json.value.object.get("ancestors").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), ancestors.len);
+    try std.testing.expectEqualStrings(
+        try std.fmt.allocPrint(a, "{d}", .{parent.id}),
+        ancestors[0].object.get("id").?.string,
+    );
 }
 
 test "POST /users/:name/inbox Create without activity id is replay-deduped" {

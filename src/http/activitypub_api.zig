@@ -53,6 +53,65 @@ fn trimTrailingSlash(s: []const u8) []const u8 {
     return s;
 }
 
+fn stripQueryAndFragment(s: []const u8) []const u8 {
+    const q = std.mem.indexOfScalar(u8, s, '?');
+    const h = std.mem.indexOfScalar(u8, s, '#');
+    const cut = blk: {
+        if (q == null and h == null) break :blk s.len;
+        if (q != null and h == null) break :blk q.?;
+        if (q == null and h != null) break :blk h.?;
+        break :blk @min(q.?, h.?);
+    };
+    return s[0..cut];
+}
+
+fn stripLocalBase(app_state: *app.App, iri: []const u8) ?[]const u8 {
+    const domain = app_state.cfg.domain;
+
+    const schemes = [_][]const u8{ "http://", "https://" };
+    for (schemes) |scheme| {
+        if (!std.mem.startsWith(u8, iri, scheme)) continue;
+        const rest = iri[scheme.len..];
+        if (!std.mem.startsWith(u8, rest, domain)) continue;
+        const after_domain = rest[domain.len..];
+        if (after_domain.len == 0) return "";
+        if (after_domain[0] == '/') return after_domain;
+    }
+    return null;
+}
+
+fn parseLeadingI64(s: []const u8) ?i64 {
+    if (s.len == 0) return null;
+    var end: usize = 0;
+    while (end < s.len and s[end] >= '0' and s[end] <= '9') : (end += 1) {}
+    if (end == 0) return null;
+    return std.fmt.parseInt(i64, s[0..end], 10) catch null;
+}
+
+fn localStatusIdFromIri(app_state: *app.App, iri: []const u8) ?i64 {
+    const path = stripLocalBase(app_state, iri) orelse return null;
+    if (path.len == 0) return null;
+
+    const api_prefix = "/api/v1/statuses/";
+    if (std.mem.startsWith(u8, path, api_prefix)) {
+        const rest = path[api_prefix.len..];
+        const id = parseLeadingI64(rest) orelse return null;
+        if (id <= 0) return null;
+        return id;
+    }
+
+    const users_prefix = "/users/";
+    if (!std.mem.startsWith(u8, path, users_prefix)) return null;
+    const rest = path[users_prefix.len..];
+    const marker = "/statuses/";
+    const idx = std.mem.indexOf(u8, rest, marker) orelse return null;
+    if (idx == 0) return null;
+    const after_marker = rest[idx + marker.len ..];
+    const id = parseLeadingI64(after_marker) orelse return null;
+    if (id <= 0) return null;
+    return id;
+}
+
 const VerifyInboxError = error{ Unauthorized, Internal };
 
 fn verifyInboxSignature(
@@ -866,11 +925,40 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
         const safe_content_html = util_html.safeHtmlFromRemoteHtmlAlloc(allocator, content_val.string) catch
             return .{ .status = .internal_server_error, .body = "internal server error\n" };
 
+        const in_reply_to_id: ?i64 = blk: {
+            const raw = obj.object.get("inReplyTo") orelse break :blk null;
+
+            const uri_str: []const u8 = switch (raw) {
+                .string => |s| s,
+                .object => |o| blk2: {
+                    const id_val = o.get("id") orelse break :blk2 "";
+                    if (id_val != .string) break :blk2 "";
+                    break :blk2 id_val.string;
+                },
+                else => "",
+            };
+            if (uri_str.len == 0) break :blk null;
+
+            const trimmed = stripQueryAndFragment(trimTrailingSlash(uri_str));
+            if (!util_url.isHttpOrHttpsUrl(trimmed)) break :blk null;
+
+            if (localStatusIdFromIri(app_state, trimmed)) |local_id| {
+                const parent = statuses.lookup(&app_state.conn, allocator, local_id) catch break :blk null;
+                if (parent != null) break :blk local_id;
+            }
+
+            const remote_parent = remote_statuses.lookupByUri(&app_state.conn, allocator, trimmed) catch break :blk null;
+            if (remote_parent) |p| break :blk p.id;
+
+            break :blk null;
+        };
+
         const created = remote_statuses.createIfNotExists(
             &app_state.conn,
             allocator,
             note_id_val.string,
             remote_actor.?.id,
+            in_reply_to_id,
             safe_content_html,
             attachments_json,
             visibility,
