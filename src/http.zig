@@ -3420,6 +3420,55 @@ test "POST /users/:name/inbox Follow stores follower and sends Accept" {
     try std.testing.expectEqualStrings(remote_actor_id, items[0].string);
 }
 
+test "POST /users/:name/inbox Undo(Follow) removes follower" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const remote_kp = try @import("crypto_rsa.zig").generateRsaKeyPairPem(a, 512);
+
+    const remote_actor_id = "https://remote.test/users/bob";
+    const remote_key_id = "https://remote.test/users/bob#main-key";
+
+    try remote_actors.upsert(&app_state.conn, .{
+        .id = remote_actor_id,
+        .inbox = "https://remote.test/users/bob/inbox",
+        .shared_inbox = null,
+        .preferred_username = "bob",
+        .domain = "remote.test",
+        .public_key_pem = remote_kp.public_key_pem,
+    });
+
+    const follow_id = "https://remote.test/follows/1";
+    try followers.upsertPending(&app_state.conn, user_id, remote_actor_id, follow_id);
+    try std.testing.expect(try followers.markAcceptedByRemoteActorId(&app_state.conn, user_id, remote_actor_id));
+
+    const undo_body = try std.fmt.allocPrint(
+        a,
+        "{{\"@context\":\"https://www.w3.org/ns/activitystreams\",\"id\":\"https://remote.test/undo/1\",\"type\":\"Undo\",\"actor\":\"{s}\",\"object\":{{\"id\":\"{s}\",\"type\":\"Follow\",\"actor\":\"{s}\",\"object\":\"http://example.test/users/alice\"}}}}",
+        .{ remote_actor_id, follow_id, remote_actor_id },
+    );
+
+    const inbox_req = try signedInboxRequest(
+        a,
+        "example.test",
+        "/users/alice/inbox",
+        undo_body,
+        remote_key_id,
+        remote_kp.private_key_pem,
+    );
+    const resp = handle(&app_state, a, inbox_req);
+    try std.testing.expectEqual(std.http.Status.accepted, resp.status);
+
+    try std.testing.expect((try followers.lookupByRemoteActorId(&app_state.conn, a, user_id, remote_actor_id)) == null);
+}
+
 test "GET /users/:name/outbox and /users/:name/statuses/:id return ActivityPub objects" {
     var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
     defer app_state.deinit();

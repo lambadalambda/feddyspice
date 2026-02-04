@@ -81,6 +81,20 @@ pub fn lookupByRemoteActorId(conn: *db.Db, allocator: std.mem.Allocator, user_id
     };
 }
 
+pub fn deleteByRemoteActorId(conn: *db.Db, user_id: i64, remote_actor_id: []const u8) db.Error!bool {
+    var stmt = try conn.prepareZ("DELETE FROM followers WHERE user_id = ?1 AND remote_actor_id = ?2;\x00");
+    defer stmt.finalize();
+    try stmt.bindInt64(1, user_id);
+    try stmt.bindText(2, remote_actor_id);
+
+    switch (try stmt.step()) {
+        .done => {},
+        .row => return error.Sqlite,
+    }
+
+    return conn.changes() > 0;
+}
+
 pub fn markAcceptedByRemoteActorId(conn: *db.Db, user_id: i64, remote_actor_id: []const u8) db.Error!bool {
     var stmt = try conn.prepareZ(
         "UPDATE followers SET state='accepted', updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE user_id = ?1 AND remote_actor_id = ?2;\x00",
