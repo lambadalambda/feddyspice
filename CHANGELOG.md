@@ -121,6 +121,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - Access logs no longer include query strings (prevents leaking `access_token` from streaming URLs), and redacts `/media/:token` paths.
 - Remote ActivityPub ingest now ignores non-`http(s)` Note IDs and attachment URLs; remote actor docs with mismatched IDs are rejected (hardens against URL-scheme injection and actor ID spoofing).
+- Outbound fetch SSRF checks now also validate the connected peer IP address (mitigates DNS-rebinding bypass of pre-connect DNS checks).
 - Remote ActivityPub Note `content` is sanitized on ingest before being stored/re-served (prevents XSS via remote HTML).
 - Response header values are filtered to prevent CR/LF injection; user-controlled media `content_type` is sanitized to a safe default.
 - `Dockerfile` Zig download works on both amd64/arm64 Docker builders.

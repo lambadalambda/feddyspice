@@ -12,6 +12,7 @@ pub const Error =
     std.http.Reader.BodyError ||
     std.Uri.ParseError ||
     std.crypto.Certificate.Bundle.AddCertsFromFilePathError ||
+    std.posix.GetSockNameError ||
     std.posix.SetSockOptError ||
     error{
         TimeoutUnsupported,
@@ -142,6 +143,9 @@ pub const RealTransport = struct {
         defer req.deinit();
 
         try applySocketTimeouts(req.connection, self.timeout_ms);
+        if (req.connection) |conn| {
+            try validateConnectedPeerAddress(conn, self.allow_private_networks);
+        }
 
         if (opts.payload) |payload| {
             req.transfer_encoding = .{ .content_length = payload.len };
@@ -195,6 +199,18 @@ fn validateOutboundUri(allocator: std.mem.Allocator, uri: std.Uri, allow_private
     for (list.addrs) |addr| {
         if (!ssrf.isAllowedAddress(addr, allow_private_networks)) return error.SsrfBlocked;
     }
+}
+
+fn validateConnectedPeerAddress(conn: *std.http.Client.Connection, allow_private_networks: bool) Error!void {
+    if (builtin.os.tag == .windows) return;
+    const stream = conn.stream_reader.getStream();
+
+    var peer: std.net.Address = undefined;
+    var len: std.posix.socklen_t = @sizeOf(std.net.Address);
+    try std.posix.getpeername(stream.handle, &peer.any, &len);
+
+    const addr = std.net.Address.initPosix(@alignCast(&peer.any));
+    if (!ssrf.isAllowedAddress(addr, allow_private_networks)) return error.SsrfBlocked;
 }
 
 fn schemeIsHttp(scheme: []const u8) bool {
