@@ -173,6 +173,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `GET /api/v1/accounts/verify_credentials` and `PATCH /api/v1/accounts/update_credentials` now return CredentialAccount fields (`source`, `role`, etc.) so Elk can render the composer.
 - Profile updates now federate via signed ActivityPub `Update(Person)` deliveries to known remote inboxes.
 - SQLite statements bind text/blob as `SQLITE_TRANSIENT` to avoid pointer lifetime issues.
+- SQLite connections now use a busy timeout to reduce transient `SQLITE_BUSY` failures under concurrent background jobs.
 - Inbound ActivityPub `Create` no longer silently ignores unknown actors (fetches the actor doc on first contact).
 - Inbound ActivityPub `Create` infers `direct` vs `public` visibility based on recipients.
 - Inbound ActivityPub `Create` maps `object.inReplyTo` to known local/remote statuses and stores it (improves threading; remote status `/context` includes ancestors).

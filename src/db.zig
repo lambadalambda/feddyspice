@@ -22,6 +22,7 @@ pub const Db = struct {
             if (db_ptr) |db| _ = c.sqlite3_close(db);
             return error.Sqlite;
         }
+        _ = c.sqlite3_busy_timeout(db_ptr.?, 5_000);
         return .{ .handle = db_ptr.? };
     }
 
