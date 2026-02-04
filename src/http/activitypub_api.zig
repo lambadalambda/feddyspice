@@ -550,6 +550,7 @@ fn jsonFirstUrl(val: std.json.Value) ?[]const u8 {
 
 fn remoteAttachmentsJsonAlloc(allocator: std.mem.Allocator, note: std.json.ObjectMap) !?[]u8 {
     const val = note.get("attachment") orelse return null;
+    const max_attachments: usize = 4;
 
     const Attachment = struct {
         url: []const u8,
@@ -602,7 +603,12 @@ fn remoteAttachmentsJsonAlloc(allocator: std.mem.Allocator, note: std.json.Objec
     };
 
     switch (val) {
-        .array => |arr| for (arr.items) |item| try helper.pushOne(allocator, &list, item),
+        .array => |arr| {
+            for (arr.items) |item| {
+                if (list.items.len >= max_attachments) break;
+                try helper.pushOne(allocator, &list, item);
+            }
+        },
         else => try helper.pushOne(allocator, &list, val),
     }
 
@@ -635,6 +641,32 @@ test "remoteAttachmentsJsonAlloc ignores non-http(s) URLs" {
     var parsed2 = try std.json.parseFromSlice(std.json.Value, a, note2, .{});
     defer parsed2.deinit();
     try std.testing.expect((try remoteAttachmentsJsonAlloc(a, parsed2.value.object)) == null);
+}
+
+test "remoteAttachmentsJsonAlloc caps attachments" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const note =
+        \\{"attachment":[
+        \\  {"url":"https://cdn.test/1.png","type":"Image"},
+        \\  {"url":"https://cdn.test/2.png","type":"Image"},
+        \\  {"url":"https://cdn.test/3.png","type":"Image"},
+        \\  {"url":"https://cdn.test/4.png","type":"Image"},
+        \\  {"url":"https://cdn.test/5.png","type":"Image"}
+        \\]}
+    ;
+    var parsed = try std.json.parseFromSlice(std.json.Value, a, note, .{});
+    defer parsed.deinit();
+    const out = (try remoteAttachmentsJsonAlloc(a, parsed.value.object)).?;
+
+    var out_parsed = try std.json.parseFromSlice(std.json.Value, a, out, .{});
+    defer out_parsed.deinit();
+    try std.testing.expect(out_parsed.value == .array);
+    try std.testing.expectEqual(@as(usize, 4), out_parsed.value.array.items.len);
+    try std.testing.expectEqualStrings("https://cdn.test/1.png", out_parsed.value.array.items[0].object.get("url").?.string);
+    try std.testing.expectEqualStrings("https://cdn.test/4.png", out_parsed.value.array.items[3].object.get("url").?.string);
 }
 
 test "verifyInboxSignature enforces Date max clock skew" {

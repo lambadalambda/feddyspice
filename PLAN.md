@@ -154,4 +154,5 @@ These are explicitly security-focused tasks (not just “compat” work). Each i
 - [x] Add visibility regression tests: no `direct`/`private` content in unauthenticated timelines/profile lists (and empty placeholders stay empty).
 - [ ] Define/verify media URL exposure policy for non-public posts (capability URLs vs auth-gated).
 - [x] Tighten request parsing limits: reject overly nested JSON (`FEDDYSPICE_JSON_MAX_NESTING_DEPTH`).
-- [ ] Tighten request parsing limits: cap JSON field counts + attachment counts where applicable.
+- [x] Tighten request parsing limits: cap attachment counts where applicable (max 4 media attachments).
+- [ ] Tighten request parsing limits: cap JSON field counts (and other large lists) where applicable.

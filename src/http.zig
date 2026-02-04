@@ -2415,6 +2415,54 @@ test "statuses: create rolls back on invalid media id" {
     try std.testing.expectEqual(@as(usize, 0), tl_json.value.array.items.len);
 }
 
+test "statuses: create rejects more than 4 media attachments" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const app_creds = try oauth.createApp(
+        &app_state.conn,
+        a,
+        "pl-fe",
+        "urn:ietf:wg:oauth:2.0:oob",
+        "read write",
+        "",
+    );
+    const token = try oauth.createAccessToken(&app_state.conn, a, app_creds.id, user_id, "read write");
+    const auth_header = try std.fmt.allocPrint(a, "Bearer {s}", .{token});
+
+    var ids: [5]i64 = undefined;
+    for (ids[0..], 0..) |*out, i| {
+        const tok = try std.fmt.allocPrint(a, "tok{d}", .{i});
+        const meta = try media.createWithToken(&app_state.conn, a, user_id, tok, "image/png", "DATA", null, 0);
+        out.* = meta.id;
+    }
+
+    var body_list: std.ArrayList(u8) = .{};
+    defer body_list.deinit(a);
+    try body_list.appendSlice(a, "status=&visibility=public");
+    for (ids) |id| {
+        try body_list.writer(a).print("&media_ids[]={d}", .{id});
+    }
+    const body = try body_list.toOwnedSlice(a);
+
+    const create_resp = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/api/v1/statuses",
+        .content_type = "application/x-www-form-urlencoded",
+        .body = body,
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.unprocessable_entity, create_resp.status);
+    try std.testing.expectEqualStrings("too many media\n", create_resp.body);
+}
+
 test "timelines: public timeline returns local statuses" {
     var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
     defer app_state.deinit();

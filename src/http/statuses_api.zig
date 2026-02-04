@@ -20,6 +20,8 @@ pub fn createStatus(app_state: *app.App, allocator: std.mem.Allocator, req: http
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
     if (info == null) return common.unauthorized(allocator);
 
+    const max_media_attachments: i64 = 4;
+
     var parsed = common.parseBodyParams(allocator, req) catch
         return .{ .status = .bad_request, .body = "invalid form\n" };
 
@@ -59,6 +61,9 @@ pub fn createStatus(app_state: *app.App, allocator: std.mem.Allocator, req: http
         var it = std.mem.splitScalar(u8, raw, '\n');
         while (it.next()) |id_str| {
             if (id_str.len == 0) continue;
+            if (pos >= max_media_attachments) {
+                return .{ .status = .unprocessable_entity, .body = "too many media\n" };
+            }
             const media_id = std.fmt.parseInt(i64, id_str, 10) catch
                 return .{ .status = .unprocessable_entity, .body = "invalid media\n" };
 
