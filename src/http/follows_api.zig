@@ -39,7 +39,12 @@ pub fn followsPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_
     const uri = parsed.get("uri") orelse return .{ .status = .bad_request, .body = "missing uri\n" };
 
     const actor = federation.resolveRemoteActorByHandle(app_state, allocator, uri) catch |err| switch (err) {
-        error.InvalidHandle, error.WebfingerNoSelfLink, error.ActorDocMissingFields => return .{
+        error.InvalidHandle,
+        error.WebfingerNoSelfLink,
+        error.ActorDocMissingFields,
+        error.ActorDocIdMismatch,
+        error.ActorDocInvalidUrl,
+        => return .{
             .status = .bad_request,
             .body = "invalid uri\n",
         },

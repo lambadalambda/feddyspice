@@ -30,6 +30,8 @@ pub const Error =
         InvalidHandle,
         WebfingerNoSelfLink,
         ActorDocMissingFields,
+        ActorDocIdMismatch,
+        ActorDocInvalidUrl,
         FollowSendFailed,
         RemoteFetchFailed,
         RemoteActorMissing,
@@ -281,7 +283,18 @@ fn extractWebfingerSelfHref(allocator: std.mem.Allocator, body: []const u8) Erro
     return error.WebfingerNoSelfLink;
 }
 
-fn parseActorDoc(allocator: std.mem.Allocator, body: []const u8, expected_domain: []const u8) Error!remote_actors.RemoteActor {
+fn trimTrailingSlash(s: []const u8) []const u8 {
+    if (s.len == 0) return s;
+    if (s[s.len - 1] == '/') return s[0 .. s.len - 1];
+    return s;
+}
+
+fn parseActorDoc(
+    allocator: std.mem.Allocator,
+    body: []const u8,
+    expected_domain: []const u8,
+    expected_id: []const u8,
+) Error!remote_actors.RemoteActor {
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
     defer parsed.deinit();
 
@@ -291,6 +304,8 @@ fn parseActorDoc(allocator: std.mem.Allocator, body: []const u8, expected_domain
     const inbox_val = parsed.value.object.get("inbox") orelse return error.ActorDocMissingFields;
     const user_val = parsed.value.object.get("preferredUsername") orelse return error.ActorDocMissingFields;
     if (id_val != .string or inbox_val != .string or user_val != .string) return error.ActorDocMissingFields;
+    if (!url.isHttpOrHttpsUrl(id_val.string) or !url.isHttpOrHttpsUrl(inbox_val.string)) return error.ActorDocInvalidUrl;
+    if (!std.mem.eql(u8, trimTrailingSlash(id_val.string), trimTrailingSlash(expected_id))) return error.ActorDocIdMismatch;
 
     const pk_val = parsed.value.object.get("publicKey") orelse return error.ActorDocMissingFields;
     if (pk_val != .object) return error.ActorDocMissingFields;
@@ -302,17 +317,28 @@ fn parseActorDoc(allocator: std.mem.Allocator, body: []const u8, expected_domain
         if (endpoints != .object) break :blk null;
         const si = endpoints.object.get("sharedInbox") orelse break :blk null;
         if (si != .string) break :blk null;
+        if (!url.isHttpOrHttpsUrl(si.string)) break :blk null;
         break :blk try allocator.dupe(u8, si.string);
     };
 
     const avatar_url: ?[]u8 = blk: {
         const icon_val = parsed.value.object.get("icon") orelse break :blk null;
-        break :blk try jsonFirstUrlAlloc(allocator, icon_val);
+        const u = try jsonFirstUrlAlloc(allocator, icon_val) orelse break :blk null;
+        if (!url.isHttpOrHttpsUrl(u)) {
+            allocator.free(u);
+            break :blk null;
+        }
+        break :blk u;
     };
 
     const header_url: ?[]u8 = blk: {
         const image_val = parsed.value.object.get("image") orelse break :blk null;
-        break :blk try jsonFirstUrlAlloc(allocator, image_val);
+        const u = try jsonFirstUrlAlloc(allocator, image_val) orelse break :blk null;
+        if (!url.isHttpOrHttpsUrl(u)) {
+            allocator.free(u);
+            break :blk null;
+        }
+        break :blk u;
     };
 
     return .{
@@ -362,7 +388,7 @@ pub fn ensureRemoteActorById(app_state: *app.App, allocator: std.mem.Allocator, 
         .payload = null,
     });
 
-    const actor = try parseActorDoc(allocator, actor_body, host);
+    const actor = try parseActorDoc(allocator, actor_body, host, actor_id);
     try remote_actors.upsert(&app_state.conn, actor);
     return actor;
 }
@@ -529,9 +555,32 @@ pub fn resolveRemoteActorByHandle(app_state: *app.App, allocator: std.mem.Alloca
         .payload = null,
     });
 
-    const actor = try parseActorDoc(allocator, actor_body, remote.host);
+    const actor = try parseActorDoc(allocator, actor_body, remote.host, actor_id);
     try remote_actors.upsert(&app_state.conn, actor);
     return actor;
+}
+
+test "parseActorDoc validates id and sanitizes optional URLs" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const body_mismatch =
+        \\{"id":"https://evil.test/users/bob","inbox":"https://evil.test/users/bob/inbox","preferredUsername":"bob","publicKey":{"publicKeyPem":"-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n"}}
+    ;
+    try std.testing.expectError(error.ActorDocIdMismatch, parseActorDoc(a, body_mismatch, "remote.test", "https://remote.test/users/bob"));
+
+    const body_bad_inbox =
+        \\{"id":"https://remote.test/users/bob","inbox":"javascript:alert(1)","preferredUsername":"bob","publicKey":{"publicKeyPem":"-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n"}}
+    ;
+    try std.testing.expectError(error.ActorDocInvalidUrl, parseActorDoc(a, body_bad_inbox, "remote.test", "https://remote.test/users/bob"));
+
+    const body_bad_avatar =
+        \\{"id":"https://remote.test/users/bob","inbox":"https://remote.test/users/bob/inbox","preferredUsername":"bob","publicKey":{"publicKeyPem":"-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n"},"icon":{"url":"javascript:alert(1)"},"image":{"url":"data:text/plain,hi"}}
+    ;
+    const actor = try parseActorDoc(a, body_bad_avatar, "remote.test", "https://remote.test/users/bob");
+    try std.testing.expect(actor.avatar_url == null);
+    try std.testing.expect(actor.header_url == null);
 }
 
 pub fn sendFollowActivity(

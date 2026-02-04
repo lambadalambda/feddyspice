@@ -562,6 +562,7 @@ fn remoteAttachmentsJsonAlloc(allocator: std.mem.Allocator, note: std.json.Objec
             item: std.json.Value,
         ) !void {
             const url = jsonFirstUrl(item) orelse return;
+            if (!util_url.isHttpOrHttpsUrl(url)) return;
 
             var kind: ?[]const u8 = null;
             var media_type: ?[]const u8 = null;
@@ -603,6 +604,32 @@ fn remoteAttachmentsJsonAlloc(allocator: std.mem.Allocator, note: std.json.Objec
     return json;
 }
 
+test "remoteAttachmentsJsonAlloc ignores non-http(s) URLs" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const note1 =
+        \\{"attachment":[{"url":"javascript:alert(1)","type":"Image"},{"url":"https://cdn.test/a.png","type":"Image"}]}
+    ;
+    var parsed1 = try std.json.parseFromSlice(std.json.Value, a, note1, .{});
+    defer parsed1.deinit();
+    const out1 = (try remoteAttachmentsJsonAlloc(a, parsed1.value.object)).?;
+
+    var out1_parsed = try std.json.parseFromSlice(std.json.Value, a, out1, .{});
+    defer out1_parsed.deinit();
+    try std.testing.expect(out1_parsed.value == .array);
+    try std.testing.expectEqual(@as(usize, 1), out1_parsed.value.array.items.len);
+    try std.testing.expectEqualStrings("https://cdn.test/a.png", out1_parsed.value.array.items[0].object.get("url").?.string);
+
+    const note2 =
+        \\{"attachment":{"url":"data:text/plain,hi","type":"Image"}}
+    ;
+    var parsed2 = try std.json.parseFromSlice(std.json.Value, a, note2, .{});
+    defer parsed2.deinit();
+    try std.testing.expect((try remoteAttachmentsJsonAlloc(a, parsed2.value.object)) == null);
+}
+
 pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_types.Request, path: []const u8) http_types.Response {
     const prefix = "/users/";
     const suffix = "/inbox";
@@ -642,6 +669,7 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
 
         if (note_id_val != .string) return .{ .status = .bad_request, .body = "invalid id\n" };
         if (content_val != .string) return .{ .status = .bad_request, .body = "invalid content\n" };
+        if (!util_url.isHttpOrHttpsUrl(note_id_val.string)) return .{ .status = .accepted, .body = "ignored\n" };
 
         const created_at = blk: {
             const p = obj.object.get("published") orelse break :blk "1970-01-01T00:00:00.000Z";
