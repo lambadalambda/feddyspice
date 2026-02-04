@@ -27,6 +27,6 @@ This file tracks “good future refactors” and known risks. Add items whenever
 - [x] Validate inbound signature freshness: parse `Date` and enforce max clock skew (configurable).
 - [x] Reject excessively nested JSON request bodies before parsing (`FEDDYSPICE_JSON_MAX_NESTING_DEPTH`).
 - [ ] Replay protection: dedupe signed inbox requests even when activity `id` is missing (hash fallback).
-- [ ] Outbound transport: reject nonstandard ports by default; re-validate on redirects if we ever enable follow-redirects.
+- [x] Outbound transport: reject nonstandard ports by default; re-validate on redirects if we ever enable follow-redirects.
 - [ ] Add rate limiting/backpressure for high-risk entrypoints (login/token/apps/inbox) and remote fetch storms.
 - [ ] Add regression tests for visibility/data leakage (direct/private never exposed via public/tag timelines or unauthenticated endpoints; document media exposure expectations).

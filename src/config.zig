@@ -18,6 +18,7 @@ pub const Config = struct {
     password_params: password.Params,
     http_timeout_ms: u32,
     http_max_body_bytes: usize = 1024 * 1024,
+    http_allow_nonstandard_ports: bool = false,
     json_max_nesting_depth: usize = 64,
     signature_max_clock_skew_sec: u32 = 15 * 60,
     jobs_mode: jobs.Mode,
@@ -33,6 +34,7 @@ pub const Config = struct {
         const log_level_env = std.posix.getenv("FEDDYSPICE_LOG_LEVEL") orelse "info";
         const timeout_env = std.posix.getenv("FEDDYSPICE_HTTP_TIMEOUT_MS") orelse "10000";
         const max_body_env = std.posix.getenv("FEDDYSPICE_HTTP_MAX_BODY_BYTES") orelse "1048576";
+        const allow_nonstandard_ports = envBool("FEDDYSPICE_HTTP_ALLOW_NONSTANDARD_PORTS", false);
         const json_depth_env = std.posix.getenv("FEDDYSPICE_JSON_MAX_NESTING_DEPTH") orelse "64";
         const skew_env = std.posix.getenv("FEDDYSPICE_SIGNATURE_MAX_CLOCK_SKEW_SEC") orelse "900";
         const jobs_mode_env = std.posix.getenv("FEDDYSPICE_JOBS_MODE") orelse "spawn";
@@ -98,6 +100,7 @@ pub const Config = struct {
             .password_params = password.Params.owasp_2id,
             .http_timeout_ms = http_timeout_ms,
             .http_max_body_bytes = http_max_body_bytes,
+            .http_allow_nonstandard_ports = allow_nonstandard_ports,
             .json_max_nesting_depth = json_max_nesting_depth,
             .signature_max_clock_skew_sec = signature_max_clock_skew_sec,
             .jobs_mode = jobs_mode,

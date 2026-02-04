@@ -86,6 +86,7 @@ pub const RealTransport = struct {
     client: std.http.Client,
     timeout_ms: u32,
     allow_private_networks: bool,
+    allow_nonstandard_ports: bool,
     max_body_bytes: usize,
 
     pub fn init(allocator: std.mem.Allocator, cfg: config.Config) !RealTransport {
@@ -101,6 +102,7 @@ pub const RealTransport = struct {
             .client = client,
             .timeout_ms = cfg.http_timeout_ms,
             .allow_private_networks = cfg.allow_private_networks,
+            .allow_nonstandard_ports = cfg.http_allow_nonstandard_ports,
             .max_body_bytes = cfg.http_max_body_bytes,
         };
     }
@@ -132,7 +134,7 @@ pub const RealTransport = struct {
         const max_body_bytes = opts.max_body_bytes orelse self.max_body_bytes;
 
         const uri = try std.Uri.parse(opts.url);
-        try validateOutboundUri(allocator, uri, self.allow_private_networks);
+        try validateOutboundUri(allocator, uri, self.allow_private_networks, self.allow_nonstandard_ports);
 
         var req = try self.client.request(opts.method, uri, .{
             .headers = opts.headers,
@@ -177,7 +179,7 @@ pub const RealTransport = struct {
     }
 };
 
-fn validateOutboundUri(allocator: std.mem.Allocator, uri: std.Uri, allow_private_networks: bool) Error!void {
+fn validateOutboundUri(allocator: std.mem.Allocator, uri: std.Uri, allow_private_networks: bool, allow_nonstandard_ports: bool) Error!void {
     if (!schemeIsHttp(uri.scheme)) return error.OutboundUrlInvalid;
     if (uri.user != null or uri.password != null) return error.OutboundUrlInvalid;
 
@@ -190,7 +192,14 @@ fn validateOutboundUri(allocator: std.mem.Allocator, uri: std.Uri, allow_private
     const direct_ip = std.net.Address.parseIp(host, port) catch null;
     if (direct_ip) |addr| {
         if (!ssrf.isAllowedAddress(addr, allow_private_networks)) return error.SsrfBlocked;
+        if (!allow_nonstandard_ports and uri.port != null and port != defaultPortForScheme(uri.scheme)) {
+            return error.OutboundUrlInvalid;
+        }
         return;
+    }
+
+    if (!allow_nonstandard_ports and uri.port != null and port != defaultPortForScheme(uri.scheme)) {
+        return error.OutboundUrlInvalid;
     }
 
     const list = std.net.getAddressList(allocator, host, port) catch return error.ResolveFailed;
@@ -375,6 +384,15 @@ test "RealTransport blocks outbound loopback by default" {
     }));
 }
 
+test "validateOutboundUri blocks nonstandard ports by default" {
+    const allocator = std.testing.allocator;
+
+    const uri = try std.Uri.parse("https://1.1.1.1:8443/");
+    try std.testing.expectError(error.OutboundUrlInvalid, validateOutboundUri(allocator, uri, false, false));
+
+    try validateOutboundUri(allocator, uri, false, true);
+}
+
 test "RealTransport enforces max_body_bytes" {
     const allocator = std.testing.allocator;
     const jobs = @import("jobs.zig");
@@ -422,6 +440,7 @@ test "RealTransport enforces max_body_bytes" {
         .db_path = try allocator.dupe(u8, ":memory:"),
         .ca_cert_file = null,
         .allow_private_networks = true,
+        .http_allow_nonstandard_ports = true,
         .log_file = null,
         .log_level = .err,
         .password_params = password.Params{ .t = 1, .m = 8, .p = 1 },

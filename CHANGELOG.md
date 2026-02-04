@@ -127,6 +127,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - HTTP responses include baseline security headers (nosniff, no-referrer, deny framing; CSP for HTML pages).
 - Inbound ActivityPub inbox signature verification now enforces `Date` max clock skew (`FEDDYSPICE_SIGNATURE_MAX_CLOCK_SKEW_SEC`) to reduce replay risk.
 - ActivityPub inbox requests now reject excessively nested JSON payloads (`FEDDYSPICE_JSON_MAX_NESTING_DEPTH`) to reduce DoS risk.
+- Outbound federation fetches now reject explicit nonstandard ports by default (`FEDDYSPICE_HTTP_ALLOW_NONSTANDARD_PORTS=false`) to reduce SSRF blast radius.
 - `Dockerfile` Zig download works on both amd64/arm64 Docker builders.
 - Mastodon-ish API endpoints accept client JSON + multipart form-data bodies (pl-fe/Elk compatibility) and send permissive CORS headers.
 - `/api/v2/instance` now advertises the correct streaming base URL (`ws(s)://domain`, not a nested `/api/v1/streaming` path).
