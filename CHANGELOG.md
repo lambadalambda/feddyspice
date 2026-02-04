@@ -110,6 +110,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - DRY: refactored signed ActivityPub inbox POST deliveries into shared helpers in `src/federation.zig`.
 - Reduced per-request allocations in `src/server.zig` by building response headers on the stack or request arena instead of `page_allocator`.
 - Hardened redirect handling by rejecting CR/LF in `Location` values (`/login?return_to=...`, OAuth/HTML redirects).
+- Added `src/http/media_api.zig` and moved media endpoints out of `src/http.zig` (`/media/:token`, `/api/v1/media`, `/api/v2/media`).
 
 ### Fixed
 

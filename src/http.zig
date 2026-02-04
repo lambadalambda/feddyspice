@@ -35,6 +35,7 @@ const masto = @import("http/mastodon.zig");
 const statuses_api = @import("http/statuses_api.zig");
 const timelines_api = @import("http/timelines_api.zig");
 const activitypub_api = @import("http/activitypub_api.zig");
+const media_api = @import("http/media_api.zig");
 
 const transparent_png = [_]u8{
     0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
@@ -96,7 +97,7 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
     }
 
     if (req.method == .GET and std.mem.startsWith(u8, path, "/media/")) {
-        return mediaFileGet(app_state, allocator, req, path);
+        return media_api.mediaFileGet(app_state, allocator, path);
     }
 
     if (req.method == .GET and std.mem.eql(u8, path, "/")) {
@@ -355,19 +356,19 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
     }
 
     if (req.method == .POST and std.mem.eql(u8, path, "/api/v1/media")) {
-        return createMedia(app_state, allocator, req);
+        return media_api.createMedia(app_state, allocator, req);
     }
 
     if (req.method == .POST and std.mem.eql(u8, path, "/api/v2/media")) {
-        return createMedia(app_state, allocator, req);
+        return media_api.createMedia(app_state, allocator, req);
     }
 
     if (req.method == .GET and std.mem.startsWith(u8, path, "/api/v1/media/")) {
-        return getMedia(app_state, allocator, req, path);
+        return media_api.getMedia(app_state, allocator, req, path);
     }
 
     if (req.method == .PUT and std.mem.startsWith(u8, path, "/api/v1/media/")) {
-        return updateMedia(app_state, allocator, req, path);
+        return media_api.updateMedia(app_state, allocator, req, path);
     }
 
     if (req.method == .POST and std.mem.eql(u8, path, "/api/v1/statuses")) {
@@ -498,131 +499,6 @@ fn baseUrlAlloc(app_state: *app.App, allocator: std.mem.Allocator) ![]u8 {
 
 fn streamingBaseUrlAlloc(app_state: *app.App, allocator: std.mem.Allocator) ![]u8 {
     return util_url.streamingBaseUrlAlloc(app_state, allocator);
-}
-
-fn createMedia(app_state: *app.App, allocator: std.mem.Allocator, req: Request) Response {
-    const token = bearerToken(req.authorization) orelse return unauthorized(allocator);
-    const info = oauth.verifyAccessToken(&app_state.conn, allocator, token) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-    if (info == null) return unauthorized(allocator);
-
-    if (!isMultipart(req.content_type)) {
-        return .{ .status = .bad_request, .body = "invalid form\n" };
-    }
-
-    var parsed = form.parseMultipartWithFile(allocator, req.content_type.?, req.body) catch
-        return .{ .status = .bad_request, .body = "invalid form\n" };
-    defer parsed.deinit(allocator);
-
-    const file = parsed.file orelse return .{ .status = .bad_request, .body = "missing file\n" };
-    if (!std.mem.eql(u8, file.name, "file")) return .{ .status = .bad_request, .body = "missing file\n" };
-
-    const description = parsed.form.get("description");
-    const content_type = file.content_type orelse "application/octet-stream";
-
-    const now_ms: i64 = std.time.milliTimestamp();
-    var meta = media.create(
-        &app_state.conn,
-        allocator,
-        info.?.user_id,
-        content_type,
-        file.data,
-        description,
-        now_ms,
-    ) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
-    defer meta.deinit(allocator);
-
-    const one_day_ms: i64 = 24 * 60 * 60 * 1000;
-    _ = media.pruneOrphansOlderThan(&app_state.conn, now_ms - one_day_ms) catch 0;
-
-    const payload = makeMediaAttachmentPayload(app_state, allocator, meta);
-    const body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-
-    return .{
-        .content_type = "application/json; charset=utf-8",
-        .body = body,
-    };
-}
-
-fn getMedia(app_state: *app.App, allocator: std.mem.Allocator, req: Request, path: []const u8) Response {
-    const token = bearerToken(req.authorization) orelse return unauthorized(allocator);
-    const info = oauth.verifyAccessToken(&app_state.conn, allocator, token) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-    if (info == null) return unauthorized(allocator);
-
-    const id_str = path["/api/v1/media/".len..];
-    const media_id = std.fmt.parseInt(i64, id_str, 10) catch
-        return .{ .status = .not_found, .body = "not found\n" };
-
-    var meta = media.lookupMeta(&app_state.conn, allocator, media_id) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-    if (meta == null) return .{ .status = .not_found, .body = "not found\n" };
-    defer meta.?.deinit(allocator);
-    if (meta.?.user_id != info.?.user_id) return .{ .status = .not_found, .body = "not found\n" };
-
-    const payload = makeMediaAttachmentPayload(app_state, allocator, meta.?);
-    const body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-
-    return .{
-        .content_type = "application/json; charset=utf-8",
-        .body = body,
-    };
-}
-
-fn updateMedia(app_state: *app.App, allocator: std.mem.Allocator, req: Request, path: []const u8) Response {
-    const token = bearerToken(req.authorization) orelse return unauthorized(allocator);
-    const info = oauth.verifyAccessToken(&app_state.conn, allocator, token) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-    if (info == null) return unauthorized(allocator);
-
-    const id_str = path["/api/v1/media/".len..];
-    const media_id = std.fmt.parseInt(i64, id_str, 10) catch
-        return .{ .status = .bad_request, .body = "invalid media id\n" };
-
-    var parsed = parseBodyParams(allocator, req) catch
-        return .{ .status = .bad_request, .body = "invalid form\n" };
-
-    const description = parsed.get("description");
-    const now_ms: i64 = std.time.milliTimestamp();
-    const updated = media.updateDescription(&app_state.conn, media_id, info.?.user_id, description, now_ms) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-    if (!updated) return .{ .status = .not_found, .body = "not found\n" };
-
-    var meta = media.lookupMeta(&app_state.conn, allocator, media_id) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-    if (meta == null) return .{ .status = .not_found, .body = "not found\n" };
-    defer meta.?.deinit(allocator);
-
-    const payload = makeMediaAttachmentPayload(app_state, allocator, meta.?);
-    const body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-
-    return .{
-        .content_type = "application/json; charset=utf-8",
-        .body = body,
-    };
-}
-
-fn mediaFileGet(app_state: *app.App, allocator: std.mem.Allocator, req: Request, path: []const u8) Response {
-    _ = req;
-
-    const token = path["/media/".len..];
-    if (token.len == 0) return .{ .status = .not_found, .body = "not found\n" };
-
-    const m = media.lookupByPublicToken(&app_state.conn, allocator, token) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-    if (m == null) return .{ .status = .not_found, .body = "not found\n" };
-
-    return .{
-        .content_type = m.?.content_type,
-        .body = m.?.data,
-    };
-}
-
-fn makeMediaAttachmentPayload(app_state: *app.App, allocator: std.mem.Allocator, meta: media.MediaMeta) MediaAttachmentPayload {
-    return masto.makeMediaAttachmentPayload(app_state, allocator, meta);
 }
 
 fn isPubliclyVisibleVisibility(visibility: []const u8) bool {
