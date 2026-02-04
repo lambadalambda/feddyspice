@@ -31,6 +31,7 @@ const statuses_api = @import("http/statuses_api.zig");
 const timelines_api = @import("http/timelines_api.zig");
 const tags_api = @import("http/tags_api.zig");
 const lists_api = @import("http/lists_api.zig");
+const filters_api = @import("http/filters_api.zig");
 const activitypub_api = @import("http/activitypub_api.zig");
 const media_api = @import("http/media_api.zig");
 const notifications_api = @import("http/notifications_api.zig");
@@ -374,6 +375,23 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
             if (req.method == .GET) return lists_api.listGet(app_state, allocator, req, path);
             if (req.method == .PUT) return lists_api.listUpdate(app_state, allocator, req, path);
             if (req.method == .DELETE) return lists_api.listDelete(app_state, allocator, req, path);
+        }
+    }
+
+    if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/filters")) {
+        return filters_api.filtersIndex(app_state, allocator, req);
+    }
+
+    if (req.method == .POST and std.mem.eql(u8, path, "/api/v1/filters")) {
+        return filters_api.filtersCreate(app_state, allocator, req);
+    }
+
+    if (std.mem.startsWith(u8, path, "/api/v1/filters/")) {
+        const rest = path["/api/v1/filters/".len..];
+        if (std.mem.indexOfScalar(u8, rest, '/') == null) {
+            if (req.method == .GET) return filters_api.filterGet(app_state, allocator, req, path);
+            if (req.method == .PUT) return filters_api.filterUpdate(app_state, allocator, req, path);
+            if (req.method == .DELETE) return filters_api.filterDelete(app_state, allocator, req, path);
         }
     }
 
@@ -3662,6 +3680,99 @@ test "lists: CRUD" {
     const index2 = handle(&app_state, a, .{
         .method = .GET,
         .target = "/api/v1/lists",
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, index2.status);
+    var index2_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, index2.body, .{});
+    defer index2_json.deinit();
+    try std.testing.expect(index2_json.value == .array);
+    try std.testing.expectEqual(@as(usize, 0), index2_json.value.array.items.len);
+}
+
+test "filters: CRUD" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const app_creds = try oauth.createApp(
+        &app_state.conn,
+        a,
+        "pl-fe",
+        "urn:ietf:wg:oauth:2.0:oob",
+        "read write",
+        "",
+    );
+    const token = try oauth.createAccessToken(&app_state.conn, a, app_creds.id, user_id, "read write");
+    const auth_header = try std.fmt.allocPrint(a, "Bearer {s}", .{token});
+
+    const create = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/api/v1/filters",
+        .content_type = "application/x-www-form-urlencoded",
+        .body = "phrase=spoiler&context[]=home&context[]=public&irreversible=true&whole_word=false",
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, create.status);
+    var create_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, create.body, .{});
+    defer create_json.deinit();
+
+    const filter_id = create_json.value.object.get("id").?.string;
+    try std.testing.expectEqualStrings("spoiler", create_json.value.object.get("phrase").?.string);
+    try std.testing.expect(create_json.value.object.get("irreversible").?.bool);
+    try std.testing.expect(!create_json.value.object.get("whole_word").?.bool);
+    try std.testing.expectEqual(@as(usize, 2), create_json.value.object.get("context").?.array.items.len);
+
+    const index = handle(&app_state, a, .{
+        .method = .GET,
+        .target = "/api/v1/filters",
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, index.status);
+    var index_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, index.body, .{});
+    defer index_json.deinit();
+    try std.testing.expect(index_json.value == .array);
+    try std.testing.expectEqual(@as(usize, 1), index_json.value.array.items.len);
+
+    const show_target = try std.fmt.allocPrint(a, "/api/v1/filters/{s}", .{filter_id});
+    const show = handle(&app_state, a, .{
+        .method = .GET,
+        .target = show_target,
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, show.status);
+    var show_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, show.body, .{});
+    defer show_json.deinit();
+    try std.testing.expectEqualStrings("spoiler", show_json.value.object.get("phrase").?.string);
+
+    const update = handle(&app_state, a, .{
+        .method = .PUT,
+        .target = show_target,
+        .content_type = "application/x-www-form-urlencoded",
+        .body = "phrase=updated&whole_word=true",
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, update.status);
+    var update_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, update.body, .{});
+    defer update_json.deinit();
+    try std.testing.expectEqualStrings("updated", update_json.value.object.get("phrase").?.string);
+    try std.testing.expect(update_json.value.object.get("whole_word").?.bool);
+
+    const del = handle(&app_state, a, .{
+        .method = .DELETE,
+        .target = show_target,
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, del.status);
+
+    const index2 = handle(&app_state, a, .{
+        .method = .GET,
+        .target = "/api/v1/filters",
         .authorization = auth_header,
     });
     try std.testing.expectEqual(std.http.Status.ok, index2.status);
