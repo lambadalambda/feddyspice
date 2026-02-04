@@ -52,6 +52,8 @@ services:
       FEDDYSPICE_CACERTFILE: /caddy/pki/authorities/local/root.crt
       # Needed for federation-in-a-box; feddyspice must fetch actors/inboxes on the Docker subnet.
       FEDDYSPICE_ALLOW_PRIVATE_NETWORKS: "true"
+      # Needed for dm_sender actor discovery (http://dm_sender:8000/...), and other fedbox-only helpers.
+      FEDDYSPICE_HTTP_ALLOW_NONSTANDARD_PORTS: "true"
     volumes:
       - feddyspice_fed_data:/data
       - caddy_fed_data:/caddy:ro
