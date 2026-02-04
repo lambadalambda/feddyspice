@@ -54,5 +54,5 @@ This is a “rough backlog” based on Mastodon’s `config/routes/api.rb` and P
 - [x] Add missing v1 instance endpoints used by clients: `/api/v1/instance/rules`, `/api/v1/instance/domain_blocks`, `/api/v1/instance/translation_languages`.
 - [x] Flesh out `/api/v1/instance` payload fields (stats/urls/languages/contact) if clients require it.
 - [x] Fill out `/api/v1/preferences` with Mastodon-shaped keys (currently `{}`) for clients that assume keys exist.
-- [ ] Implement “interaction state” on statuses (instead of no-ops): favourites/boosts/bookmarks/pins/mutes + `Status` relationship booleans (`favourited`, `reblogged`, `bookmarked`, `pinned`, `muted`).
+- [x] Implement “interaction state” on statuses (instead of no-ops): favourites/boosts/bookmarks/pins/mutes + `Status` relationship booleans (`favourited`, `reblogged`, `bookmarked`, `pinned`, `muted`).
 - [ ] Federation parity: outbound `Create(Note)` includes `inReplyTo` for replies and `tag` mention objects; inbound remote `inReplyTo` stored/mapped to improve threads.

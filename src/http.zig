@@ -447,6 +447,22 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
         return statuses_api.statusActionNoop(app_state, allocator, req, path, "/unbookmark");
     }
 
+    if (req.method == .POST and std.mem.startsWith(u8, path, "/api/v1/statuses/") and std.mem.endsWith(u8, path, "/pin")) {
+        return statuses_api.statusActionNoop(app_state, allocator, req, path, "/pin");
+    }
+
+    if (req.method == .POST and std.mem.startsWith(u8, path, "/api/v1/statuses/") and std.mem.endsWith(u8, path, "/unpin")) {
+        return statuses_api.statusActionNoop(app_state, allocator, req, path, "/unpin");
+    }
+
+    if (req.method == .POST and std.mem.startsWith(u8, path, "/api/v1/statuses/") and std.mem.endsWith(u8, path, "/mute")) {
+        return statuses_api.statusActionNoop(app_state, allocator, req, path, "/mute");
+    }
+
+    if (req.method == .POST and std.mem.startsWith(u8, path, "/api/v1/statuses/") and std.mem.endsWith(u8, path, "/unmute")) {
+        return statuses_api.statusActionNoop(app_state, allocator, req, path, "/unmute");
+    }
+
     if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/timelines/public")) {
         return timelines_api.publicTimeline(app_state, allocator, req);
     }
@@ -2358,7 +2374,7 @@ test "statuses: context endpoint includes ancestors and descendants for replies"
     try std.testing.expectEqual(@as(usize, 0), reply_descendants.array.items.len);
 }
 
-test "statuses: favourite/reblog/bookmark endpoints return status" {
+test "statuses: action endpoints update relationship booleans" {
     var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
     defer app_state.deinit();
 
@@ -2393,17 +2409,25 @@ test "statuses: favourite/reblog/bookmark endpoints return status" {
     defer create_json.deinit();
     const id = create_json.value.object.get("id").?.string;
 
-    const suffixes = [_][]const u8{
-        "/favourite",
-        "/unfavourite",
-        "/reblog",
-        "/unreblog",
-        "/bookmark",
-        "/unbookmark",
+    const cases = [_]struct {
+        suffix: []const u8,
+        field: []const u8,
+        want: bool,
+    }{
+        .{ .suffix = "/favourite", .field = "favourited", .want = true },
+        .{ .suffix = "/unfavourite", .field = "favourited", .want = false },
+        .{ .suffix = "/reblog", .field = "reblogged", .want = true },
+        .{ .suffix = "/unreblog", .field = "reblogged", .want = false },
+        .{ .suffix = "/bookmark", .field = "bookmarked", .want = true },
+        .{ .suffix = "/unbookmark", .field = "bookmarked", .want = false },
+        .{ .suffix = "/pin", .field = "pinned", .want = true },
+        .{ .suffix = "/unpin", .field = "pinned", .want = false },
+        .{ .suffix = "/mute", .field = "muted", .want = true },
+        .{ .suffix = "/unmute", .field = "muted", .want = false },
     };
 
-    for (suffixes) |suffix| {
-        const target = try std.fmt.allocPrint(a, "/api/v1/statuses/{s}{s}", .{ id, suffix });
+    for (cases) |tc| {
+        const target = try std.fmt.allocPrint(a, "/api/v1/statuses/{s}{s}", .{ id, tc.suffix });
         const resp = handle(&app_state, a, .{
             .method = .POST,
             .target = target,
@@ -2414,6 +2438,20 @@ test "statuses: favourite/reblog/bookmark endpoints return status" {
         var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, resp.body, .{});
         defer parsed.deinit();
         try std.testing.expectEqualStrings(id, parsed.value.object.get("id").?.string);
+        try std.testing.expect(parsed.value.object.get(tc.field).?.bool == tc.want);
+
+        if (std.mem.eql(u8, tc.suffix, "/favourite")) {
+            const get_target = try std.fmt.allocPrint(a, "/api/v1/statuses/{s}", .{id});
+            const get_resp = handle(&app_state, a, .{
+                .method = .GET,
+                .target = get_target,
+                .authorization = auth_header,
+            });
+            try std.testing.expectEqual(std.http.Status.ok, get_resp.status);
+            var get_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, get_resp.body, .{});
+            defer get_json.deinit();
+            try std.testing.expect(get_json.value.object.get("favourited").?.bool);
+        }
     }
 }
 

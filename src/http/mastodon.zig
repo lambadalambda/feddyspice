@@ -5,6 +5,7 @@ const media = @import("../media.zig");
 const remote_actors = @import("../remote_actors.zig");
 const remote_statuses = @import("../remote_statuses.zig");
 const statuses = @import("../statuses.zig");
+const status_interactions = @import("../status_interactions.zig");
 const url = @import("../util/url.zig");
 const util_html = @import("../util/html.zig");
 const util_ids = @import("../util/ids.zig");
@@ -147,6 +148,11 @@ pub const StatusPayload = struct {
     reblogs_count: i64,
     favourites_count: i64,
     replies_count: i64,
+    favourited: bool = false,
+    reblogged: bool = false,
+    bookmarked: bool = false,
+    pinned: bool = false,
+    muted: bool = false,
     in_reply_to_id: ?[]const u8 = null,
     in_reply_to_account_id: ?[]const u8 = null,
     url: []const u8,
@@ -600,6 +606,19 @@ pub fn makeStatusPayload(app_state: *app.App, allocator: std.mem.Allocator, user
     };
 }
 
+pub fn makeStatusPayloadForViewer(app_state: *app.App, allocator: std.mem.Allocator, user: users.User, st: statuses.Status, viewer_user_id: i64) StatusPayload {
+    var p = makeStatusPayload(app_state, allocator, user, st);
+    const rel = status_interactions.lookup(&app_state.conn, viewer_user_id, st.id) catch null;
+    if (rel) |r| {
+        p.favourited = r.favourited;
+        p.reblogged = r.reblogged;
+        p.bookmarked = r.bookmarked;
+        p.pinned = r.pinned;
+        p.muted = r.muted;
+    }
+    return p;
+}
+
 pub fn makeRemoteStatusPayload(
     app_state: *app.App,
     allocator: std.mem.Allocator,
@@ -718,4 +737,23 @@ pub fn makeRemoteStatusPayload(
         .replies_count = 0,
         .url = st.remote_uri,
     };
+}
+
+pub fn makeRemoteStatusPayloadForViewer(
+    app_state: *app.App,
+    allocator: std.mem.Allocator,
+    actor: remote_actors.RemoteActor,
+    st: remote_statuses.RemoteStatus,
+    viewer_user_id: i64,
+) StatusPayload {
+    var p = makeRemoteStatusPayload(app_state, allocator, actor, st);
+    const rel = status_interactions.lookup(&app_state.conn, viewer_user_id, st.id) catch null;
+    if (rel) |r| {
+        p.favourited = r.favourited;
+        p.reblogged = r.reblogged;
+        p.bookmarked = r.bookmarked;
+        p.pinned = r.pinned;
+        p.muted = r.muted;
+    }
+    return p;
 }

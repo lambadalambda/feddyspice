@@ -61,6 +61,15 @@ fn retainStatusesNewerThan(payloads: *std.ArrayListUnmanaged(StatusPayload), cur
 }
 
 pub fn publicTimeline(app_state: *app.App, allocator: std.mem.Allocator, req: http_types.Request) http_types.Response {
+    const viewer_user_id: ?i64 = blk: {
+        if (req.authorization == null) break :blk null;
+        const token = common.bearerToken(req.authorization) orelse return common.unauthorized(allocator);
+        const info = oauth.verifyAccessToken(&app_state.conn, allocator, token) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        if (info == null) return common.unauthorized(allocator);
+        break :blk info.?.user_id;
+    };
+
     const q = common.queryString(req.target);
     var params = form.parse(allocator, q) catch form.Form{ .map = .empty };
 
@@ -108,10 +117,11 @@ pub fn publicTimeline(app_state: *app.App, allocator: std.mem.Allocator, req: ht
 
         for (local_list) |st| {
             if (!isPublicTimelineVisibility(st.visibility)) continue;
-            payloads.append(allocator, masto.makeStatusPayload(app_state, allocator, u, st)) catch return .{
-                .status = .internal_server_error,
-                .body = "internal server error\n",
-            };
+            const p = if (viewer_user_id) |vid|
+                masto.makeStatusPayloadForViewer(app_state, allocator, u, st, vid)
+            else
+                masto.makeStatusPayload(app_state, allocator, u, st);
+            payloads.append(allocator, p) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
         }
     }
 
@@ -125,10 +135,11 @@ pub fn publicTimeline(app_state: *app.App, allocator: std.mem.Allocator, req: ht
                 return .{ .status = .internal_server_error, .body = "internal server error\n" };
             if (actor == null) continue;
 
-            payloads.append(allocator, masto.makeRemoteStatusPayload(app_state, allocator, actor.?, st)) catch return .{
-                .status = .internal_server_error,
-                .body = "internal server error\n",
-            };
+            const p = if (viewer_user_id) |vid|
+                masto.makeRemoteStatusPayloadForViewer(app_state, allocator, actor.?, st, vid)
+            else
+                masto.makeRemoteStatusPayload(app_state, allocator, actor.?, st);
+            payloads.append(allocator, p) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
         }
     }
 
@@ -231,7 +242,7 @@ pub fn homeTimeline(app_state: *app.App, allocator: std.mem.Allocator, req: http
     defer payloads.deinit(allocator);
 
     for (local_list) |st| {
-        payloads.append(allocator, masto.makeStatusPayload(app_state, allocator, user.?, st)) catch return .{
+        payloads.append(allocator, masto.makeStatusPayloadForViewer(app_state, allocator, user.?, st, info.?.user_id)) catch return .{
             .status = .internal_server_error,
             .body = "internal server error\n",
         };
@@ -245,7 +256,7 @@ pub fn homeTimeline(app_state: *app.App, allocator: std.mem.Allocator, req: http
             return .{ .status = .internal_server_error, .body = "internal server error\n" };
         if (actor == null) continue;
 
-        payloads.append(allocator, masto.makeRemoteStatusPayload(app_state, allocator, actor.?, st)) catch return .{
+        payloads.append(allocator, masto.makeRemoteStatusPayloadForViewer(app_state, allocator, actor.?, st, info.?.user_id)) catch return .{
             .status = .internal_server_error,
             .body = "internal server error\n",
         };
@@ -352,7 +363,7 @@ pub fn directTimeline(app_state: *app.App, allocator: std.mem.Allocator, req: ht
 
     for (local_list) |st| {
         if (!isDirectTimelineVisibility(st.visibility)) continue;
-        payloads.append(allocator, masto.makeStatusPayload(app_state, allocator, user.?, st)) catch return .{
+        payloads.append(allocator, masto.makeStatusPayloadForViewer(app_state, allocator, user.?, st, info.?.user_id)) catch return .{
             .status = .internal_server_error,
             .body = "internal server error\n",
         };
@@ -367,7 +378,7 @@ pub fn directTimeline(app_state: *app.App, allocator: std.mem.Allocator, req: ht
             return .{ .status = .internal_server_error, .body = "internal server error\n" };
         if (actor == null) continue;
 
-        payloads.append(allocator, masto.makeRemoteStatusPayload(app_state, allocator, actor.?, st)) catch return .{
+        payloads.append(allocator, masto.makeRemoteStatusPayloadForViewer(app_state, allocator, actor.?, st, info.?.user_id)) catch return .{
             .status = .internal_server_error,
             .body = "internal server error\n",
         };
@@ -494,6 +505,15 @@ pub fn tagTimeline(app_state: *app.App, allocator: std.mem.Allocator, req: http_
     const tag = percentDecodePathSegmentAlloc(allocator, tag_enc) catch
         return .{ .status = .not_found, .body = "not found\n" };
 
+    const viewer_user_id: ?i64 = blk: {
+        if (req.authorization == null) break :blk null;
+        const token = common.bearerToken(req.authorization) orelse return common.unauthorized(allocator);
+        const info = oauth.verifyAccessToken(&app_state.conn, allocator, token) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        if (info == null) return common.unauthorized(allocator);
+        break :blk info.?.user_id;
+    };
+
     const q = common.queryString(req.target);
     var params = form.parse(allocator, q) catch form.Form{ .map = .empty };
 
@@ -544,10 +564,11 @@ pub fn tagTimeline(app_state: *app.App, allocator: std.mem.Allocator, req: http_
         for (local_list) |st| {
             if (!isPublicTimelineVisibility(st.visibility)) continue;
             if (!containsHashtag(st.text, tag)) continue;
-            payloads.append(allocator, masto.makeStatusPayload(app_state, allocator, u, st)) catch return .{
-                .status = .internal_server_error,
-                .body = "internal server error\n",
-            };
+            const p = if (viewer_user_id) |vid|
+                masto.makeStatusPayloadForViewer(app_state, allocator, u, st, vid)
+            else
+                masto.makeStatusPayload(app_state, allocator, u, st);
+            payloads.append(allocator, p) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
         }
     }
 
@@ -563,10 +584,11 @@ pub fn tagTimeline(app_state: *app.App, allocator: std.mem.Allocator, req: http_
                 return .{ .status = .internal_server_error, .body = "internal server error\n" };
             if (actor == null) continue;
 
-            payloads.append(allocator, masto.makeRemoteStatusPayload(app_state, allocator, actor.?, st)) catch return .{
-                .status = .internal_server_error,
-                .body = "internal server error\n",
-            };
+            const p = if (viewer_user_id) |vid|
+                masto.makeRemoteStatusPayloadForViewer(app_state, allocator, actor.?, st, vid)
+            else
+                masto.makeRemoteStatusPayload(app_state, allocator, actor.?, st);
+            payloads.append(allocator, p) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
         }
     }
 

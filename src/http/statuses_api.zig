@@ -9,6 +9,7 @@ const media = @import("../media.zig");
 const oauth = @import("../oauth.zig");
 const remote_actors = @import("../remote_actors.zig");
 const remote_statuses = @import("../remote_statuses.zig");
+const status_interactions = @import("../status_interactions.zig");
 const statuses = @import("../statuses.zig");
 const users = @import("../users.zig");
 
@@ -58,14 +59,14 @@ pub fn statusesBulkGet(app_state: *app.App, allocator: std.mem.Allocator, req: h
                 return .{ .status = .internal_server_error, .body = "internal server error\n" };
             if (actor == null) continue;
 
-            payloads.append(allocator, masto.makeRemoteStatusPayload(app_state, allocator, actor.?, st.?)) catch
+            payloads.append(allocator, masto.makeRemoteStatusPayloadForViewer(app_state, allocator, actor.?, st.?, info.?.user_id)) catch
                 return .{ .status = .internal_server_error, .body = "internal server error\n" };
         } else {
             const st = statuses.lookup(&app_state.conn, allocator, id) catch
                 return .{ .status = .internal_server_error, .body = "internal server error\n" };
             if (st == null) continue;
 
-            payloads.append(allocator, masto.makeStatusPayload(app_state, allocator, user.?, st.?)) catch
+            payloads.append(allocator, masto.makeStatusPayloadForViewer(app_state, allocator, user.?, st.?, info.?.user_id)) catch
                 return .{ .status = .internal_server_error, .body = "internal server error\n" };
         }
     }
@@ -265,7 +266,7 @@ pub fn createStatus(app_state: *app.App, allocator: std.mem.Allocator, req: http
 
     background.deliverStatusToFollowers(app_state, allocator, info.?.user_id, st.id);
 
-    const resp = statusResponse(app_state, allocator, user.?, st);
+    const resp = statusResponse(app_state, allocator, info.?.user_id, user.?, st);
     app_state.streaming.publishUpdate(info.?.user_id, resp.body);
     return resp;
 }
@@ -288,7 +289,7 @@ pub fn getStatus(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
             return .{ .status = .internal_server_error, .body = "internal server error\n" };
         if (actor == null) return .{ .status = .not_found, .body = "not found\n" };
 
-        return remoteStatusResponse(app_state, allocator, actor.?, st.?);
+        return remoteStatusResponse(app_state, allocator, info.?.user_id, actor.?, st.?);
     }
 
     const st = statuses.lookup(&app_state.conn, allocator, id) catch
@@ -299,7 +300,7 @@ pub fn getStatus(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
     if (user == null) return common.unauthorized(allocator);
 
-    return statusResponse(app_state, allocator, user.?, st.?);
+    return statusResponse(app_state, allocator, info.?.user_id, user.?, st.?);
 }
 
 pub fn statusContext(app_state: *app.App, allocator: std.mem.Allocator, req: http_types.Request, path: []const u8) http_types.Response {
@@ -352,7 +353,7 @@ pub fn statusContext(app_state: *app.App, allocator: std.mem.Allocator, req: htt
                     return .{ .status = .internal_server_error, .body = "internal server error\n" };
                 if (actor == null) break;
 
-                ancestors.append(allocator, masto.makeRemoteStatusPayload(app_state, allocator, actor.?, parent_st.?)) catch
+                ancestors.append(allocator, masto.makeRemoteStatusPayloadForViewer(app_state, allocator, actor.?, parent_st.?, info.?.user_id)) catch
                     return .{ .status = .internal_server_error, .body = "internal server error\n" };
                 break;
             }
@@ -362,7 +363,7 @@ pub fn statusContext(app_state: *app.App, allocator: std.mem.Allocator, req: htt
             if (parent_st == null) break;
 
             if (parent_st.?.user_id != info.?.user_id) break;
-            ancestors.append(allocator, masto.makeStatusPayload(app_state, allocator, user.?, parent_st.?)) catch
+            ancestors.append(allocator, masto.makeStatusPayloadForViewer(app_state, allocator, user.?, parent_st.?, info.?.user_id)) catch
                 return .{ .status = .internal_server_error, .body = "internal server error\n" };
 
             cur_id = parent_id;
@@ -379,7 +380,7 @@ pub fn statusContext(app_state: *app.App, allocator: std.mem.Allocator, req: htt
 
     for (desc_list) |st| {
         if (st.user_id != info.?.user_id) continue;
-        descendants.append(allocator, masto.makeStatusPayload(app_state, allocator, user.?, st)) catch
+        descendants.append(allocator, masto.makeStatusPayloadForViewer(app_state, allocator, user.?, st, info.?.user_id)) catch
             return .{ .status = .internal_server_error, .body = "internal server error\n" };
     }
 
@@ -408,6 +409,8 @@ pub fn statusActionNoop(
     const id_str = path[prefix.len .. path.len - suffix.len];
     const id = std.fmt.parseInt(i64, id_str, 10) catch return .{ .status = .not_found, .body = "not found\n" };
 
+    const now_ms: i64 = std.time.milliTimestamp();
+
     if (id < 0) {
         const st = remote_statuses.lookup(&app_state.conn, allocator, id) catch
             return .{ .status = .internal_server_error, .body = "internal server error\n" };
@@ -418,18 +421,44 @@ pub fn statusActionNoop(
         if (actor == null) return .{ .status = .not_found, .body = "not found\n" };
 
         if (std.mem.eql(u8, suffix, "/favourite")) {
+            status_interactions.setFavourited(&app_state.conn, info.?.user_id, id, true, now_ms) catch
+                return .{ .status = .internal_server_error, .body = "internal server error\n" };
             background.sendLike(app_state, allocator, info.?.user_id, actor.?.id, st.?.remote_uri);
         } else if (std.mem.eql(u8, suffix, "/unfavourite")) {
+            status_interactions.setFavourited(&app_state.conn, info.?.user_id, id, false, now_ms) catch
+                return .{ .status = .internal_server_error, .body = "internal server error\n" };
             background.sendUndoLike(app_state, allocator, info.?.user_id, actor.?.id, st.?.remote_uri);
         } else if (std.mem.eql(u8, suffix, "/reblog")) {
             const publicish = std.mem.eql(u8, st.?.visibility, "public") or std.mem.eql(u8, st.?.visibility, "unlisted");
-            if (publicish) background.sendAnnounce(app_state, allocator, info.?.user_id, actor.?.id, st.?.remote_uri);
+            if (!publicish) return .{ .status = .unprocessable_entity, .body = "invalid reblog\n" };
+            status_interactions.setReblogged(&app_state.conn, info.?.user_id, id, true, now_ms) catch
+                return .{ .status = .internal_server_error, .body = "internal server error\n" };
+            background.sendAnnounce(app_state, allocator, info.?.user_id, actor.?.id, st.?.remote_uri);
         } else if (std.mem.eql(u8, suffix, "/unreblog")) {
             const publicish = std.mem.eql(u8, st.?.visibility, "public") or std.mem.eql(u8, st.?.visibility, "unlisted");
-            if (publicish) background.sendUndoAnnounce(app_state, allocator, info.?.user_id, actor.?.id, st.?.remote_uri);
+            if (!publicish) return .{ .status = .unprocessable_entity, .body = "invalid reblog\n" };
+            status_interactions.setReblogged(&app_state.conn, info.?.user_id, id, false, now_ms) catch
+                return .{ .status = .internal_server_error, .body = "internal server error\n" };
+            background.sendUndoAnnounce(app_state, allocator, info.?.user_id, actor.?.id, st.?.remote_uri);
+        } else if (std.mem.eql(u8, suffix, "/bookmark")) {
+            status_interactions.setBookmarked(&app_state.conn, info.?.user_id, id, true, now_ms) catch
+                return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        } else if (std.mem.eql(u8, suffix, "/unbookmark")) {
+            status_interactions.setBookmarked(&app_state.conn, info.?.user_id, id, false, now_ms) catch
+                return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        } else if (std.mem.eql(u8, suffix, "/mute")) {
+            status_interactions.setMuted(&app_state.conn, info.?.user_id, id, true, now_ms) catch
+                return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        } else if (std.mem.eql(u8, suffix, "/unmute")) {
+            status_interactions.setMuted(&app_state.conn, info.?.user_id, id, false, now_ms) catch
+                return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        } else if (std.mem.eql(u8, suffix, "/pin")) {
+            return .{ .status = .unprocessable_entity, .body = "cannot pin\n" };
+        } else if (std.mem.eql(u8, suffix, "/unpin")) {
+            return .{ .status = .unprocessable_entity, .body = "cannot pin\n" };
         }
 
-        return remoteStatusResponse(app_state, allocator, actor.?, st.?);
+        return remoteStatusResponse(app_state, allocator, info.?.user_id, actor.?, st.?);
     }
 
     const st = statuses.lookup(&app_state.conn, allocator, id) catch
@@ -441,7 +470,39 @@ pub fn statusActionNoop(
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
     if (user == null) return common.unauthorized(allocator);
 
-    return statusResponse(app_state, allocator, user.?, st.?);
+    if (std.mem.eql(u8, suffix, "/favourite")) {
+        status_interactions.setFavourited(&app_state.conn, info.?.user_id, id, true, now_ms) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    } else if (std.mem.eql(u8, suffix, "/unfavourite")) {
+        status_interactions.setFavourited(&app_state.conn, info.?.user_id, id, false, now_ms) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    } else if (std.mem.eql(u8, suffix, "/reblog")) {
+        status_interactions.setReblogged(&app_state.conn, info.?.user_id, id, true, now_ms) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    } else if (std.mem.eql(u8, suffix, "/unreblog")) {
+        status_interactions.setReblogged(&app_state.conn, info.?.user_id, id, false, now_ms) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    } else if (std.mem.eql(u8, suffix, "/bookmark")) {
+        status_interactions.setBookmarked(&app_state.conn, info.?.user_id, id, true, now_ms) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    } else if (std.mem.eql(u8, suffix, "/unbookmark")) {
+        status_interactions.setBookmarked(&app_state.conn, info.?.user_id, id, false, now_ms) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    } else if (std.mem.eql(u8, suffix, "/pin")) {
+        status_interactions.setPinned(&app_state.conn, info.?.user_id, id, true, now_ms) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    } else if (std.mem.eql(u8, suffix, "/unpin")) {
+        status_interactions.setPinned(&app_state.conn, info.?.user_id, id, false, now_ms) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    } else if (std.mem.eql(u8, suffix, "/mute")) {
+        status_interactions.setMuted(&app_state.conn, info.?.user_id, id, true, now_ms) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    } else if (std.mem.eql(u8, suffix, "/unmute")) {
+        status_interactions.setMuted(&app_state.conn, info.?.user_id, id, false, now_ms) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    }
+
+    return statusResponse(app_state, allocator, info.?.user_id, user.?, st.?);
 }
 
 pub fn deleteStatus(app_state: *app.App, allocator: std.mem.Allocator, req: http_types.Request, path: []const u8) http_types.Response {
@@ -483,13 +544,13 @@ pub fn deleteStatus(app_state: *app.App, allocator: std.mem.Allocator, req: http
 
     background.deliverDeleteToFollowers(app_state, allocator, info.?.user_id, id);
 
-    const resp = statusResponse(app_state, allocator, user.?, st.?);
+    const resp = statusResponse(app_state, allocator, info.?.user_id, user.?, st.?);
     app_state.streaming.publishDelete(info.?.user_id, id_str);
     return resp;
 }
 
-fn statusResponse(app_state: *app.App, allocator: std.mem.Allocator, user: users.User, st: statuses.Status) http_types.Response {
-    const payload = masto.makeStatusPayload(app_state, allocator, user, st);
+fn statusResponse(app_state: *app.App, allocator: std.mem.Allocator, viewer_user_id: i64, user: users.User, st: statuses.Status) http_types.Response {
+    const payload = masto.makeStatusPayloadForViewer(app_state, allocator, user, st, viewer_user_id);
     const body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
     return .{
@@ -501,10 +562,11 @@ fn statusResponse(app_state: *app.App, allocator: std.mem.Allocator, user: users
 fn remoteStatusResponse(
     app_state: *app.App,
     allocator: std.mem.Allocator,
+    viewer_user_id: i64,
     actor: remote_actors.RemoteActor,
     st: remote_statuses.RemoteStatus,
 ) http_types.Response {
-    const payload = masto.makeRemoteStatusPayload(app_state, allocator, actor, st);
+    const payload = masto.makeRemoteStatusPayloadForViewer(app_state, allocator, actor, st, viewer_user_id);
     const body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
     return .{

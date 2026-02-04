@@ -12,6 +12,7 @@ const masto = @import("mastodon.zig");
 const media = @import("../media.zig");
 const oauth = @import("../oauth.zig");
 const remote_actors = @import("../remote_actors.zig");
+const status_interactions = @import("../status_interactions.zig");
 const statuses = @import("../statuses.zig");
 const urls = @import("urls.zig");
 const util_ids = @import("../util/ids.zig");
@@ -613,10 +614,6 @@ pub fn accountStatuses(app_state: *app.App, allocator: std.mem.Allocator, req: h
         break :blk false;
     };
 
-    if (pinned or only_media) {
-        return common.jsonOk(allocator, [_]i32{});
-    }
-
     const limit: usize = blk: {
         const lim_str = params.get("limit") orelse break :blk 20;
         break :blk std.fmt.parseInt(usize, lim_str, 10) catch 20;
@@ -633,6 +630,39 @@ pub fn accountStatuses(app_state: *app.App, allocator: std.mem.Allocator, req: h
         if (info == null) break :blk false;
         break :blk info.?.user_id == user.?.id;
     };
+
+    if (pinned) {
+        const pinned_ids = status_interactions.listPinnedStatusIds(&app_state.conn, allocator, user.?.id, limit) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+        var payloads: std.ArrayListUnmanaged(masto.StatusPayload) = .empty;
+        defer payloads.deinit(allocator);
+
+        for (pinned_ids) |sid| {
+            if (max_id != null and sid >= max_id.?) continue;
+
+            const st = statuses.lookup(&app_state.conn, allocator, sid) catch
+                return .{ .status = .internal_server_error, .body = "internal server error\n" };
+            if (st == null) continue;
+
+            if (!include_all and !isPubliclyVisibleVisibility(st.?.visibility)) continue;
+
+            payloads.append(allocator, masto.makeStatusPayload(app_state, allocator, user.?, st.?)) catch
+                return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        }
+
+        const body = std.json.Stringify.valueAlloc(allocator, payloads.items, .{}) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+        return .{
+            .content_type = "application/json; charset=utf-8",
+            .body = body,
+        };
+    }
+
+    if (only_media) {
+        return common.jsonOk(allocator, [_]i32{});
+    }
 
     const list = statuses.listByUser(&app_state.conn, allocator, user.?.id, limit, max_id) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
