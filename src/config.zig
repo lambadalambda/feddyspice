@@ -18,6 +18,7 @@ pub const Config = struct {
     password_params: password.Params,
     http_timeout_ms: u32,
     http_max_body_bytes: usize = 1024 * 1024,
+    signature_max_clock_skew_sec: u32 = 15 * 60,
     jobs_mode: jobs.Mode,
 
     pub fn load(allocator: std.mem.Allocator) !Config {
@@ -31,6 +32,7 @@ pub const Config = struct {
         const log_level_env = std.posix.getenv("FEDDYSPICE_LOG_LEVEL") orelse "info";
         const timeout_env = std.posix.getenv("FEDDYSPICE_HTTP_TIMEOUT_MS") orelse "10000";
         const max_body_env = std.posix.getenv("FEDDYSPICE_HTTP_MAX_BODY_BYTES") orelse "1048576";
+        const skew_env = std.posix.getenv("FEDDYSPICE_SIGNATURE_MAX_CLOCK_SKEW_SEC") orelse "900";
         const jobs_mode_env = std.posix.getenv("FEDDYSPICE_JOBS_MODE") orelse "spawn";
 
         const domain = try allocator.dupe(u8, domain_env);
@@ -67,6 +69,11 @@ pub const Config = struct {
             break :blk parsed;
         };
 
+        const signature_max_clock_skew_sec: u32 = blk: {
+            const parsed = std.fmt.parseInt(u32, skew_env, 10) catch break :blk 15 * 60;
+            break :blk parsed;
+        };
+
         const jobs_mode = jobs.modeFromString(jobs_mode_env);
 
         const scheme: Scheme = if (std.mem.eql(u8, scheme_env, "https")) .https else .http;
@@ -84,6 +91,7 @@ pub const Config = struct {
             .password_params = password.Params.owasp_2id,
             .http_timeout_ms = http_timeout_ms,
             .http_max_body_bytes = http_max_body_bytes,
+            .signature_max_clock_skew_sec = signature_max_clock_skew_sec,
             .jobs_mode = jobs_mode,
         };
     }

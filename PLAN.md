@@ -146,7 +146,7 @@ These are explicitly security-focused tasks (not just “compat” work). Each i
 
 - [ ] Add baseline security headers for all HTTP responses (at least: `X-Content-Type-Options`, `Referrer-Policy`, clickjacking/CSP).
 - [ ] OAuth: add `Cache-Control: no-store` to token/code-related responses; consider CSRF protection for HTML form POSTs (`/login`, `/signup`, `/oauth/authorize`).
-- [ ] HTTP Signatures: validate `Date` header format + max clock skew (configurable).
+- [x] HTTP Signatures: validate `Date` header format + max clock skew (configurable).
 - [ ] HTTP Signatures: replay protection when ActivityPub activity `id` is missing (fallback dedupe key).
 - [ ] Transport: disallow outbound `http(s)` URLs with nonstandard ports by default (configurable).
 - [ ] Rate limiting/backpressure for public entrypoints (`/login`, `/oauth/token`, `/api/v1/apps`, `/users/:name/inbox`) and outbound fetch storms.

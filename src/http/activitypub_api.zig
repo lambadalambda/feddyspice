@@ -57,6 +57,8 @@ fn verifyInboxSignature(
     allocator: std.mem.Allocator,
     req: http_types.Request,
     actor: remote_actors.RemoteActor,
+    now_sec: i64,
+    max_clock_skew_sec: i64,
 ) VerifyInboxError!void {
     const sig_hdr = req.signature orelse return error.Unauthorized;
     const host_hdr = req.host orelse return error.Unauthorized;
@@ -64,6 +66,7 @@ fn verifyInboxSignature(
     const digest_hdr = req.digest orelse return error.Unauthorized;
 
     if (!http_signatures.digestHeaderHasSha256(req.body, digest_hdr)) return error.Unauthorized;
+    if (!http_signatures.httpDateWithinSkew(date_hdr, now_sec, max_clock_skew_sec)) return error.Unauthorized;
 
     var cl_buf: [32]u8 = undefined;
     const content_length = std.fmt.bufPrint(&cl_buf, "{d}", .{req.body.len}) catch return error.Internal;
@@ -94,8 +97,10 @@ fn verifyInboxSignatureOrReject(
     allocator: std.mem.Allocator,
     req: http_types.Request,
     actor: remote_actors.RemoteActor,
+    now_sec: i64,
+    max_clock_skew_sec: i64,
 ) ?http_types.Response {
-    verifyInboxSignature(allocator, req, actor) catch |err| switch (err) {
+    verifyInboxSignature(allocator, req, actor, now_sec, max_clock_skew_sec) catch |err| switch (err) {
         error.Unauthorized => return unauthorizedResponse(),
         error.Internal => return .{ .status = .internal_server_error, .body = "internal server error\n" },
     };
@@ -630,6 +635,55 @@ test "remoteAttachmentsJsonAlloc ignores non-http(s) URLs" {
     try std.testing.expect((try remoteAttachmentsJsonAlloc(a, parsed2.value.object)) == null);
 }
 
+test "verifyInboxSignature enforces Date max clock skew" {
+    const crypto_rsa = @import("../crypto_rsa.zig");
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const kp = try crypto_rsa.generateRsaKeyPairPem(a, 512);
+
+    const actor: remote_actors.RemoteActor = .{
+        .id = "https://remote.test/users/bob",
+        .inbox = "https://remote.test/users/bob/inbox",
+        .shared_inbox = null,
+        .preferred_username = "bob",
+        .domain = "remote.test",
+        .public_key_pem = kp.public_key_pem,
+    };
+
+    const body = "{}";
+    const signed = try http_signatures.signRequest(
+        a,
+        kp.private_key_pem,
+        "https://remote.test/users/bob#main-key",
+        .POST,
+        "/users/alice/inbox",
+        "example.test",
+        body,
+        0,
+    );
+
+    const req: http_types.Request = .{
+        .method = .POST,
+        .target = "/users/alice/inbox",
+        .content_type = "application/activity+json",
+        .body = body,
+        .host = "example.test",
+        .date = signed.date,
+        .digest = signed.digest,
+        .signature = signed.signature,
+    };
+
+    try verifyInboxSignature(a, req, actor, 0, 0);
+    try std.testing.expectError(error.Unauthorized, verifyInboxSignature(a, req, actor, 1000, 10));
+
+    var bad = req;
+    bad.date = "not-a-date";
+    try std.testing.expectError(error.Unauthorized, verifyInboxSignature(a, bad, actor, 0, 100));
+}
+
 pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_types.Request, path: []const u8) http_types.Response {
     const prefix = "/users/";
     const suffix = "/inbox";
@@ -733,7 +787,9 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
             if (remote_actor == null) return .{ .status = .accepted, .body = "ignored\n" };
         }
 
-        if (verifyInboxSignatureOrReject(allocator, req, remote_actor.?)) |resp| return resp;
+        const now_sec: i64 = std.time.timestamp();
+        const max_clock_skew_sec: i64 = @intCast(app_state.cfg.signature_max_clock_skew_sec);
+        if (verifyInboxSignatureOrReject(allocator, req, remote_actor.?, now_sec, max_clock_skew_sec)) |resp| return resp;
 
         const visibility: []const u8 = blk: {
             const has_recipients =
@@ -900,7 +956,9 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
             return .{ .status = .accepted, .body = "ignored\n" };
         }
 
-        if (verifyInboxSignatureOrReject(allocator, req, remote_actor.?)) |resp| return resp;
+        const now_sec: i64 = std.time.timestamp();
+        const max_clock_skew_sec: i64 = @intCast(app_state.cfg.signature_max_clock_skew_sec);
+        if (verifyInboxSignatureOrReject(allocator, req, remote_actor.?, now_sec, max_clock_skew_sec)) |resp| return resp;
 
         const deleted = remote_statuses.markDeletedByUri(&app_state.conn, remote_status.?.remote_uri, deleted_at) catch
             return .{ .status = .internal_server_error, .body = "internal server error\n" };
@@ -971,7 +1029,9 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
         const remote_actor = federation.ensureRemoteActorById(app_state, allocator, actor_val.string) catch
             return .{ .status = .internal_server_error, .body = "internal server error\n" };
 
-        if (verifyInboxSignatureOrReject(allocator, req, remote_actor)) |resp| return resp;
+        const now_sec: i64 = std.time.timestamp();
+        const max_clock_skew_sec: i64 = @intCast(app_state.cfg.signature_max_clock_skew_sec);
+        if (verifyInboxSignatureOrReject(allocator, req, remote_actor, now_sec, max_clock_skew_sec)) |resp| return resp;
 
         background.acceptInboundFollow(app_state, allocator, user.?.id, username, actor_val.string, follow_activity_id);
 
@@ -1007,7 +1067,9 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
         const remote_actor = federation.ensureRemoteActorById(app_state, allocator, actor_id.?) catch
             return .{ .status = .internal_server_error, .body = "internal server error\n" };
 
-        if (verifyInboxSignatureOrReject(allocator, req, remote_actor)) |resp| return resp;
+        const now_sec: i64 = std.time.timestamp();
+        const max_clock_skew_sec: i64 = @intCast(app_state.cfg.signature_max_clock_skew_sec);
+        if (verifyInboxSignatureOrReject(allocator, req, remote_actor, now_sec, max_clock_skew_sec)) |resp| return resp;
 
         if (activity_id != null and actor_id != null) {
             const inserted = inbox_dedupe.begin(&app_state.conn, activity_id.?, user.?.id, actor_id.?, received_at_ms) catch

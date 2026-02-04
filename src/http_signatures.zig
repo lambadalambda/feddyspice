@@ -97,6 +97,92 @@ pub fn httpDateAlloc(allocator: std.mem.Allocator, timestamp_sec: i64) std.mem.A
     );
 }
 
+pub const HttpDateParseError = error{InvalidHttpDate};
+
+pub fn parseHttpDateToEpochSeconds(value: []const u8) HttpDateParseError!i64 {
+    // IMF-fixdate: "Thu, 01 Jan 1970 00:00:00 GMT"
+    // https://www.rfc-editor.org/rfc/rfc7231#section-7.1.1.1
+    if (value.len < "Thu, 01 Jan 1970 00:00:00 GMT".len) return error.InvalidHttpDate;
+
+    const comma_idx = std.mem.indexOfScalar(u8, value, ',') orelse return error.InvalidHttpDate;
+    if (comma_idx != 3) return error.InvalidHttpDate;
+    if (value.len < comma_idx + 2) return error.InvalidHttpDate;
+    if (value[comma_idx + 1] != ' ') return error.InvalidHttpDate;
+
+    var rest = value[comma_idx + 2 ..];
+    if (!std.mem.endsWith(u8, rest, " GMT")) return error.InvalidHttpDate;
+    rest = rest[0 .. rest.len - " GMT".len];
+
+    var it = std.mem.splitScalar(u8, rest, ' ');
+    const day_str = it.next() orelse return error.InvalidHttpDate;
+    const mon_str = it.next() orelse return error.InvalidHttpDate;
+    const year_str = it.next() orelse return error.InvalidHttpDate;
+    const time_str = it.next() orelse return error.InvalidHttpDate;
+    if (it.next() != null) return error.InvalidHttpDate;
+
+    if (day_str.len != 2) return error.InvalidHttpDate;
+    if (year_str.len != 4) return error.InvalidHttpDate;
+
+    const day: u8 = std.fmt.parseInt(u8, day_str, 10) catch return error.InvalidHttpDate;
+    if (day == 0 or day > 31) return error.InvalidHttpDate;
+
+    const year: i32 = std.fmt.parseInt(i32, year_str, 10) catch return error.InvalidHttpDate;
+    if (year < 0) return error.InvalidHttpDate;
+
+    const month: u8 = monthFromAbbrev(mon_str) orelse return error.InvalidHttpDate;
+
+    if (time_str.len != 8) return error.InvalidHttpDate;
+    if (time_str[2] != ':' or time_str[5] != ':') return error.InvalidHttpDate;
+
+    const hour: u8 = std.fmt.parseInt(u8, time_str[0..2], 10) catch return error.InvalidHttpDate;
+    const minute: u8 = std.fmt.parseInt(u8, time_str[3..5], 10) catch return error.InvalidHttpDate;
+    const second: u8 = std.fmt.parseInt(u8, time_str[6..8], 10) catch return error.InvalidHttpDate;
+    if (hour > 23 or minute > 59 or second > 59) return error.InvalidHttpDate;
+
+    const days = daysFromCivil(year, month, day);
+    return days * 86_400 + @as(i64, hour) * 3600 + @as(i64, minute) * 60 + @as(i64, second);
+}
+
+pub fn httpDateWithinSkew(date_value: []const u8, now_sec: i64, max_skew_sec: i64) bool {
+    if (max_skew_sec < 0) return false;
+    const ts = parseHttpDateToEpochSeconds(date_value) catch return false;
+    const delta = if (now_sec >= ts) now_sec - ts else ts - now_sec;
+    return delta <= max_skew_sec;
+}
+
+fn monthFromAbbrev(s: []const u8) ?u8 {
+    if (s.len != 3) return null;
+    if (std.ascii.eqlIgnoreCase(s, "jan")) return 1;
+    if (std.ascii.eqlIgnoreCase(s, "feb")) return 2;
+    if (std.ascii.eqlIgnoreCase(s, "mar")) return 3;
+    if (std.ascii.eqlIgnoreCase(s, "apr")) return 4;
+    if (std.ascii.eqlIgnoreCase(s, "may")) return 5;
+    if (std.ascii.eqlIgnoreCase(s, "jun")) return 6;
+    if (std.ascii.eqlIgnoreCase(s, "jul")) return 7;
+    if (std.ascii.eqlIgnoreCase(s, "aug")) return 8;
+    if (std.ascii.eqlIgnoreCase(s, "sep")) return 9;
+    if (std.ascii.eqlIgnoreCase(s, "oct")) return 10;
+    if (std.ascii.eqlIgnoreCase(s, "nov")) return 11;
+    if (std.ascii.eqlIgnoreCase(s, "dec")) return 12;
+    return null;
+}
+
+fn daysFromCivil(year_in: i32, month_in: u8, day_in: u8) i64 {
+    // Based on Howard Hinnant's civil calendar algorithms.
+    // Returns days since 1970-01-01.
+    var year: i64 = year_in;
+    const month: i64 = month_in;
+    const day: i64 = day_in;
+
+    year -= if (month <= 2) 1 else 0;
+    const era: i64 = @divFloor(year, 400);
+    const yoe: i64 = year - era * 400; // [0, 399]
+    const mp: i64 = if (month > 2) month - 3 else month + 9; // [0, 11]
+    const doy: i64 = @divFloor(153 * mp + 2, 5) + day - 1; // [0, 365]
+    const doe: i64 = yoe * 365 + @divFloor(yoe, 4) - @divFloor(yoe, 100) + doy; // [0, 146096]
+    return era * 146097 + doe - 719468;
+}
+
 fn weekdayAbbrev(idx: u64) []const u8 {
     return switch (idx) {
         0 => "Sun",
@@ -378,4 +464,23 @@ test "verifyRequestSignaturePem returns false on wrong digest value" {
         null,
         null,
     )));
+}
+
+test "parseHttpDateToEpochSeconds parses IMF-fixdate" {
+    try std.testing.expectEqual(@as(i64, 0), try parseHttpDateToEpochSeconds("Thu, 01 Jan 1970 00:00:00 GMT"));
+    try std.testing.expectEqual(@as(i64, 1), try parseHttpDateToEpochSeconds("Thu, 01 Jan 1970 00:00:01 GMT"));
+    try std.testing.expectEqual(@as(i64, 86_400), try parseHttpDateToEpochSeconds("Fri, 02 Jan 1970 00:00:00 GMT"));
+
+    try std.testing.expectError(error.InvalidHttpDate, parseHttpDateToEpochSeconds("Thu, 01 Jan 1970 00:00:00"));
+    try std.testing.expectError(error.InvalidHttpDate, parseHttpDateToEpochSeconds("Thu, 01 Xxx 1970 00:00:00 GMT"));
+    try std.testing.expectError(error.InvalidHttpDate, parseHttpDateToEpochSeconds("Thu, 00 Jan 1970 00:00:00 GMT"));
+    try std.testing.expectError(error.InvalidHttpDate, parseHttpDateToEpochSeconds("Thu, 01 Jan -001 00:00:00 GMT"));
+    try std.testing.expectError(error.InvalidHttpDate, parseHttpDateToEpochSeconds("Thu, 01 Jan 1970 24:00:00 GMT"));
+}
+
+test "httpDateWithinSkew rejects invalid or too old Date headers" {
+    try std.testing.expect(httpDateWithinSkew("Thu, 01 Jan 1970 00:00:00 GMT", 0, 0));
+    try std.testing.expect(httpDateWithinSkew("Thu, 01 Jan 1970 00:00:00 GMT", 5, 5));
+    try std.testing.expect(!httpDateWithinSkew("Thu, 01 Jan 1970 00:00:00 GMT", 6, 5));
+    try std.testing.expect(!httpDateWithinSkew("not-a-date", 0, 60));
 }

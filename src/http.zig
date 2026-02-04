@@ -475,6 +475,7 @@ fn signedInboxRequest(
     private_key_pem: []const u8,
 ) !Request {
     const http_signatures = @import("http_signatures.zig");
+    const now_sec: i64 = std.time.timestamp();
     const signed = try http_signatures.signRequest(
         allocator,
         private_key_pem,
@@ -483,7 +484,7 @@ fn signedInboxRequest(
         target,
         host,
         body,
-        0,
+        now_sec,
     );
     return .{
         .method = .POST,
