@@ -753,12 +753,12 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
             break :blk trimTrailingSlash(id_val.string);
         };
 
-        if (activity_id) |id| {
-            const inserted = inbox_dedupe.begin(&app_state.conn, id, user.?.id, actor_val.string, received_at_ms) catch
-                return .{ .status = .internal_server_error, .body = "internal server error\n" };
-            if (!inserted) return .{ .status = .accepted, .body = "duplicate\n" };
-            dedupe_activity_id = id;
-        }
+        const dedupe_id = activity_id orelse inbox_dedupe.fallbackKeyAlloc(allocator, actor_val.string, req.body) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        const inserted = inbox_dedupe.begin(&app_state.conn, dedupe_id, user.?.id, actor_val.string, received_at_ms) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        if (!inserted) return .{ .status = .accepted, .body = "duplicate\n" };
+        dedupe_activity_id = dedupe_id;
 
         var remote_actor = blk: {
             if (remote_actors.lookupById(&app_state.conn, allocator, actor_val.string) catch
@@ -874,12 +874,12 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
             break :blk trimTrailingSlash(id_val.string);
         };
 
-        if (activity_id) |id| {
-            const inserted = inbox_dedupe.begin(&app_state.conn, id, user.?.id, actor_val.string, received_at_ms) catch
-                return .{ .status = .internal_server_error, .body = "internal server error\n" };
-            if (!inserted) return .{ .status = .accepted, .body = "duplicate\n" };
-            dedupe_activity_id = id;
-        }
+        const dedupe_id = activity_id orelse inbox_dedupe.fallbackKeyAlloc(allocator, actor_val.string, req.body) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        const inserted = inbox_dedupe.begin(&app_state.conn, dedupe_id, user.?.id, actor_val.string, received_at_ms) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        if (!inserted) return .{ .status = .accepted, .body = "duplicate\n" };
+        dedupe_activity_id = dedupe_id;
 
         const remote_actor = blk: {
             if (remote_actors.lookupById(&app_state.conn, allocator, actor_val.string) catch
@@ -1076,12 +1076,12 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
         const max_clock_skew_sec: i64 = @intCast(app_state.cfg.signature_max_clock_skew_sec);
         if (verifyInboxSignatureOrReject(allocator, req, remote_actor, now_sec, max_clock_skew_sec)) |resp| return resp;
 
-        if (activity_id != null and actor_id != null) {
-            const inserted = inbox_dedupe.begin(&app_state.conn, activity_id.?, user.?.id, actor_id.?, received_at_ms) catch
-                return .{ .status = .internal_server_error, .body = "internal server error\n" };
-            if (!inserted) return .{ .status = .accepted, .body = "duplicate\n" };
-            dedupe_activity_id = activity_id.?;
-        }
+        const dedupe_id = activity_id orelse inbox_dedupe.fallbackKeyAlloc(allocator, actor_id.?, req.body) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        const inserted = inbox_dedupe.begin(&app_state.conn, dedupe_id, user.?.id, actor_id.?, received_at_ms) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        if (!inserted) return .{ .status = .accepted, .body = "duplicate\n" };
+        dedupe_activity_id = dedupe_id;
 
         const obj = parsed.value.object.get("object") orelse
             return .{ .status = .bad_request, .body = "missing object\n" };

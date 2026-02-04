@@ -4327,6 +4327,59 @@ test "POST /users/:name/inbox Create stores remote status" {
     try std.testing.expectEqualStrings("public", st.visibility);
 }
 
+test "POST /users/:name/inbox Create without activity id is replay-deduped" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    _ = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const remote_kp = try @import("crypto_rsa.zig").generateRsaKeyPairPem(a, 512);
+    const remote_key_id = "https://remote.test/users/bob#main-key";
+
+    try remote_actors.upsert(&app_state.conn, .{
+        .id = "https://remote.test/users/bob",
+        .inbox = "https://remote.test/users/bob/inbox",
+        .shared_inbox = null,
+        .preferred_username = "bob",
+        .domain = "remote.test",
+        .public_key_pem = remote_kp.public_key_pem,
+    });
+
+    // No top-level ActivityPub `id`, but still a valid Create(Note).
+    const body =
+        \\{"@context":"https://www.w3.org/ns/activitystreams","type":"Create","actor":"https://remote.test/users/bob","object":{"id":"https://remote.test/notes/9","type":"Note","content":"<p>Hello</p>","published":"2020-01-01T00:00:00.000Z"}}
+    ;
+
+    const req1 = try signedInboxRequest(
+        a,
+        "example.test",
+        "/users/alice/inbox",
+        body,
+        remote_key_id,
+        remote_kp.private_key_pem,
+    );
+    const resp1 = handle(&app_state, a, req1);
+    try std.testing.expectEqual(std.http.Status.accepted, resp1.status);
+    try std.testing.expectEqualStrings("ok\n", resp1.body);
+
+    const req2 = try signedInboxRequest(
+        a,
+        "example.test",
+        "/users/alice/inbox",
+        body,
+        remote_key_id,
+        remote_kp.private_key_pem,
+    );
+    const resp2 = handle(&app_state, a, req2);
+    try std.testing.expectEqual(std.http.Status.accepted, resp2.status);
+    try std.testing.expectEqualStrings("duplicate\n", resp2.body);
+}
+
 test "POST /users/:name/inbox Delete marks remote status deleted" {
     var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
     defer app_state.deinit();

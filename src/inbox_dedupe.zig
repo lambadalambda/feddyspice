@@ -4,6 +4,22 @@ const db = @import("db.zig");
 
 pub const Error = db.Error;
 
+pub fn fallbackKeyAlloc(allocator: std.mem.Allocator, actor_id: []const u8, body: []const u8) std.mem.Allocator.Error![]u8 {
+    var digest: [32]u8 = undefined;
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update(actor_id);
+    hasher.update(&.{0});
+    hasher.update(body);
+    hasher.final(&digest);
+
+    const hex = std.fmt.bytesToHex(digest, .lower);
+
+    var out = try allocator.alloc(u8, "sha256:".len + hex.len);
+    @memcpy(out[0.."sha256:".len], "sha256:");
+    @memcpy(out["sha256:".len..], hex[0..]);
+    return out;
+}
+
 pub fn begin(conn: *db.Db, activity_id: []const u8, user_id: i64, actor_id: []const u8, received_at_ms: i64) Error!bool {
     var stmt = try conn.prepareZ(
         "INSERT INTO inbox_dedupe(activity_id, user_id, actor_id, received_at_ms)\n" ++
@@ -60,4 +76,20 @@ test "inbox_dedupe: begin is idempotent and clear re-allows" {
 
     try clear(&conn, activity_id);
     try std.testing.expect(try begin(&conn, activity_id, user_id, actor_id, now_ms));
+}
+
+test "inbox_dedupe: fallbackKeyAlloc is stable and actor-scoped" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const k1 = try fallbackKeyAlloc(a, "https://remote.test/users/a", "body");
+    const k2 = try fallbackKeyAlloc(a, "https://remote.test/users/a", "body");
+    const k3 = try fallbackKeyAlloc(a, "https://remote.test/users/b", "body");
+    const k4 = try fallbackKeyAlloc(a, "https://remote.test/users/a", "body2");
+
+    try std.testing.expect(std.mem.startsWith(u8, k1, "sha256:"));
+    try std.testing.expectEqualStrings(k1, k2);
+    try std.testing.expect(!std.mem.eql(u8, k1, k3));
+    try std.testing.expect(!std.mem.eql(u8, k1, k4));
 }
