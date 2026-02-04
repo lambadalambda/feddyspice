@@ -8,6 +8,7 @@ const ids = @import("util/ids.zig");
 const follows = @import("follows.zig");
 const followers = @import("followers.zig");
 const http_signatures = @import("http_signatures.zig");
+const http_urls = @import("http/urls.zig");
 const log = @import("log.zig");
 const notifications = @import("notifications.zig");
 const remote_actors = @import("remote_actors.zig");
@@ -1107,6 +1108,95 @@ pub fn deliverStatusToFollowers(app_state: *app.App, allocator: std.mem.Allocato
     }
 }
 
+pub fn deliverActorUpdate(app_state: *app.App, allocator: std.mem.Allocator, user: users.User) Error!void {
+    app_state.logger.debug("deliverActorUpdate: user_id={d}", .{user.id});
+
+    const follower_ids = try followers.listAcceptedRemoteActorIds(&app_state.conn, allocator, user.id, 200);
+    const following_ids = try follows.listAcceptedRemoteActorIds(&app_state.conn, allocator, user.id, 200);
+    if (follower_ids.len == 0 and following_ids.len == 0) return;
+
+    var deliver_ids: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer deliver_ids.deinit(allocator);
+    for (follower_ids) |id| try deliver_ids.append(allocator, id);
+    for (following_ids) |id| {
+        var already: bool = false;
+        for (deliver_ids.items) |existing| {
+            if (std.mem.eql(u8, existing, id)) {
+                already = true;
+                break;
+            }
+        }
+        if (!already) try deliver_ids.append(allocator, id);
+    }
+
+    const base = try baseUrlAlloc(app_state, allocator);
+    const local_actor_id = try std.fmt.allocPrint(allocator, "{s}/users/{s}", .{ base, user.username });
+    const key_id = try std.fmt.allocPrint(allocator, "{s}#main-key", .{local_actor_id});
+
+    const inbox = try std.fmt.allocPrint(allocator, "{s}/users/{s}/inbox", .{ base, user.username });
+    const outbox = try std.fmt.allocPrint(allocator, "{s}/users/{s}/outbox", .{ base, user.username });
+    const followers_url = try std.fmt.allocPrint(allocator, "{s}/users/{s}/followers", .{ base, user.username });
+    const following_url = try std.fmt.allocPrint(allocator, "{s}/users/{s}/following", .{ base, user.username });
+
+    const update_id = try std.fmt.allocPrint(allocator, "{s}#updates/{d}", .{ local_actor_id, std.time.timestamp() });
+
+    const avatar_url = http_urls.userAvatarUrlAlloc(app_state, allocator, user);
+    const header_url = http_urls.userHeaderUrlAlloc(app_state, allocator, user);
+    const note_html = try textToHtmlAlloc(allocator, user.note);
+
+    const keys = try actor_keys.ensureForUser(&app_state.conn, allocator, user.id);
+
+    const public_iri = "https://www.w3.org/ns/activitystreams#Public";
+    const to = [_][]const u8{ public_iri, followers_url };
+
+    const payload = .{
+        .@"@context" = "https://www.w3.org/ns/activitystreams",
+        .id = update_id,
+        .type = "Update",
+        .actor = local_actor_id,
+        .to = to[0..],
+        .object = .{
+            .id = local_actor_id,
+            .type = "Person",
+            .name = user.display_name,
+            .preferredUsername = user.username,
+            .summary = note_html,
+            .icon = .{ .type = "Image", .url = avatar_url },
+            .image = .{ .type = "Image", .url = header_url },
+            .inbox = inbox,
+            .outbox = outbox,
+            .followers = followers_url,
+            .following = following_url,
+            .publicKey = .{
+                .id = key_id,
+                .owner = local_actor_id,
+                .publicKeyPem = keys.public_key_pem,
+            },
+        },
+    };
+
+    const update_body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch
+        return error.OutOfMemory;
+
+    for (deliver_ids.items) |remote_actor_id| {
+        const actor = remote_actors.lookupById(&app_state.conn, allocator, remote_actor_id) catch |err| {
+            app_state.logger.err("deliverActorUpdate: lookup remote actor failed actor_id={s} err={any}", .{ remote_actor_id, err });
+            continue;
+        };
+        if (actor == null) {
+            app_state.logger.err("deliverActorUpdate: remote actor missing actor_id={s}", .{remote_actor_id});
+            continue;
+        }
+
+        const inbox_url = deliveryInboxUrl(actor.?);
+        app_state.logger.debug("deliverActorUpdate: inbox={s}", .{inbox_url});
+        deliverSignedInboxPostOkDiscardBody(app_state, allocator, keys.private_key_pem, key_id, inbox_url, update_body) catch |err| {
+            app_state.logger.err("deliverActorUpdate: deliver failed inbox={s} err={any}", .{ inbox_url, err });
+            continue;
+        };
+    }
+}
+
 fn deliverDirectStatus(app_state: *app.App, allocator: std.mem.Allocator, user: users.User, st: statuses.Status) Error!void {
     const recipient_ids = try directRecipientActorIdsAlloc(app_state, allocator, st.id, st.text);
     if (recipient_ids.len == 0) return;
@@ -1450,6 +1540,71 @@ test "deliverDeleteToFollowers includes stored recipients for non-direct statuse
     defer parsed.deinit();
     try std.testing.expectEqualStrings("Delete", parsed.value.object.get("type").?.string);
     try std.testing.expect(jsonArrayHasString(parsed.value.object.get("to").?, remote_actor_id));
+}
+
+test "deliverActorUpdate delivers Update with avatar and header to follower inbox" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    var mock = transport.MockTransport.init(std.testing.allocator);
+    app_state.transport = mock.transport();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const remote_actor_id = "http://remote.test/users/bob";
+    const remote_inbox = "http://remote.test/users/bob/inbox";
+    try remote_actors.upsert(&app_state.conn, .{
+        .id = remote_actor_id,
+        .inbox = remote_inbox,
+        .shared_inbox = null,
+        .preferred_username = "bob",
+        .domain = "remote.test",
+        .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
+    });
+
+    try followers.upsertPending(&app_state.conn, user_id, remote_actor_id, "http://remote.test/follows/1");
+    try std.testing.expect(try followers.markAcceptedByRemoteActorId(&app_state.conn, user_id, remote_actor_id));
+
+    const media = @import("media.zig");
+    const now_ms: i64 = 1_000_000;
+    var avatar_meta = try media.create(&app_state.conn, a, user_id, "image/png", "AVATAR", null, now_ms);
+    defer avatar_meta.deinit(a);
+    var header_meta = try media.create(&app_state.conn, a, user_id, "image/png", "HEADER", null, now_ms);
+    defer header_meta.deinit(a);
+
+    try std.testing.expect(try users.updateProfile(&app_state.conn, user_id, "Alice", "Hello", avatar_meta.id, header_meta.id));
+
+    const user = (try users.lookupUserById(&app_state.conn, a, user_id)).?;
+
+    try mock.pushExpected(.{ .method = .POST, .url = remote_inbox, .response_status = .accepted, .response_body = "" });
+
+    try deliverActorUpdate(&app_state, a, user);
+    try std.testing.expectEqual(@as(usize, 1), mock.requests.items.len);
+
+    const payload_bytes = mock.requests.items[0].payload.?;
+    var parsed = try std.json.parseFromSlice(std.json.Value, a, payload_bytes, .{});
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("Update", parsed.value.object.get("type").?.string);
+
+    const public_iri = "https://www.w3.org/ns/activitystreams#Public";
+    try std.testing.expect(jsonArrayHasString(parsed.value.object.get("to").?, public_iri));
+
+    const base = try baseUrlAlloc(&app_state, a);
+    const followers_url = try std.fmt.allocPrint(a, "{s}/users/{s}/followers", .{ base, user.username });
+    try std.testing.expect(jsonArrayHasString(parsed.value.object.get("to").?, followers_url));
+
+    const object = parsed.value.object.get("object").?.object;
+    const icon_url = object.get("icon").?.object.get("url").?.string;
+    const image_url = object.get("image").?.object.get("url").?.string;
+
+    try std.testing.expect(std.mem.startsWith(u8, icon_url, "http://example.test/media/"));
+    try std.testing.expect(std.mem.startsWith(u8, image_url, "http://example.test/media/"));
 }
 
 test "followHandle sends signed Follow to remote inbox" {

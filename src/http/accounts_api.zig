@@ -157,6 +157,12 @@ pub fn updateCredentials(app_state: *app.App, allocator: std.mem.Allocator, req:
         header_media_id = meta.id;
     }
 
+    const profile_changed =
+        !std.mem.eql(u8, display_name, user.?.display_name) or
+        !std.mem.eql(u8, note, user.?.note) or
+        avatar_media_id != user.?.avatar_media_id or
+        header_media_id != user.?.header_media_id;
+
     const updated = users.updateProfile(
         &app_state.conn,
         info.?.user_id,
@@ -173,6 +179,10 @@ pub fn updateCredentials(app_state: *app.App, allocator: std.mem.Allocator, req:
 
     const one_day_ms: i64 = 24 * 60 * 60 * 1000;
     _ = media.pruneOrphansOlderThan(&app_state.conn, now_ms - one_day_ms) catch 0;
+
+    if (profile_changed) {
+        background.deliverActorUpdate(app_state, allocator, info.?.user_id);
+    }
 
     const updated_user = users.lookupUserById(&app_state.conn, allocator, info.?.user_id) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };

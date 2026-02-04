@@ -26,6 +26,7 @@ pub const Job = union(enum) {
     send_announce: SendAnnounce,
     send_undo_announce: SendUndoAnnounce,
     accept_inbound_follow: AcceptInboundFollow,
+    deliver_actor_update: DeliverActorUpdate,
     deliver_status: DeliverStatus,
     deliver_delete: DeliverDelete,
 
@@ -38,6 +39,7 @@ pub const Job = union(enum) {
             .send_announce => |*j| j.deinit(allocator),
             .send_undo_announce => |*j| j.deinit(allocator),
             .accept_inbound_follow => |*j| j.deinit(allocator),
+            .deliver_actor_update => {},
             .deliver_status => {},
             .deliver_delete => {},
         }
@@ -134,6 +136,10 @@ pub const AcceptInboundFollow = struct {
 pub const DeliverStatus = struct {
     user_id: i64,
     status_id: i64,
+};
+
+pub const DeliverActorUpdate = struct {
+    user_id: i64,
 };
 
 pub const DeliverDelete = struct {

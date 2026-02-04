@@ -259,6 +259,14 @@ fn encodeJob(allocator: std.mem.Allocator, job: jobs.Job) Error!EncodedJob {
                 .dedupe_key = try std.fmt.allocPrint(allocator, "accept_inbound_follow:{d}:{s}", .{ j.user_id, j.remote_follow_activity_id }),
             };
         },
+        .deliver_actor_update => |j| {
+            const payload = .{ .user_id = j.user_id };
+            return .{
+                .job_type = "deliver_actor_update",
+                .payload_json = try std.json.Stringify.valueAlloc(allocator, payload, .{}),
+                .dedupe_key = try std.fmt.allocPrint(allocator, "deliver_actor_update:{d}", .{j.user_id}),
+            };
+        },
         .deliver_status => |j| {
             const payload = .{ .user_id = j.user_id, .status_id = j.status_id };
             return .{
@@ -408,6 +416,12 @@ fn decodeJob(allocator: std.mem.Allocator, job_type: []const u8, payload_json: [
                 .remote_follow_activity_id = try allocator.dupe(u8, remote_follow_activity_id_val.string),
             },
         };
+    }
+
+    if (std.mem.eql(u8, job_type, "deliver_actor_update")) {
+        const user_id_val = o.get("user_id") orelse return error.InvalidPayload;
+        if (user_id_val != .integer) return error.InvalidPayload;
+        return .{ .deliver_actor_update = .{ .user_id = user_id_val.integer } };
     }
 
     if (std.mem.eql(u8, job_type, "deliver_status")) {

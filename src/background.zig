@@ -44,6 +44,11 @@ pub fn runJob(app_state: *app.App, allocator: std.mem.Allocator, job: jobs.Job) 
                 j.remote_follow_activity_id,
             );
         },
+        .deliver_actor_update => |j| {
+            const user = users.lookupUserById(&app_state.conn, allocator, j.user_id) catch return;
+            if (user == null) return;
+            try federation.deliverActorUpdate(app_state, allocator, user.?);
+        },
         .deliver_status => |j| {
             const user = users.lookupUserById(&app_state.conn, allocator, j.user_id) catch return;
             if (user == null) return;
@@ -591,6 +596,48 @@ pub fn deliverStatusToFollowers(
     t.detach();
 }
 
+pub fn deliverActorUpdate(
+    app_state: *app.App,
+    allocator: std.mem.Allocator,
+    user_id: i64,
+) void {
+    switch (app_state.jobs_mode) {
+        .sync => {
+            const user = users.lookupUserById(&app_state.conn, allocator, user_id) catch return;
+            if (user == null) return;
+            federation.deliverActorUpdate(app_state, allocator, user.?) catch {};
+            return;
+        },
+        .disabled => {
+            app_state.jobs_queue.push(app_state.allocator, .{ .deliver_actor_update = .{ .user_id = user_id } }) catch {};
+            return;
+        },
+        .spawn => {},
+    }
+
+    if (jobs_db.enqueue(&app_state.conn, allocator, .{ .deliver_actor_update = .{ .user_id = user_id } }, .{})) |_| {
+        return;
+    } else |err| {
+        app_state.logger.err("deliverActorUpdate: enqueue failed err={any}", .{err});
+        // Fallback to per-job thread execution.
+    }
+
+    const job = std.heap.page_allocator.create(DeliverActorUpdateJob) catch return;
+    errdefer std.heap.page_allocator.destroy(job);
+
+    job.* = .{
+        .cfg = app_state.cfg,
+        .logger = app_state.logger,
+        .user_id = user_id,
+    };
+
+    var t = std.Thread.spawn(.{}, DeliverActorUpdateJob.run, .{job}) catch |err| {
+        app_state.logger.err("deliverActorUpdate: thread spawn failed err={any}", .{err});
+        return;
+    };
+    t.detach();
+}
+
 pub fn deliverDeleteToFollowers(
     app_state: *app.App,
     allocator: std.mem.Allocator,
@@ -1064,5 +1111,45 @@ const DeliverDeleteJob = struct {
         if (st.?.deleted_at == null) return;
 
         federation.deliverDeleteToFollowers(&thread_app, a, user.?, st.?) catch {};
+    }
+};
+
+const DeliverActorUpdateJob = struct {
+    cfg: config.Config,
+    logger: *log.Logger,
+    user_id: i64,
+
+    fn run(job: *@This()) void {
+        defer std.heap.page_allocator.destroy(job);
+
+        var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+
+        var conn = db.Db.open(a, job.cfg.db_path) catch return;
+        defer conn.close();
+
+        var hub: streaming_hub.Hub = streaming_hub.Hub.init(std.heap.page_allocator);
+        defer hub.deinit();
+
+        var thread_app: app.App = .{
+            .allocator = a,
+            .cfg = job.cfg,
+            .conn = conn,
+            .logger = job.logger,
+            .jobs_mode = .sync,
+            .jobs_queue = .{},
+            .streaming = &hub,
+            .transport = undefined,
+            .null_transport = transport.NullTransport.init(),
+            .real_transport = transport.RealTransport.init(a, job.cfg) catch return,
+        };
+        thread_app.transport = thread_app.real_transport.transport();
+        defer thread_app.transport.deinit();
+
+        const user = users.lookupUserById(&thread_app.conn, a, job.user_id) catch null;
+        if (user == null) return;
+
+        federation.deliverActorUpdate(&thread_app, a, user.?) catch {};
     }
 };

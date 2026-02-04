@@ -1544,6 +1544,15 @@ test "PATCH /api/v1/accounts/update_credentials updates display_name and note" {
     });
     try std.testing.expectEqual(std.http.Status.ok, update_resp.status);
 
+    var queued = app_state.jobs_queue.drain();
+    defer {
+        for (queued.items) |*j| j.deinit(std.testing.allocator);
+        queued.deinit(std.testing.allocator);
+    }
+    try std.testing.expectEqual(@as(usize, 1), queued.items.len);
+    try std.testing.expect(queued.items[0] == .deliver_actor_update);
+    try std.testing.expectEqual(user_id, queued.items[0].deliver_actor_update.user_id);
+
     var update_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, update_resp.body, .{});
     defer update_json.deinit();
     try std.testing.expectEqualStrings("Alice", update_json.value.object.get("display_name").?.string);
@@ -1622,6 +1631,20 @@ test "PATCH /api/v1/accounts/update_credentials accepts avatar and header upload
     const header_url = update_json.value.object.get("header_static").?.string;
     try std.testing.expect(std.mem.startsWith(u8, avatar_url, "http://example.test/media/"));
     try std.testing.expect(std.mem.startsWith(u8, header_url, "http://example.test/media/"));
+
+    const actor_resp = handle(&app_state, a, .{
+        .method = .GET,
+        .target = "/users/alice",
+    });
+    try std.testing.expectEqual(std.http.Status.ok, actor_resp.status);
+
+    var actor_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, actor_resp.body, .{});
+    defer actor_json.deinit();
+
+    const actor_icon_url = actor_json.value.object.get("icon").?.object.get("url").?.string;
+    const actor_image_url = actor_json.value.object.get("image").?.object.get("url").?.string;
+    try std.testing.expectEqualStrings(avatar_url, actor_icon_url);
+    try std.testing.expectEqualStrings(header_url, actor_image_url);
 
     const avatar_token = avatar_url["http://example.test/media/".len..];
     const header_token = header_url["http://example.test/media/".len..];
