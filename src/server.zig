@@ -388,19 +388,42 @@ fn writeResponse(allocator: std.mem.Allocator, request: *http.Server.Request, re
         .{ .name = "access-control-max-age", .value = "86400" },
     };
 
-    const header_count: usize = 1 + cors_headers.len + resp.headers.len;
+    const base_security_headers = [_]http.Header{
+        .{ .name = "x-content-type-options", .value = "nosniff" },
+        .{ .name = "referrer-policy", .value = "no-referrer" },
+        .{ .name = "x-frame-options", .value = "deny" },
+    };
+    const html_security_headers = [_]http.Header{
+        .{ .name = "content-security-policy", .value = "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'" },
+    };
+
     var stack_headers: [16]http.Header = undefined;
+
+    const content_type = if (headerValueIsSafe(resp.content_type)) resp.content_type else "application/octet-stream";
+    const include_csp = std.mem.startsWith(u8, content_type, "text/html");
+    const security_len: usize = base_security_headers.len + (if (include_csp) html_security_headers.len else 0);
+
+    const header_count: usize = 1 + cors_headers.len + security_len + resp.headers.len;
     const headers = if (header_count <= stack_headers.len)
         stack_headers[0..header_count]
     else
         try allocator.alloc(http.Header, header_count);
 
-    const content_type = if (headerValueIsSafe(resp.content_type)) resp.content_type else "application/octet-stream";
     headers[0] = .{ .name = "content-type", .value = content_type };
 
     for (cors_headers, 0..) |h, i| headers[i + 1] = h;
 
     var used: usize = 1 + cors_headers.len;
+    for (base_security_headers) |h| {
+        headers[used] = h;
+        used += 1;
+    }
+    if (include_csp) {
+        for (html_security_headers) |h| {
+            headers[used] = h;
+            used += 1;
+        }
+    }
     for (resp.headers) |h| {
         if (!headerValueIsSafe(h.value)) continue;
         headers[used] = h;
@@ -484,8 +507,69 @@ test "serveOnce: GET /healthz -> 200" {
 
             const resp = buf[0..used];
 
+            var lower_buf: [4096]u8 = undefined;
+            const lower = std.ascii.lowerString(lower_buf[0..resp.len], resp);
+
             c.ok = std.mem.startsWith(u8, resp, "HTTP/1.1 200") and
-                (std.mem.indexOf(u8, resp, "\r\n\r\nok\n") != null);
+                (std.mem.indexOf(u8, resp, "\r\n\r\nok\n") != null) and
+                (std.mem.indexOf(u8, lower, "\r\nx-content-type-options: nosniff\r\n") != null) and
+                (std.mem.indexOf(u8, lower, "\r\nreferrer-policy: no-referrer\r\n") != null) and
+                (std.mem.indexOf(u8, lower, "\r\nx-frame-options: deny\r\n") != null);
+        }
+    };
+
+    var t = try std.Thread.spawn(.{}, Client.run, .{&ctx});
+
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    try serveOnce(&app_state, &listener);
+    t.join();
+
+    try std.testing.expect(ctx.ok);
+}
+
+test "serveOnce: GET /login includes CSP header" {
+    const listen_address = try net.Address.parseIp("127.0.0.1", 0);
+    var listener = try listen_address.listen(.{ .reuse_address = true });
+    defer listener.deinit();
+
+    const addr = listener.listen_address;
+
+    var ctx: struct {
+        addr: net.Address,
+        ok: bool = false,
+    } = .{ .addr = addr };
+
+    const Client = struct {
+        fn run(c: *@TypeOf(ctx)) !void {
+            var stream = try net.tcpConnectToAddress(c.addr);
+            defer stream.close();
+
+            const req = "GET /login HTTP/1.1\r\n" ++
+                "Host: localhost\r\n" ++
+                "Connection: close\r\n" ++
+                "\r\n";
+
+            try writeAll(stream.handle, req);
+
+            var buf: [4096]u8 = undefined;
+            var used: usize = 0;
+
+            while (used < buf.len) {
+                const n = try std.posix.read(stream.handle, buf[used..]);
+                if (n == 0) break;
+                used += n;
+            }
+
+            const resp = buf[0..used];
+
+            var lower_buf: [4096]u8 = undefined;
+            const lower = std.ascii.lowerString(lower_buf[0..resp.len], resp);
+
+            c.ok = std.mem.startsWith(u8, resp, "HTTP/1.1 200") and
+                (std.mem.indexOf(u8, lower, "\r\ncontent-security-policy:") != null) and
+                (std.mem.indexOf(u8, lower, "frame-ancestors 'none'") != null);
         }
     };
 
