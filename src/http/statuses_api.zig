@@ -3,6 +3,7 @@ const std = @import("std");
 const app = @import("../app.zig");
 const background = @import("../background.zig");
 const common = @import("common.zig");
+const db = @import("../db.zig");
 const http_types = @import("../http_types.zig");
 const masto = @import("mastodon.zig");
 const media = @import("../media.zig");
@@ -72,6 +73,48 @@ pub fn statusesBulkGet(app_state: *app.App, allocator: std.mem.Allocator, req: h
     }
 
     return common.jsonOk(allocator, payloads.items);
+}
+
+fn listThreadDescendantIds(
+    conn: *db.Db,
+    allocator: std.mem.Allocator,
+    root_id: i64,
+    limit: usize,
+) (db.Error || std.mem.Allocator.Error)![]i64 {
+    const lim: i64 = @intCast(@min(limit, 200));
+
+    var stmt = try conn.prepareZ(
+        \\WITH RECURSIVE descendants(id, created_at) AS (
+        \\  SELECT id, created_at FROM statuses WHERE in_reply_to_id = ?1 AND deleted_at IS NULL
+        \\  UNION ALL
+        \\  SELECT id, created_at FROM remote_statuses WHERE in_reply_to_id = ?1 AND deleted_at IS NULL
+        \\  UNION ALL
+        \\  SELECT s.id, s.created_at FROM statuses s JOIN descendants d ON s.in_reply_to_id = d.id WHERE s.deleted_at IS NULL
+        \\  UNION ALL
+        \\  SELECT r.id, r.created_at FROM remote_statuses r JOIN descendants d ON r.in_reply_to_id = d.id WHERE r.deleted_at IS NULL
+        \\)
+        \\SELECT id FROM descendants ORDER BY created_at ASC, id ASC LIMIT ?2;
+    ++ "\x00",
+    );
+    defer stmt.finalize();
+
+    try stmt.bindInt64(1, root_id);
+    try stmt.bindInt64(2, lim);
+
+    var out: std.ArrayListUnmanaged(i64) = .empty;
+    errdefer out.deinit(allocator);
+
+    while (true) {
+        switch (try stmt.step()) {
+            .done => break,
+            .row => {
+                out.append(allocator, stmt.columnInt64(0)) catch
+                    return error.OutOfMemory;
+            },
+        }
+    }
+
+    return out.toOwnedSlice(allocator);
 }
 
 pub fn statusAccountsListEmpty(app_state: *app.App, allocator: std.mem.Allocator, req: http_types.Request, path: []const u8) http_types.Response {
@@ -409,15 +452,32 @@ pub fn statusContext(app_state: *app.App, allocator: std.mem.Allocator, req: htt
         std.mem.reverse(StatusPayload, ancestors.items);
     }
 
-    const desc_list = statuses.listDescendants(&app_state.conn, allocator, id, 200) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-
     var descendants: std.ArrayListUnmanaged(StatusPayload) = .empty;
     defer descendants.deinit(allocator);
 
-    for (desc_list) |st| {
-        if (st.user_id != info.?.user_id) continue;
-        descendants.append(allocator, masto.makeStatusPayloadForViewer(app_state, allocator, user.?, st, info.?.user_id)) catch
+    const desc_ids = listThreadDescendantIds(&app_state.conn, allocator, id, 200) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    for (desc_ids) |desc_id| {
+        if (desc_id < 0) {
+            const st = remote_statuses.lookup(&app_state.conn, allocator, desc_id) catch
+                return .{ .status = .internal_server_error, .body = "internal server error\n" };
+            if (st == null) continue;
+
+            const actor = remote_actors.lookupById(&app_state.conn, allocator, st.?.remote_actor_id) catch
+                return .{ .status = .internal_server_error, .body = "internal server error\n" };
+            if (actor == null) continue;
+
+            descendants.append(allocator, masto.makeRemoteStatusPayloadForViewer(app_state, allocator, actor.?, st.?, info.?.user_id)) catch
+                return .{ .status = .internal_server_error, .body = "internal server error\n" };
+            continue;
+        }
+
+        const st = statuses.lookup(&app_state.conn, allocator, desc_id) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        if (st == null) continue;
+        if (st.?.user_id != info.?.user_id) continue;
+        descendants.append(allocator, masto.makeStatusPayloadForViewer(app_state, allocator, user.?, st.?, info.?.user_id)) catch
             return .{ .status = .internal_server_error, .body = "internal server error\n" };
     }
 

@@ -2374,6 +2374,116 @@ test "statuses: context endpoint includes ancestors and descendants for replies"
     try std.testing.expectEqual(@as(usize, 0), reply_descendants.array.items.len);
 }
 
+test "statuses: context includes remote replies to local statuses" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const app_creds = try oauth.createApp(
+        &app_state.conn,
+        a,
+        "pl-fe",
+        "urn:ietf:wg:oauth:2.0:oob",
+        "read write",
+        "",
+    );
+    const token = try oauth.createAccessToken(&app_state.conn, a, app_creds.id, user_id, "read write");
+    const auth_header = try std.fmt.allocPrint(a, "Bearer {s}", .{token});
+
+    const root_resp = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/api/v1/statuses",
+        .content_type = "application/x-www-form-urlencoded",
+        .body = "status=root&visibility=public",
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, root_resp.status);
+
+    var root_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, root_resp.body, .{});
+    defer root_json.deinit();
+    const root_id = root_json.value.object.get("id").?.string;
+
+    const root_note_id = try std.fmt.allocPrint(a, "http://example.test/users/alice/statuses/{s}", .{root_id});
+
+    const remote_kp = try @import("crypto_rsa.zig").generateRsaKeyPairPem(a, 512);
+    const remote_key_id = "https://remote.test/users/bob#main-key";
+    const remote_actor_id = "https://remote.test/users/bob";
+
+    try remote_actors.upsert(&app_state.conn, .{
+        .id = remote_actor_id,
+        .inbox = "https://remote.test/users/bob/inbox",
+        .shared_inbox = null,
+        .preferred_username = "bob",
+        .domain = "remote.test",
+        .public_key_pem = remote_kp.public_key_pem,
+    });
+
+    const inbox_body = try std.fmt.allocPrint(
+        a,
+        \\{{"@context":"https://www.w3.org/ns/activitystreams","type":"Create","actor":"{s}","object":{{"id":"https://remote.test/notes/reply1","type":"Note","content":"<p>Remote reply</p>","published":"2020-01-01T00:00:00.000Z","inReplyTo":"{s}"}}}}
+    ,
+        .{ remote_actor_id, root_note_id },
+    );
+
+    const inbox_req = try signedInboxRequest(
+        a,
+        "example.test",
+        "/users/alice/inbox",
+        inbox_body,
+        remote_key_id,
+        remote_kp.private_key_pem,
+    );
+    const inbox_resp = handle(&app_state, a, inbox_req);
+    try std.testing.expectEqual(std.http.Status.accepted, inbox_resp.status);
+
+    const remote_st = (try remote_statuses.lookupByUri(&app_state.conn, a, "https://remote.test/notes/reply1")).?;
+    const remote_id_str = try std.fmt.allocPrint(a, "{d}", .{remote_st.id});
+
+    const local_reply_body = try std.fmt.allocPrint(
+        a,
+        "status=Local%20reply&visibility=public&in_reply_to_id={s}",
+        .{remote_id_str},
+    );
+    const local_reply_resp = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/api/v1/statuses",
+        .content_type = "application/x-www-form-urlencoded",
+        .body = local_reply_body,
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, local_reply_resp.status);
+
+    const ctx_target = try std.fmt.allocPrint(a, "/api/v1/statuses/{s}/context", .{root_id});
+    const ctx_resp = handle(&app_state, a, .{
+        .method = .GET,
+        .target = ctx_target,
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, ctx_resp.status);
+
+    var ctx_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, ctx_resp.body, .{});
+    defer ctx_json.deinit();
+
+    const descendants = ctx_json.value.object.get("descendants").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), descendants.len);
+
+    var saw_remote: bool = false;
+    var saw_local: bool = false;
+    for (descendants) |it| {
+        const content = it.object.get("content").?.string;
+        if (std.mem.eql(u8, content, "<p>Remote reply</p>")) saw_remote = true;
+        if (std.mem.eql(u8, content, "<p>Local reply</p>")) saw_local = true;
+    }
+    try std.testing.expect(saw_remote);
+    try std.testing.expect(saw_local);
+}
+
 test "statuses: action endpoints update relationship booleans" {
     var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
     defer app_state.deinit();
