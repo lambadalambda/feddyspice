@@ -194,6 +194,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Inbox handling now supports ActivityPub `Like` / `Announce` / `Undo(Like|Announce)` on local statuses, emitting favourite/reblog notifications (and streaming events) for the status owner.
 - Added `status_reactions` table to track remote favourites/reblogs on local statuses (idempotency + Undo support).
 - Inbox handling now supports ActivityPub `Update(Person)` to refresh remote actor metadata (inbox/sharedInbox/public key/avatar/header).
+- Inbox handling now supports ActivityPub `Update(Note)` to apply remote post edits (updates stored content/attachments/visibility and emits a streaming `update`).
 - Status payloads now reflect remote favourites/reblogs via `favourites_count` and `reblogs_count`.
 - `GET /api/v1/statuses/:id/{favourited_by,reblogged_by}` now returns real account lists for remote favourites/reblogs of local statuses.
 - `POST /api/v1/statuses/:id/{favourite,unfavourite}` now federates `Like` / `Undo(Like)` for remote statuses.

@@ -161,6 +161,36 @@ pub fn markDeletedByUri(conn: *db.Db, remote_uri: []const u8, deleted_at: ?[]con
     return conn.changes() > 0;
 }
 
+pub fn updateByUri(
+    conn: *db.Db,
+    remote_uri: []const u8,
+    content_html: []const u8,
+    attachments_json: ?[]const u8,
+    visibility: []const u8,
+) db.Error!bool {
+    var stmt = try conn.prepareZ(
+        "UPDATE remote_statuses SET content_html = ?2, attachments_json = ?3, visibility = ?4\n" ++
+            "WHERE remote_uri = ?1 AND deleted_at IS NULL;\x00",
+    );
+    defer stmt.finalize();
+
+    try stmt.bindText(1, remote_uri);
+    try stmt.bindText(2, content_html);
+    if (attachments_json) |aj| {
+        try stmt.bindText(3, aj);
+    } else {
+        try stmt.bindNull(3);
+    }
+    try stmt.bindText(4, visibility);
+
+    switch (try stmt.step()) {
+        .done => {},
+        .row => return error.Sqlite,
+    }
+
+    return conn.changes() > 0;
+}
+
 pub fn createIfNotExists(
     conn: *db.Db,
     allocator: std.mem.Allocator,

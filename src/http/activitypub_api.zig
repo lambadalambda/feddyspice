@@ -1122,6 +1122,130 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
             return .{ .status = .accepted, .body = "ok\n" };
         }
 
+        if (std.mem.eql(u8, obj_type_val.string, "Note")) {
+            if (!util_url.isHttpOrHttpsUrl(obj_id_val.string)) return .{ .status = .accepted, .body = "ignored\n" };
+
+            const content_val = obj_val.object.get("content") orelse return .{ .status = .accepted, .body = "ignored\n" };
+            if (content_val != .string) return .{ .status = .accepted, .body = "ignored\n" };
+
+            const remote_status = blk: {
+                if (remote_statuses.lookupByUri(&app_state.conn, allocator, obj_id_val.string) catch
+                    return .{ .status = .internal_server_error, .body = "internal server error\n" }) |found|
+                {
+                    break :blk found;
+                }
+
+                const trimmed = trimTrailingSlash(obj_id_val.string);
+                if (!std.mem.eql(u8, trimmed, obj_id_val.string)) {
+                    if (remote_statuses.lookupByUri(&app_state.conn, allocator, trimmed) catch
+                        return .{ .status = .internal_server_error, .body = "internal server error\n" }) |found|
+                    {
+                        break :blk found;
+                    }
+                } else {
+                    const with_slash = std.fmt.allocPrint(allocator, "{s}/", .{obj_id_val.string}) catch
+                        break :blk null;
+                    if (remote_statuses.lookupByUri(&app_state.conn, allocator, with_slash) catch
+                        return .{ .status = .internal_server_error, .body = "internal server error\n" }) |found|
+                    {
+                        break :blk found;
+                    }
+                }
+
+                const stripped = stripQueryAndFragment(obj_id_val.string);
+                if (!std.mem.eql(u8, stripped, obj_id_val.string)) {
+                    if (remote_statuses.lookupByUri(&app_state.conn, allocator, stripped) catch
+                        return .{ .status = .internal_server_error, .body = "internal server error\n" }) |found|
+                    {
+                        break :blk found;
+                    }
+
+                    const stripped_trimmed = trimTrailingSlash(stripped);
+                    if (!std.mem.eql(u8, stripped_trimmed, stripped)) {
+                        if (remote_statuses.lookupByUri(&app_state.conn, allocator, stripped_trimmed) catch
+                            return .{ .status = .internal_server_error, .body = "internal server error\n" }) |found|
+                        {
+                            break :blk found;
+                        }
+                    } else {
+                        const with_slash = std.fmt.allocPrint(allocator, "{s}/", .{stripped}) catch
+                            break :blk null;
+                        if (remote_statuses.lookupByUri(&app_state.conn, allocator, with_slash) catch
+                            return .{ .status = .internal_server_error, .body = "internal server error\n" }) |found|
+                        {
+                            break :blk found;
+                        }
+                    }
+                }
+
+                break :blk null;
+            };
+            if (remote_status == null) return .{ .status = .accepted, .body = "ignored\n" };
+            if (!std.mem.eql(u8, remote_status.?.remote_actor_id, remote_actor.?.id)) {
+                return .{ .status = .accepted, .body = "ignored\n" };
+            }
+
+            const safe_content_html = util_html.safeHtmlFromRemoteHtmlAlloc(allocator, content_val.string) catch
+                return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+            var attachments_json: ?[]const u8 = remote_status.?.attachments_json;
+            if (obj_val.object.get("attachment") != null) {
+                attachments_json = remoteAttachmentsJsonAlloc(allocator, obj_val.object) catch
+                    return .{ .status = .internal_server_error, .body = "internal server error\n" };
+            }
+
+            const visibility: []const u8 = blk: {
+                const has_recipients =
+                    (parsed.value.object.get("to") != null) or
+                    (parsed.value.object.get("cc") != null) or
+                    (obj_val.object.get("to") != null) or
+                    (obj_val.object.get("cc") != null);
+                if (!has_recipients) break :blk remote_status.?.visibility;
+
+                const public_iri = "https://www.w3.org/ns/activitystreams#Public";
+
+                const public_in_to =
+                    jsonContainsIri(parsed.value.object.get("to"), public_iri) or
+                    jsonContainsIri(obj_val.object.get("to"), public_iri);
+                if (public_in_to) break :blk "public";
+
+                const public_in_cc =
+                    jsonContainsIri(parsed.value.object.get("cc"), public_iri) or
+                    jsonContainsIri(obj_val.object.get("cc"), public_iri);
+                if (public_in_cc) break :blk "unlisted";
+
+                break :blk "direct";
+            };
+
+            const updated = remote_statuses.updateByUri(
+                &app_state.conn,
+                remote_status.?.remote_uri,
+                safe_content_html,
+                attachments_json,
+                visibility,
+            ) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+            if (updated) {
+                if (std.mem.eql(u8, visibility, "direct")) {
+                    conversations.upsertDirect(
+                        &app_state.conn,
+                        user.?.id,
+                        remote_actor.?.id,
+                        remote_status.?.id,
+                        received_at_ms,
+                    ) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
+                }
+
+                const st = (remote_statuses.lookupByUri(&app_state.conn, allocator, remote_status.?.remote_uri) catch
+                    return .{ .status = .internal_server_error, .body = "internal server error\n" }).?;
+                const st_resp = remoteStatusResponse(app_state, allocator, remote_actor.?, st);
+                app_state.streaming.publishUpdate(user.?.id, st_resp.body);
+            }
+
+            dedupe_keep = true;
+            return .{ .status = .accepted, .body = "ok\n" };
+        }
+
         return .{ .status = .accepted, .body = "ignored\n" };
     }
 

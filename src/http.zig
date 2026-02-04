@@ -6218,6 +6218,102 @@ test "POST /users/:name/inbox Update(Person) updates remote actor fields" {
     try std.testing.expectEqualStrings("https://remote.test/header2.png", actor2.header_url.?);
 }
 
+test "POST /users/:name/inbox Update(Note) updates remote status content and publishes streaming update" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const remote_kp = try @import("crypto_rsa.zig").generateRsaKeyPairPem(a, 512);
+    const remote_key_id = "https://remote.test/users/bob#main-key";
+    const remote_actor_id = "https://remote.test/users/bob";
+
+    try remote_actors.upsert(&app_state.conn, .{
+        .id = remote_actor_id,
+        .inbox = "https://remote.test/users/bob/inbox",
+        .shared_inbox = null,
+        .preferred_username = "bob",
+        .domain = "remote.test",
+        .public_key_pem = remote_kp.public_key_pem,
+    });
+
+    const remote_note_uri = "https://remote.test/notes/1";
+    const old_html = try @import("util/html.zig").safeHtmlFromRemoteHtmlAlloc(a, "<p>old</p>");
+
+    const created = try remote_statuses.createIfNotExists(
+        &app_state.conn,
+        a,
+        remote_note_uri,
+        remote_actor_id,
+        null,
+        old_html,
+        null,
+        "public",
+        "2020-01-01T00:00:00.000Z",
+    );
+
+    const sub = try app_state.streaming.subscribe(user_id, &.{.user});
+    defer app_state.streaming.unsubscribe(sub);
+
+    const new_content = "<p>new</p>";
+    const update_body = try std.json.Stringify.valueAlloc(
+        a,
+        .{
+            .@"@context" = "https://www.w3.org/ns/activitystreams",
+            .id = "https://remote.test/updates/n1",
+            .type = "Update",
+            .actor = remote_actor_id,
+            .object = .{
+                .id = remote_note_uri,
+                .type = "Note",
+                .content = new_content,
+                .to = [_][]const u8{"https://www.w3.org/ns/activitystreams#Public"},
+            },
+        },
+        .{},
+    );
+
+    const inbox_req = try signedInboxRequest(
+        a,
+        "example.test",
+        "/users/alice/inbox",
+        update_body,
+        remote_key_id,
+        remote_kp.private_key_pem,
+    );
+    const inbox_resp = handle(&app_state, a, inbox_req);
+    try std.testing.expectEqual(std.http.Status.accepted, inbox_resp.status);
+
+    const updated = (try remote_statuses.lookupByUri(&app_state.conn, a, remote_note_uri)).?;
+    const expected_html = try @import("util/html.zig").safeHtmlFromRemoteHtmlAlloc(a, new_content);
+    try std.testing.expectEqualStrings(expected_html, updated.content_html);
+
+    const msg = sub.pop() orelse {
+        try std.testing.expect(false);
+        return;
+    };
+    defer app_state.streaming.allocator.free(msg);
+
+    var env_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, msg, .{});
+    defer env_json.deinit();
+    try std.testing.expectEqualStrings("update", env_json.value.object.get("event").?.string);
+
+    const status_payload_str = env_json.value.object.get("payload").?.string;
+    var status_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, status_payload_str, .{});
+    defer status_json.deinit();
+
+    try std.testing.expect(status_json.value == .object);
+    try std.testing.expect(std.mem.indexOf(u8, status_json.value.object.get("content").?.string, "new") != null);
+
+    // Ensure we updated the existing status (not creating a new one).
+    try std.testing.expectEqual(created.id, updated.id);
+}
+
 test "POST /users/:name/inbox Like creates favourite notification" {
     var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
     defer app_state.deinit();
