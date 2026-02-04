@@ -28,6 +28,7 @@ This file tracks “good future refactors” and known risks. Add items whenever
 - [x] Reject excessively nested JSON request bodies before parsing (`FEDDYSPICE_JSON_MAX_NESTING_DEPTH`).
 - [x] Replay protection: dedupe signed inbox requests even when activity `id` is missing (hash fallback).
 - [x] Outbound transport: reject nonstandard ports by default; re-validate on redirects if we ever enable follow-redirects.
-- [ ] Add rate limiting/backpressure for high-risk entrypoints (login/token/apps/inbox) and remote fetch storms.
+- [x] Add rate limiting/backpressure for high-risk entrypoints (login/token/apps/inbox).
+- [ ] Add outbound fetch storm protections (per-domain concurrency/backoff).
 - [x] Add regression tests for visibility/data leakage (direct/private never exposed via public timelines or unauthenticated endpoints).
 - [ ] Document/decide media exposure expectations for non-public posts (capability URLs vs auth-gated).

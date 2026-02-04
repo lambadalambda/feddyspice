@@ -5,9 +5,14 @@ const common = @import("common.zig");
 const form = @import("../form.zig");
 const http_types = @import("../http_types.zig");
 const oauth = @import("../oauth.zig");
+const rate_limit = @import("../rate_limit.zig");
 const session = @import("session.zig");
 
 pub fn registerApp(app_state: *app.App, allocator: std.mem.Allocator, req: http_types.Request) http_types.Response {
+    const ok = rate_limit.allowNow(&app_state.conn, "apps_post", 60_000, 30) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (!ok) return .{ .status = .too_many_requests, .body = "too many requests\n" };
+
     var parsed = common.parseBodyParams(allocator, req) catch
         return .{ .status = .bad_request, .body = "invalid form\n" };
 
@@ -153,6 +158,10 @@ pub fn authorizePost(app_state: *app.App, allocator: std.mem.Allocator, req: htt
 }
 
 pub fn token(app_state: *app.App, allocator: std.mem.Allocator, req: http_types.Request) http_types.Response {
+    const ok = rate_limit.allowNow(&app_state.conn, "oauth_token", 60_000, 60) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (!ok) return oauthErrorResponse(allocator, .too_many_requests, "temporarily_unavailable", "too many requests");
+
     var parsed = common.parseBodyParams(allocator, req) catch
         return oauthErrorResponse(allocator, .bad_request, "invalid_request", "invalid form");
 

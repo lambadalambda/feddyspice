@@ -130,6 +130,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Outbound federation fetches now reject explicit nonstandard ports by default (`FEDDYSPICE_HTTP_ALLOW_NONSTANDARD_PORTS=false`) to reduce SSRF blast radius.
 - OAuth token responses include `Cache-Control: no-store` / `Pragma: no-cache`; HTML form POSTs (`/login`, `/signup`, `/oauth/authorize`) enforce same-origin when `Origin`/`Referer` is present.
 - Inbox idempotency now falls back to a body-hash dedupe key when an ActivityPub activity `id` is missing (reduces replay/dup processing).
+- Added basic SQLite-backed rate limiting for high-risk entrypoints (`/login`, `/signup`, `/oauth/token`, `/api/v1/apps`, and ActivityPub inbox) to reduce brute-force/DoS impact.
 - `Dockerfile` Zig download works on both amd64/arm64 Docker builders.
 - Mastodon-ish API endpoints accept client JSON + multipart form-data bodies (pl-fe/Elk compatibility) and send permissive CORS headers.
 - `/api/v2/instance` now advertises the correct streaming base URL (`ws(s)://domain`, not a nested `/api/v1/streaming` path).

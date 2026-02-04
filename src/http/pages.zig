@@ -4,6 +4,7 @@ const app = @import("../app.zig");
 const common = @import("common.zig");
 const form = @import("../form.zig");
 const http_types = @import("../http_types.zig");
+const rate_limit = @import("../rate_limit.zig");
 const sessions = @import("../sessions.zig");
 const session = @import("session.zig");
 const users = @import("../users.zig");
@@ -34,6 +35,9 @@ pub fn signupPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_t
         return .{ .status = .bad_request, .body = "invalid content-type\n" };
     }
     if (!common.isSameOrigin(req)) return .{ .status = .forbidden, .body = "forbidden\n" };
+    const ok = rate_limit.allowNow(&app_state.conn, "signup_post", 60_000, 10) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (!ok) return .{ .status = .too_many_requests, .body = "too many requests\n" };
 
     var parsed = form.parse(allocator, req.body) catch
         return .{ .status = .bad_request, .body = "invalid form\n" };
@@ -100,6 +104,9 @@ pub fn loginPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
         return .{ .status = .bad_request, .body = "invalid content-type\n" };
     }
     if (!common.isSameOrigin(req)) return .{ .status = .forbidden, .body = "forbidden\n" };
+    const ok = rate_limit.allowNow(&app_state.conn, "login_post", 60_000, 20) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (!ok) return .{ .status = .too_many_requests, .body = "too many requests\n" };
 
     var parsed = form.parse(allocator, req.body) catch
         return .{ .status = .bad_request, .body = "invalid form\n" };

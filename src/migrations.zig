@@ -144,6 +144,11 @@ const migrations = [_]Migration{
         .name = "create_status_recipients",
         .sql = status_recipients_v19_sql,
     },
+    .{
+        .version = 20,
+        .name = "create_rate_limits",
+        .sql = rate_limits_v20_sql,
+    },
 };
 
 const schema_migrations_sql: [:0]const u8 =
@@ -409,6 +414,14 @@ const status_recipients_v19_sql: [:0]const u8 =
     \\CREATE INDEX IF NOT EXISTS status_recipients_status_id ON status_recipients(status_id);
 ++ "\x00";
 
+const rate_limits_v20_sql: [:0]const u8 =
+    \\CREATE TABLE IF NOT EXISTS rate_limits (
+    \\  key TEXT PRIMARY KEY,
+    \\  window_start_ms INTEGER NOT NULL,
+    \\  count INTEGER NOT NULL
+    \\);
+++ "\x00";
+
 test "migrate: creates users table and records version" {
     var conn = try db.Db.openZ(":memory:");
     defer conn.close();
@@ -463,6 +476,8 @@ test "migrate: creates users table and records version" {
     try std.testing.expectEqual(@as(i64, 18), v_stmt.columnInt64(0));
     try std.testing.expectEqual(db.Stmt.Step.row, try v_stmt.step());
     try std.testing.expectEqual(@as(i64, 19), v_stmt.columnInt64(0));
+    try std.testing.expectEqual(db.Stmt.Step.row, try v_stmt.step());
+    try std.testing.expectEqual(@as(i64, 20), v_stmt.columnInt64(0));
     try std.testing.expectEqual(db.Stmt.Step.done, try v_stmt.step());
 }
 
@@ -477,6 +492,6 @@ test "migrate: is idempotent" {
     defer stmt.finalize();
 
     try std.testing.expectEqual(db.Stmt.Step.row, try stmt.step());
-    try std.testing.expectEqual(@as(i64, 19), stmt.columnInt64(0));
+    try std.testing.expectEqual(@as(i64, 20), stmt.columnInt64(0));
     try std.testing.expectEqual(db.Stmt.Step.done, try stmt.step());
 }
