@@ -36,6 +36,7 @@ const media_api = @import("http/media_api.zig");
 const notifications_api = @import("http/notifications_api.zig");
 const conversations_api = @import("http/conversations_api.zig");
 const follows_api = @import("http/follows_api.zig");
+const compat_api = @import("http/compat_api.zig");
 
 const transparent_png = [_]u8{
     0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
@@ -191,11 +192,7 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
         return .{ .status = .not_implemented, .body = "streaming not implemented\n" };
     }
 
-    // --- Client-compat placeholders (Elk/pl-fe) ---
-    if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/custom_emojis")) {
-        return jsonOk(allocator, [_]i32{});
-    }
-
+    // --- Client-compat endpoints (Elk/pl-fe) ---
     if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/notifications")) {
         return notifications_api.notificationsGet(app_state, allocator, req);
     }
@@ -223,60 +220,8 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
         return conversations_api.conversationsRead(app_state, allocator, req, path);
     }
 
-    if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/follow_requests")) {
-        return jsonOk(allocator, [_]i32{});
-    }
-
-    if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/scheduled_statuses")) {
-        return jsonOk(allocator, [_]i32{});
-    }
-
-    if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/lists")) {
-        return jsonOk(allocator, [_]i32{});
-    }
-
-    if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/announcements")) {
-        return jsonOk(allocator, [_]i32{});
-    }
-
-    if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/trends/tags")) {
-        return jsonOk(allocator, [_]i32{});
-    }
-
-    if (req.method == .GET and std.mem.eql(u8, path, "/api/v2/filters")) {
-        return jsonOk(allocator, [_]i32{});
-    }
-
-    if (req.method == .GET and std.mem.eql(u8, path, "/api/v2/suggestions")) {
-        return jsonOk(allocator, [_]i32{});
-    }
-
-    if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/followed_tags")) {
-        return jsonOk(allocator, [_]i32{});
-    }
-
-    if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/preferences")) {
-        const payload: struct {} = .{};
-        return jsonOk(allocator, payload);
-    }
-
-    if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/push/subscription")) {
-        const payload: struct {} = .{};
-        return jsonOk(allocator, payload);
-    }
-
     if (req.method == .GET and std.mem.eql(u8, path, "/api/v2/search")) {
         return accounts_api.apiV2Search(app_state, allocator, req);
-    }
-
-    if (std.mem.eql(u8, path, "/api/v1/markers")) {
-        if (req.method == .GET or req.method == .POST) {
-            const updated_at = "1970-01-01T00:00:00.000Z";
-            return jsonOk(allocator, .{
-                .home = .{ .last_read_id = "0", .version = 0, .updated_at = updated_at },
-                .notifications = .{ .last_read_id = "0", .version = 0, .updated_at = updated_at },
-            });
-        }
     }
 
     if (req.method == .POST and std.mem.eql(u8, path, "/api/v1/apps")) {
@@ -399,18 +344,6 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
         return statuses_api.statusActionNoop(app_state, allocator, req, path, "/unbookmark");
     }
 
-    if (req.method == .GET and std.mem.startsWith(u8, path, "/api/v1/timelines/tag/")) {
-        return jsonOk(allocator, [_]i32{});
-    }
-
-    if (req.method == .GET and std.mem.startsWith(u8, path, "/api/v1/timelines/list/")) {
-        return jsonOk(allocator, [_]i32{});
-    }
-
-    if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/timelines/link")) {
-        return jsonOk(allocator, [_]i32{});
-    }
-
     if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/timelines/public")) {
         return timelines_api.publicTimeline(app_state, allocator, req);
     }
@@ -430,6 +363,8 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
     if (req.method == .DELETE and std.mem.startsWith(u8, path, "/api/v1/statuses/")) {
         return statuses_api.deleteStatus(app_state, allocator, req, path);
     }
+
+    if (compat_api.maybeHandle(allocator, req, path)) |resp| return resp;
 
     return .{ .status = .not_found, .body = "not found\n" };
 }

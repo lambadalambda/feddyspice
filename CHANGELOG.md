@@ -114,6 +114,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Added `src/http/notifications_api.zig` and moved notifications endpoints out of `src/http.zig` (`/api/v1/notifications`, `/api/v1/notifications/clear`, `/api/v1/notifications/:id/dismiss`).
 - Added `src/http/conversations_api.zig` and moved conversation endpoints out of `src/http.zig` (`/api/v1/conversations`, `/api/v1/conversations/:id/read`, `DELETE /api/v1/conversations/:id`).
 - Added `src/http/follows_api.zig` and moved `POST /api/v1/follows` out of `src/http.zig`.
+- Added `src/http/compat_api.zig` for client-compat placeholder endpoints (custom emojis, markers, preferences, and other empty-list endpoints).
 
 ### Fixed
 
