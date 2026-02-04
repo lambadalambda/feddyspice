@@ -40,7 +40,7 @@ This is a “rough backlog” based on Mastodon’s `config/routes/api.rb` and P
 - [x] Add app introspection: `GET /api/v1/apps/verify_credentials`.
 - [x] Add v1 search aliases: `GET /api/v1/search` and `GET /api/v1/accounts/search` (can delegate to `/api/v2/search`).
 - [x] Add missing discovery helpers: `GET /api/v1/trends` (alias to tags) and `GET /api/v1/suggestions` (+ `DELETE /api/v1/suggestions/:account_id`).
-- [ ] Add notification extras: `GET /api/v1/notifications/:id` and `GET /api/v1/notifications/unread_count`.
+- [x] Add notification extras: `GET /api/v1/notifications/:id` and `GET /api/v1/notifications/unread_count`.
 - [ ] Add status auxiliary endpoints: `GET /api/v1/statuses/:id/reblogged_by`, `/favourited_by`, `/history`, `/source` (placeholders ok initially).
 - [ ] Add bulk status lookup: `GET /api/v1/statuses?ids[]=...` (Mastodon “hydrate by id list” pattern).
 - [ ] Add direct timeline: `GET /api/v1/timelines/direct` (DMs), and make `GET /api/v1/timelines/tag/:tag` return real results (currently stubbed empty).

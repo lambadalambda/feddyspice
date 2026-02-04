@@ -196,6 +196,17 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
         return notifications_api.notificationsGet(app_state, allocator, req);
     }
 
+    if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/notifications/unread_count")) {
+        return notifications_api.notificationsUnreadCount(app_state, allocator, req);
+    }
+
+    if (req.method == .GET and std.mem.startsWith(u8, path, "/api/v1/notifications/")) {
+        const rest = path["/api/v1/notifications/".len..];
+        if (rest.len > 0 and std.mem.indexOfScalar(u8, rest, '/') == null) {
+            return notifications_api.notificationsShow(app_state, allocator, req, path);
+        }
+    }
+
     if (req.method == .POST and std.mem.eql(u8, path, "/api/v1/notifications/clear")) {
         return notifications_api.notificationsClear(app_state, allocator, req);
     }
@@ -756,6 +767,32 @@ test "notifications: GET/clear/dismiss" {
 
     const n_id = try notifications.create(&app_state.conn, user_id, "follow", "https://remote.test/users/bob", null);
 
+    const unread1 = handle(&app_state, a, .{
+        .method = .GET,
+        .target = "/api/v1/notifications/unread_count",
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, unread1.status);
+    var unread1_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, unread1.body, .{});
+    defer unread1_json.deinit();
+    switch (unread1_json.value.object.get("count").?) {
+        .integer => |i| try std.testing.expectEqual(@as(i64, 1), i),
+        .float => |f| try std.testing.expectEqual(@as(f64, 1), f),
+        else => return error.TestUnexpectedResult,
+    }
+
+    const show_target = try std.fmt.allocPrint(a, "/api/v1/notifications/{d}", .{n_id});
+    const show_resp = handle(&app_state, a, .{
+        .method = .GET,
+        .target = show_target,
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, show_resp.status);
+    var show_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, show_resp.body, .{});
+    defer show_json.deinit();
+    try std.testing.expectEqualStrings("follow", show_json.value.object.get("type").?.string);
+    try std.testing.expectEqualStrings("bob", show_json.value.object.get("account").?.object.get("username").?.string);
+
     const list_resp = handle(&app_state, a, .{
         .method = .GET,
         .target = "/api/v1/notifications?limit=20",
@@ -779,6 +816,20 @@ test "notifications: GET/clear/dismiss" {
     });
     try std.testing.expectEqual(std.http.Status.ok, dismiss_resp.status);
 
+    const unread2 = handle(&app_state, a, .{
+        .method = .GET,
+        .target = "/api/v1/notifications/unread_count",
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, unread2.status);
+    var unread2_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, unread2.body, .{});
+    defer unread2_json.deinit();
+    switch (unread2_json.value.object.get("count").?) {
+        .integer => |i| try std.testing.expectEqual(@as(i64, 0), i),
+        .float => |f| try std.testing.expectEqual(@as(f64, 0), f),
+        else => return error.TestUnexpectedResult,
+    }
+
     const clear_id = try notifications.create(&app_state.conn, user_id, "follow", "https://remote.test/users/bob", null);
     try std.testing.expect(clear_id > 0);
 
@@ -800,6 +851,20 @@ test "notifications: GET/clear/dismiss" {
     defer list2_json.deinit();
     try std.testing.expect(list2_json.value == .array);
     try std.testing.expectEqual(@as(usize, 0), list2_json.value.array.items.len);
+
+    const unread3 = handle(&app_state, a, .{
+        .method = .GET,
+        .target = "/api/v1/notifications/unread_count",
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, unread3.status);
+    var unread3_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, unread3.body, .{});
+    defer unread3_json.deinit();
+    switch (unread3_json.value.object.get("count").?) {
+        .integer => |i| try std.testing.expectEqual(@as(i64, 0), i),
+        .float => |f| try std.testing.expectEqual(@as(f64, 0), f),
+        else => return error.TestUnexpectedResult,
+    }
 }
 
 test "conversations: list/read/delete direct messages" {

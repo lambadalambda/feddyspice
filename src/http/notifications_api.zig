@@ -20,6 +20,28 @@ const NotificationPayload = struct {
     status: ?masto.StatusPayload = null,
 };
 
+fn makeNotificationPayload(
+    app_state: *app.App,
+    allocator: std.mem.Allocator,
+    n: notifications.Notification,
+) ?NotificationPayload {
+    const actor = remote_actors.lookupById(&app_state.conn, allocator, n.actor_id) catch return null;
+    if (actor == null) return null;
+
+    const api_id = util_ids.remoteAccountApiIdAlloc(app_state, allocator, actor.?.id);
+    const acct = masto.makeRemoteAccountPayload(app_state, allocator, api_id, actor.?);
+
+    const id_str = std.fmt.allocPrint(allocator, "{d}", .{n.id}) catch "0";
+
+    return .{
+        .id = id_str,
+        .type = n.kind,
+        .created_at = n.created_at,
+        .account = acct,
+        .status = null,
+    };
+}
+
 pub fn notificationsGet(app_state: *app.App, allocator: std.mem.Allocator, req: http_types.Request) http_types.Response {
     const token = common.bearerToken(req.authorization) orelse return common.unauthorized(allocator);
     const info = oauth.verifyAccessToken(&app_state.conn, allocator, token) catch
@@ -47,23 +69,49 @@ pub fn notificationsGet(app_state: *app.App, allocator: std.mem.Allocator, req: 
     defer out.deinit(allocator);
 
     for (rows) |n| {
-        const actor = remote_actors.lookupById(&app_state.conn, allocator, n.actor_id) catch
-            return .{ .status = .internal_server_error, .body = "internal server error\n" };
-        if (actor == null) continue;
-
-        const api_id = util_ids.remoteAccountApiIdAlloc(app_state, allocator, actor.?.id);
-        const acct = masto.makeRemoteAccountPayload(app_state, allocator, api_id, actor.?);
-
-        out.append(allocator, .{
-            .id = std.fmt.allocPrint(allocator, "{d}", .{n.id}) catch "0",
-            .type = n.kind,
-            .created_at = n.created_at,
-            .account = acct,
-            .status = null,
-        }) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        if (makeNotificationPayload(app_state, allocator, n)) |p| {
+            out.append(allocator, p) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        }
     }
 
     return common.jsonOk(allocator, out.items);
+}
+
+pub fn notificationsUnreadCount(app_state: *app.App, allocator: std.mem.Allocator, req: http_types.Request) http_types.Response {
+    const token = common.bearerToken(req.authorization) orelse return common.unauthorized(allocator);
+    const info = oauth.verifyAccessToken(&app_state.conn, allocator, token) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (info == null) return common.unauthorized(allocator);
+
+    const cnt = notifications.count(&app_state.conn, info.?.user_id) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    return common.jsonOk(allocator, .{ .count = cnt });
+}
+
+pub fn notificationsShow(app_state: *app.App, allocator: std.mem.Allocator, req: http_types.Request, path: []const u8) http_types.Response {
+    const token = common.bearerToken(req.authorization) orelse return common.unauthorized(allocator);
+    const info = oauth.verifyAccessToken(&app_state.conn, allocator, token) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (info == null) return common.unauthorized(allocator);
+
+    const prefix = "/api/v1/notifications/";
+    if (!std.mem.startsWith(u8, path, prefix)) return .{ .status = .not_found, .body = "not found\n" };
+    const id_part = path[prefix.len..];
+    if (id_part.len == 0) return .{ .status = .not_found, .body = "not found\n" };
+    if (std.mem.indexOfScalar(u8, id_part, '/') != null) return .{ .status = .not_found, .body = "not found\n" };
+
+    const id = std.fmt.parseInt(i64, id_part, 10) catch
+        return .{ .status = .not_found, .body = "not found\n" };
+
+    const n = notifications.lookupById(&app_state.conn, allocator, info.?.user_id, id) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (n == null) return .{ .status = .not_found, .body = "not found\n" };
+
+    const payload = makeNotificationPayload(app_state, allocator, n.?) orelse
+        return .{ .status = .not_found, .body = "not found\n" };
+
+    return common.jsonOk(allocator, payload);
 }
 
 pub fn notificationsClear(app_state: *app.App, allocator: std.mem.Allocator, req: http_types.Request) http_types.Response {
