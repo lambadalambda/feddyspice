@@ -688,7 +688,7 @@ test "client compat: placeholder endpoints return JSON" {
         .{ .method = .GET, .target = "/api/v2/suggestions?", .kind = .array },
         .{ .method = .GET, .target = "/api/v1/directory?limit=1", .kind = .array },
         .{ .method = .GET, .target = "/api/v1/followed_tags", .kind = .array },
-        .{ .method = .GET, .target = "/api/v1/preferences", .kind = .object },
+        .{ .method = .GET, .target = "/api/v1/preferences", .kind = .object, .require_key = "posting:default:visibility" },
         .{ .method = .GET, .target = "/api/v1/push/subscription", .kind = .object },
         .{ .method = .GET, .target = "/api/v1/instance/extended_description", .kind = .object, .require_key = "content" },
         .{ .method = .GET, .target = "/api/v2/search?q=https%3A%2F%2Fexample.test%2F&resolve=true&limit=1", .kind = .object, .require_key = "accounts" },

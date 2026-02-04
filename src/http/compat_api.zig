@@ -57,7 +57,15 @@ pub fn maybeHandle(allocator: std.mem.Allocator, req: http_types.Request, path: 
     }
 
     if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/preferences")) {
-        const payload: struct {} = .{};
+        const payload = .{
+            .@"posting:default:visibility" = "public",
+            .@"posting:default:sensitive" = false,
+            .@"posting:default:language" = "en",
+            .@"posting:default:quote_policy" = "public",
+            .@"reading:expand:media" = "default",
+            .@"reading:expand:spoilers" = false,
+            .@"reading:autoplay:gifs" = false,
+        };
         return common.jsonOk(allocator, payload);
     }
 
