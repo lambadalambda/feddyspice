@@ -2464,6 +2464,79 @@ test "timelines: public timeline returns local statuses" {
     try std.testing.expectEqualStrings(id, tl_json.value.array.items[0].object.get("id").?.string);
 }
 
+test "timelines: public timeline excludes unlisted/private/direct statuses (local + remote)" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    _ = try statuses.create(&app_state.conn, a, user_id, "Lpub", "public");
+    _ = try statuses.create(&app_state.conn, a, user_id, "Lunl", "unlisted");
+    _ = try statuses.create(&app_state.conn, a, user_id, "Lpriv", "private");
+    _ = try statuses.create(&app_state.conn, a, user_id, "Ldm", "direct");
+
+    try remote_actors.upsert(&app_state.conn, .{
+        .id = "https://remote.test/users/bob",
+        .inbox = "https://remote.test/users/bob/inbox",
+        .shared_inbox = null,
+        .preferred_username = "bob",
+        .domain = "remote.test",
+        .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
+    });
+
+    _ = try remote_statuses.createIfNotExists(
+        &app_state.conn,
+        a,
+        "https://remote.test/notes/1",
+        "https://remote.test/users/bob",
+        "<p>Rpub</p>",
+        null,
+        "public",
+        "2020-01-01T00:00:00.000Z",
+    );
+    _ = try remote_statuses.createIfNotExists(
+        &app_state.conn,
+        a,
+        "https://remote.test/notes/2",
+        "https://remote.test/users/bob",
+        "<p>Rdm</p>",
+        null,
+        "direct",
+        "2020-01-01T00:00:01.000Z",
+    );
+
+    const tl_resp = handle(&app_state, a, .{
+        .method = .GET,
+        .target = "/api/v1/timelines/public",
+    });
+    try std.testing.expectEqual(std.http.Status.ok, tl_resp.status);
+
+    var tl_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, tl_resp.body, .{});
+    defer tl_json.deinit();
+
+    try std.testing.expect(tl_json.value == .array);
+    try std.testing.expectEqual(@as(usize, 2), tl_json.value.array.items.len);
+
+    var saw_lpub: bool = false;
+    var saw_rpub: bool = false;
+    for (tl_json.value.array.items) |it| {
+        const content = it.object.get("content").?.string;
+        if (std.mem.eql(u8, content, "<p>Lpub</p>")) saw_lpub = true;
+        if (std.mem.eql(u8, content, "<p>Rpub</p>")) saw_rpub = true;
+        try std.testing.expect(!std.mem.eql(u8, content, "<p>Lunl</p>"));
+        try std.testing.expect(!std.mem.eql(u8, content, "<p>Lpriv</p>"));
+        try std.testing.expect(!std.mem.eql(u8, content, "<p>Ldm</p>"));
+        try std.testing.expect(!std.mem.eql(u8, content, "<p>Rdm</p>"));
+    }
+    try std.testing.expect(saw_lpub);
+    try std.testing.expect(saw_rpub);
+}
+
 test "timelines: tag/list/link placeholders return empty arrays" {
     var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
     defer app_state.deinit();
