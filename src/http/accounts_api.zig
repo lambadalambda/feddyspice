@@ -20,6 +20,7 @@ const util_html = @import("../util/html.zig");
 const util_url = @import("../util/url.zig");
 
 const AccountPayload = masto.AccountPayload;
+const AccountCredentialsPayload = masto.AccountCredentialsPayload;
 const StatusPayload = masto.StatusPayload;
 
 const remote_actor_id_base: i64 = util_ids.remote_actor_id_base;
@@ -52,7 +53,7 @@ pub fn verifyCredentials(app_state: *app.App, allocator: std.mem.Allocator, req:
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
     if (user == null) return common.unauthorized(allocator);
 
-    return accountByUser(app_state, allocator, user.?);
+    return accountCredentialsByUser(app_state, allocator, user.?);
 }
 
 pub fn updateCredentials(app_state: *app.App, allocator: std.mem.Allocator, req: http_types.Request) http_types.Response {
@@ -177,7 +178,7 @@ pub fn updateCredentials(app_state: *app.App, allocator: std.mem.Allocator, req:
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
     if (updated_user == null) return common.unauthorized(allocator);
 
-    return accountByUser(app_state, allocator, updated_user.?);
+    return accountCredentialsByUser(app_state, allocator, updated_user.?);
 }
 
 pub fn lookup(app_state: *app.App, allocator: std.mem.Allocator, req: http_types.Request) http_types.Response {
@@ -200,6 +201,18 @@ pub fn lookup(app_state: *app.App, allocator: std.mem.Allocator, req: http_types
     if (user == null) return .{ .status = .not_found, .body = "not found\n" };
 
     return accountByUser(app_state, allocator, user.?);
+}
+
+pub fn accountCredentialsByUser(app_state: *app.App, allocator: std.mem.Allocator, user: users.User) http_types.Response {
+    const payload: AccountCredentialsPayload = masto.makeAccountCredentialsPayload(app_state, allocator, user);
+
+    const body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    return .{
+        .content_type = "application/json; charset=utf-8",
+        .body = body,
+    };
 }
 
 pub fn accountByUser(app_state: *app.App, allocator: std.mem.Allocator, user: users.User) http_types.Response {

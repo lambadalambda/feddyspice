@@ -1496,6 +1496,21 @@ test "GET /api/v1/accounts/verify_credentials works with bearer token" {
     try std.testing.expectEqualStrings("http://example.test/static/avatar.png", parsed.value.object.get("avatar_static").?.string);
     try std.testing.expectEqualStrings("http://example.test/static/header.png", parsed.value.object.get("header").?.string);
     try std.testing.expectEqualStrings("http://example.test/static/header.png", parsed.value.object.get("header_static").?.string);
+
+    // Elk expects CredentialAccount fields like `source` to exist.
+    const source = parsed.value.object.get("source") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(source == .object);
+    try std.testing.expectEqualStrings("", source.object.get("note").?.string);
+    try std.testing.expect(source.object.get("fields").? == .array);
+    try std.testing.expectEqual(@as(usize, 0), source.object.get("fields").?.array.items.len);
+    try std.testing.expectEqualStrings("public", source.object.get("privacy").?.string);
+    try std.testing.expect(source.object.get("language").? == .null);
+
+    const role = parsed.value.object.get("role") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(role == .object);
+    try std.testing.expect(role.object.get("id").? == .integer);
+    try std.testing.expectEqualStrings("Owner", role.object.get("name").?.string);
+    try std.testing.expectEqualStrings("", role.object.get("color").?.string);
 }
 
 test "PATCH /api/v1/accounts/update_credentials updates display_name and note" {

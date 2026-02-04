@@ -32,6 +32,73 @@ pub const AccountPayload = struct {
     header_static: []const u8,
 };
 
+pub const AccountFieldPayload = struct {
+    name: []const u8,
+    value: []const u8,
+    verified_at: ?[]const u8 = null,
+};
+
+pub const CustomEmojiPayload = struct {
+    shortcode: []const u8,
+    url: []const u8,
+    static_url: []const u8,
+    visible_in_picker: bool,
+    category: ?[]const u8 = null,
+};
+
+pub const RolePayload = struct {
+    id: i64,
+    name: []const u8,
+    color: []const u8,
+    position: i64,
+    permissions: i64,
+    highlighted: bool,
+    created_at: []const u8,
+    updated_at: []const u8,
+};
+
+pub const RoleSummaryPayload = struct {
+    id: i64,
+    name: []const u8,
+    color: []const u8,
+};
+
+pub const AccountSourcePayload = struct {
+    note: []const u8,
+    fields: []const AccountFieldPayload,
+    privacy: []const u8,
+    sensitive: bool,
+    language: ?[]const u8,
+    follow_requests_count: i64,
+};
+
+pub const AccountCredentialsPayload = struct {
+    id: []const u8,
+    username: []const u8,
+    acct: []const u8,
+    display_name: []const u8,
+    note: []const u8,
+    url: []const u8,
+    locked: bool,
+    bot: bool,
+    group: bool,
+    discoverable: bool,
+    created_at: []const u8,
+    last_status_at: []const u8,
+    followers_count: i64,
+    following_count: i64,
+    statuses_count: i64,
+    avatar: []const u8,
+    avatar_static: []const u8,
+    header: []const u8,
+    header_static: []const u8,
+    fields: []const AccountFieldPayload,
+    emojis: []const CustomEmojiPayload,
+    roles: []const RoleSummaryPayload,
+    source: AccountSourcePayload,
+    role: RolePayload,
+};
+
 pub const MediaAttachmentPayload = struct {
     id: []const u8,
     type: []const u8,
@@ -98,6 +165,67 @@ fn mediaAttachmentType(content_type: []const u8) []const u8 {
     if (std.mem.startsWith(u8, content_type, "video/")) return "video";
     if (std.mem.startsWith(u8, content_type, "audio/")) return "audio";
     return "unknown";
+}
+
+pub fn makeAccountCredentialsPayload(app_state: *app.App, allocator: std.mem.Allocator, user: users.User) AccountCredentialsPayload {
+    const id_str = std.fmt.allocPrint(allocator, "{d}", .{user.id}) catch "0";
+    const user_url = urls.userUrlAlloc(app_state, allocator, user.username) catch "";
+
+    const avatar_url = urls.userAvatarUrlAlloc(app_state, allocator, user);
+    const header_url = urls.userHeaderUrlAlloc(app_state, allocator, user);
+    const note_html = util_html.textToHtmlAlloc(allocator, user.note) catch user.note;
+
+    const last_status_at = if (user.created_at.len >= 10) user.created_at[0..10] else "1970-01-01";
+
+    const empty_fields: []const AccountFieldPayload = &.{};
+    const empty_emojis: []const CustomEmojiPayload = &.{};
+
+    const role_payload: RolePayload = .{
+        .id = 0,
+        .name = "Owner",
+        .color = "",
+        .position = 0,
+        .permissions = 0,
+        .highlighted = false,
+        .created_at = "1970-01-01T00:00:00.000Z",
+        .updated_at = "1970-01-01T00:00:00.000Z",
+    };
+
+    const roles_payload: []const RoleSummaryPayload = &.{.{ .id = 0, .name = "Owner", .color = "" }};
+
+    return .{
+        .id = id_str,
+        .username = user.username,
+        .acct = user.username,
+        .display_name = user.display_name,
+        .note = note_html,
+        .url = user_url,
+        .locked = false,
+        .bot = false,
+        .group = false,
+        .discoverable = true,
+        .created_at = user.created_at,
+        .last_status_at = last_status_at,
+        .followers_count = 0,
+        .following_count = 0,
+        .statuses_count = 0,
+        .avatar = avatar_url,
+        .avatar_static = avatar_url,
+        .header = header_url,
+        .header_static = header_url,
+        .fields = empty_fields,
+        .emojis = empty_emojis,
+        .roles = roles_payload,
+        .source = .{
+            .note = user.note,
+            .fields = empty_fields,
+            .privacy = "public",
+            .sensitive = false,
+            .language = null,
+            .follow_requests_count = 0,
+        },
+        .role = role_payload,
+    };
 }
 
 pub fn makeMediaAttachmentPayload(app_state: *app.App, allocator: std.mem.Allocator, meta: media.MediaMeta) MediaAttachmentPayload {

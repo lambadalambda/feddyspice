@@ -153,6 +153,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `GET /api/v2/instance` includes `configuration.urls.streaming` and `configuration.polls` to avoid Elk client crashes.
 - `GET /api/v1/markers` includes required `updated_at`, and status payloads include `sensitive` (pl-fe validation).
 - Status payloads now include additional Mastodon-required fields (`mentions`, `tags`, `emojis`, count fields, `spoiler_text`, `edited_at`, `application`) for Elk compatibility.
+- `GET /api/v1/accounts/verify_credentials` and `PATCH /api/v1/accounts/update_credentials` now return CredentialAccount fields (`source`, `role`, etc.) so Elk can render the composer.
 - SQLite statements bind text/blob as `SQLITE_TRANSIENT` to avoid pointer lifetime issues.
 - Inbound ActivityPub `Create` no longer silently ignores unknown actors (fetches the actor doc on first contact).
 - Inbound ActivityPub `Create` infers `direct` vs `public` visibility based on recipients.
