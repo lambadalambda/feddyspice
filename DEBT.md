@@ -10,7 +10,7 @@ This file tracks “good future refactors” and known risks. Add items whenever
   - [x] Core handlers split into `src/http/*` (discovery/instance/pages/oauth/accounts/statuses/timelines/activitypub).
   - [ ] Move remaining handlers still living in `src/http.zig` (media, notifications, conversations, misc compat endpoints).
 - [x] DRY federation delivery code (“sign + POST” loops) via shared helpers in `src/federation.zig`.
-- [ ] Store explicit recipient/mention metadata at post-create time (at least for `visibility=direct`) and base delivery on stored addressing rather than reparsing text.
+- [x] Store explicit recipient/mention metadata at post-create time (at least for `visibility=direct`) and base delivery on stored addressing rather than reparsing text.
 
 ## Performance / robustness
 

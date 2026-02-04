@@ -11,6 +11,7 @@ const http_signatures = @import("http_signatures.zig");
 const notifications = @import("notifications.zig");
 const remote_actors = @import("remote_actors.zig");
 const statuses = @import("statuses.zig");
+const status_recipients = @import("status_recipients.zig");
 const transport = @import("transport.zig");
 const url = @import("util/url.zig");
 const users = @import("users.zig");
@@ -463,6 +464,32 @@ fn collectMentionRecipients(app_state: *app.App, allocator: std.mem.Allocator, t
     return recipients.toOwnedSlice(allocator);
 }
 
+fn directRecipientActorIdsAlloc(app_state: *app.App, allocator: std.mem.Allocator, status_id: i64, text: []const u8) Error![][]u8 {
+    const existing = status_recipients.listRemoteActorIds(&app_state.conn, allocator, status_id, 50) catch
+        return error.RemoteFetchFailed;
+    if (existing.len > 0) return existing;
+
+    const recipients = try collectMentionRecipients(app_state, allocator, text);
+    if (recipients.len == 0) return try allocator.alloc([]u8, 0);
+
+    for (recipients) |actor| {
+        status_recipients.add(&app_state.conn, status_id, actor.id) catch
+            return error.RemoteFetchFailed;
+    }
+
+    var out: std.ArrayListUnmanaged([]u8) = .empty;
+    errdefer {
+        for (out.items) |s| allocator.free(s);
+        out.deinit(allocator);
+    }
+
+    for (recipients) |actor| {
+        try out.append(allocator, try allocator.dupe(u8, actor.id));
+    }
+
+    return out.toOwnedSlice(allocator);
+}
+
 pub fn resolveRemoteActorByHandle(app_state: *app.App, allocator: std.mem.Allocator, handle: []const u8) Error!remote_actors.RemoteActor {
     const remote = try parseHandle(handle);
 
@@ -736,8 +763,8 @@ pub fn deliverStatusToFollowers(app_state: *app.App, allocator: std.mem.Allocato
 }
 
 fn deliverDirectStatus(app_state: *app.App, allocator: std.mem.Allocator, user: users.User, st: statuses.Status) Error!void {
-    const recipients = try collectMentionRecipients(app_state, allocator, st.text);
-    if (recipients.len == 0) return;
+    const recipient_ids = try directRecipientActorIdsAlloc(app_state, allocator, st.id, st.text);
+    if (recipient_ids.len == 0) return;
 
     const base = try baseUrlAlloc(app_state, allocator);
     const local_actor_id = try std.fmt.allocPrint(allocator, "{s}/users/{s}", .{ base, user.username });
@@ -748,9 +775,9 @@ fn deliverDirectStatus(app_state: *app.App, allocator: std.mem.Allocator, user: 
 
     const content_html = try textToHtmlAlloc(allocator, st.text);
 
-    const to = try allocator.alloc([]const u8, recipients.len);
-    for (recipients, 0..) |actor, idx| {
-        to[idx] = actor.id;
+    const to = try allocator.alloc([]const u8, recipient_ids.len);
+    for (recipient_ids, 0..) |actor_id, idx| {
+        to[idx] = actor_id;
     }
     const cc: []const []const u8 = &.{};
 
@@ -778,7 +805,10 @@ fn deliverDirectStatus(app_state: *app.App, allocator: std.mem.Allocator, user: 
 
     const keys = try actor_keys.ensureForUser(&app_state.conn, allocator, user.id);
 
-    for (recipients) |actor| {
+    for (recipient_ids) |actor_id| {
+        const actor = (remote_actors.lookupById(&app_state.conn, allocator, actor_id) catch null) orelse
+            (ensureRemoteActorById(app_state, allocator, actor_id) catch null) orelse
+            continue;
         const inbox_url = deliveryInboxUrl(actor);
         deliverSignedInboxPostOkDiscardBody(app_state, allocator, keys.private_key_pem, key_id, inbox_url, create_body) catch |err| {
             app_state.logger.err("deliverDirectStatus: deliver failed inbox={s} err={any}", .{ inbox_url, err });
@@ -875,8 +905,8 @@ pub fn deliverDeleteToFollowers(app_state: *app.App, allocator: std.mem.Allocato
 fn deliverDirectDelete(app_state: *app.App, allocator: std.mem.Allocator, user: users.User, st: statuses.Status) Error!void {
     if (st.deleted_at == null) return;
 
-    const recipients = try collectMentionRecipients(app_state, allocator, st.text);
-    if (recipients.len == 0) return;
+    const recipient_ids = try directRecipientActorIdsAlloc(app_state, allocator, st.id, st.text);
+    if (recipient_ids.len == 0) return;
 
     const base = try baseUrlAlloc(app_state, allocator);
     const local_actor_id = try std.fmt.allocPrint(allocator, "{s}/users/{s}", .{ base, user.username });
@@ -885,9 +915,9 @@ fn deliverDirectDelete(app_state: *app.App, allocator: std.mem.Allocator, user: 
     const status_url = try std.fmt.allocPrint(allocator, "{s}/users/{s}/statuses/{d}", .{ base, user.username, st.id });
     const delete_id = try std.fmt.allocPrint(allocator, "{s}#delete", .{status_url});
 
-    const to = try allocator.alloc([]const u8, recipients.len);
-    for (recipients, 0..) |actor, idx| {
-        to[idx] = actor.id;
+    const to = try allocator.alloc([]const u8, recipient_ids.len);
+    for (recipient_ids, 0..) |actor_id, idx| {
+        to[idx] = actor_id;
     }
     const cc: []const []const u8 = &.{};
 
@@ -911,13 +941,53 @@ fn deliverDirectDelete(app_state: *app.App, allocator: std.mem.Allocator, user: 
 
     const keys = try actor_keys.ensureForUser(&app_state.conn, allocator, user.id);
 
-    for (recipients) |actor| {
+    for (recipient_ids) |actor_id| {
+        const actor = (remote_actors.lookupById(&app_state.conn, allocator, actor_id) catch null) orelse
+            (ensureRemoteActorById(app_state, allocator, actor_id) catch null) orelse
+            continue;
         const inbox_url = deliveryInboxUrl(actor);
         deliverSignedInboxPostOkDiscardBody(app_state, allocator, keys.private_key_pem, key_id, inbox_url, delete_body) catch |err| {
             app_state.logger.err("deliverDirectDelete: deliver failed inbox={s} err={any}", .{ inbox_url, err });
             continue;
         };
     }
+}
+
+test "deliverStatusToFollowers direct uses stored recipients without resolving handles" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    var mock = transport.MockTransport.init(std.testing.allocator);
+    app_state.transport = mock.transport();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const remote_actor_id = "http://remote.test/users/bob";
+    const remote_inbox = "http://remote.test/users/bob/inbox";
+    try remote_actors.upsert(&app_state.conn, .{
+        .id = remote_actor_id,
+        .inbox = remote_inbox,
+        .shared_inbox = null,
+        .preferred_username = "bob",
+        .domain = "remote.test",
+        .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
+    });
+
+    const user = (try users.lookupUserById(&app_state.conn, a, user_id)).?;
+    const st = try statuses.create(&app_state.conn, a, user_id, "hello @bob@remote.test", "direct");
+    try status_recipients.add(&app_state.conn, st.id, remote_actor_id);
+
+    try mock.pushExpected(.{ .method = .POST, .url = remote_inbox, .response_status = .accepted, .response_body = "" });
+
+    try deliverStatusToFollowers(&app_state, a, user, st);
+    try std.testing.expectEqual(@as(usize, 1), mock.requests.items.len);
+    try std.testing.expectEqual(std.http.Method.POST, mock.requests.items[0].method);
+    try std.testing.expectEqualStrings(remote_inbox, mock.requests.items[0].url);
 }
 
 test "followHandle sends signed Follow to remote inbox" {
