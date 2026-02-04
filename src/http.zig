@@ -1029,6 +1029,66 @@ test "notifications: GET/clear/dismiss" {
     }
 }
 
+test "notifications: includes status when status_id is set" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const app_creds = try oauth.createApp(
+        &app_state.conn,
+        a,
+        "pl-fe",
+        "urn:ietf:wg:oauth:2.0:oob",
+        "read",
+        "",
+    );
+    const token = try oauth.createAccessToken(&app_state.conn, a, app_creds.id, user_id, "read");
+    const auth_header = try std.fmt.allocPrint(a, "Bearer {s}", .{token});
+
+    const st = try statuses.create(&app_state.conn, a, user_id, "root", "public", null);
+
+    const remote_actor_id = "https://remote.test/users/bob";
+    try remote_actors.upsert(&app_state.conn, .{
+        .id = remote_actor_id,
+        .inbox = "https://remote.test/users/bob/inbox",
+        .shared_inbox = null,
+        .preferred_username = "bob",
+        .domain = "remote.test",
+        .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
+    });
+
+    _ = try notifications.create(&app_state.conn, user_id, "favourite", remote_actor_id, st.id);
+
+    const list_resp = handle(&app_state, a, .{
+        .method = .GET,
+        .target = "/api/v1/notifications?limit=20",
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, list_resp.status);
+
+    var list_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, list_resp.body, .{});
+    defer list_json.deinit();
+
+    try std.testing.expect(list_json.value == .array);
+    try std.testing.expectEqual(@as(usize, 1), list_json.value.array.items.len);
+
+    const n0 = list_json.value.array.items[0].object;
+    try std.testing.expectEqualStrings("favourite", n0.get("type").?.string);
+    try std.testing.expectEqualStrings("bob", n0.get("account").?.object.get("username").?.string);
+    try std.testing.expect(n0.get("status") != null);
+    try std.testing.expect(n0.get("status").? == .object);
+    try std.testing.expectEqualStrings(
+        try std.fmt.allocPrint(a, "{d}", .{st.id}),
+        n0.get("status").?.object.get("id").?.string,
+    );
+}
+
 test "conversations: list/read/delete direct messages" {
     var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
     defer app_state.deinit();

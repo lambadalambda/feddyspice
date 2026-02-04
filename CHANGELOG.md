@@ -177,6 +177,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Inbound ActivityPub `Create` infers `direct` vs `public` visibility based on recipients.
 - Inbound ActivityPub `Create` maps `object.inReplyTo` to known local/remote statuses and stores it (improves threading; remote status `/context` includes ancestors).
 - `GET /api/v1/statuses/:id/context` descendants now include remote replies (threads can cross local/remote reply chains).
+- Notifications now include a full `status` payload when `status_id` is present (e.g. for favourite/reblog notifications).
 - `POST /api/v1/follows` is idempotent when the follow already exists.
 - Actor key generation tolerates concurrent requests (avoids transient failures when multiple requests race to create keys).
 - Unit tests no longer spin up local HTTP servers for federation flows; they use `MockTransport` + queued jobs instead.

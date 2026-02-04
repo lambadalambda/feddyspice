@@ -8,7 +8,10 @@ const masto = @import("mastodon.zig");
 const notifications = @import("../notifications.zig");
 const oauth = @import("../oauth.zig");
 const remote_actors = @import("../remote_actors.zig");
+const remote_statuses = @import("../remote_statuses.zig");
+const statuses = @import("../statuses.zig");
 const util_ids = @import("../util/ids.zig");
+const users = @import("../users.zig");
 
 const AccountPayload = masto.AccountPayload;
 
@@ -33,12 +36,34 @@ fn makeNotificationPayload(
 
     const id_str = std.fmt.allocPrint(allocator, "{d}", .{n.id}) catch "0";
 
+    const status_payload: ?masto.StatusPayload = blk: {
+        const sid = n.status_id orelse break :blk null;
+
+        if (sid < 0) {
+            const st = remote_statuses.lookup(&app_state.conn, allocator, sid) catch break :blk null;
+            if (st == null) break :blk null;
+
+            const st_actor = remote_actors.lookupById(&app_state.conn, allocator, st.?.remote_actor_id) catch break :blk null;
+            if (st_actor == null) break :blk null;
+
+            break :blk masto.makeRemoteStatusPayloadForViewer(app_state, allocator, st_actor.?, st.?, n.user_id);
+        }
+
+        const st = statuses.lookup(&app_state.conn, allocator, sid) catch break :blk null;
+        if (st == null) break :blk null;
+
+        const user = users.lookupUserById(&app_state.conn, allocator, st.?.user_id) catch break :blk null;
+        if (user == null) break :blk null;
+
+        break :blk masto.makeStatusPayloadForViewer(app_state, allocator, user.?, st.?, n.user_id);
+    };
+
     return .{
         .id = id_str,
         .type = n.kind,
         .created_at = n.created_at,
         .account = acct,
-        .status = null,
+        .status = status_payload,
     };
 }
 
