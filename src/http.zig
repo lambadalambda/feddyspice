@@ -30,6 +30,7 @@ const masto = @import("http/mastodon.zig");
 const statuses_api = @import("http/statuses_api.zig");
 const timelines_api = @import("http/timelines_api.zig");
 const tags_api = @import("http/tags_api.zig");
+const lists_api = @import("http/lists_api.zig");
 const activitypub_api = @import("http/activitypub_api.zig");
 const media_api = @import("http/media_api.zig");
 const notifications_api = @import("http/notifications_api.zig");
@@ -344,6 +345,35 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
         const rest = path["/api/v1/accounts/".len..];
         if (std.mem.indexOfScalar(u8, rest, '/') == null) {
             return accounts_api.accountGet(app_state, allocator, path);
+        }
+    }
+
+    if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/lists")) {
+        return lists_api.listsIndex(app_state, allocator, req);
+    }
+
+    if (req.method == .POST and std.mem.eql(u8, path, "/api/v1/lists")) {
+        return lists_api.listsCreate(app_state, allocator, req);
+    }
+
+    if (req.method == .GET and std.mem.startsWith(u8, path, "/api/v1/lists/") and std.mem.endsWith(u8, path, "/accounts")) {
+        return lists_api.listAccountsIndex(app_state, allocator, req, path);
+    }
+
+    if (req.method == .POST and std.mem.startsWith(u8, path, "/api/v1/lists/") and std.mem.endsWith(u8, path, "/accounts")) {
+        return lists_api.listAccountsAdd(app_state, allocator, req, path);
+    }
+
+    if (req.method == .DELETE and std.mem.startsWith(u8, path, "/api/v1/lists/") and std.mem.endsWith(u8, path, "/accounts")) {
+        return lists_api.listAccountsRemove(app_state, allocator, req, path);
+    }
+
+    if (std.mem.startsWith(u8, path, "/api/v1/lists/")) {
+        const rest = path["/api/v1/lists/".len..];
+        if (std.mem.indexOfScalar(u8, rest, '/') == null) {
+            if (req.method == .GET) return lists_api.listGet(app_state, allocator, req, path);
+            if (req.method == .PUT) return lists_api.listUpdate(app_state, allocator, req, path);
+            if (req.method == .DELETE) return lists_api.listDelete(app_state, allocator, req, path);
         }
     }
 
@@ -757,7 +787,6 @@ test "client compat: placeholder endpoints return JSON" {
         .{ .method = .GET, .target = "/api/v1/instance/translation_languages", .kind = .object },
         .{ .method = .GET, .target = "/api/v1/follow_requests", .kind = .array },
         .{ .method = .GET, .target = "/api/v1/scheduled_statuses", .kind = .array },
-        .{ .method = .GET, .target = "/api/v1/lists", .kind = .array },
         .{ .method = .GET, .target = "/api/v1/announcements", .kind = .array },
         .{ .method = .GET, .target = "/api/v1/trends/tags", .kind = .array },
         .{ .method = .GET, .target = "/api/v1/trends", .kind = .array },
@@ -3551,6 +3580,95 @@ test "tags: get + follow/unfollow" {
     var unfollow_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, unfollow_resp.body, .{});
     defer unfollow_json.deinit();
     try std.testing.expect(!unfollow_json.value.object.get("following").?.bool);
+}
+
+test "lists: CRUD" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const app_creds = try oauth.createApp(
+        &app_state.conn,
+        a,
+        "pl-fe",
+        "urn:ietf:wg:oauth:2.0:oob",
+        "read write",
+        "",
+    );
+    const token = try oauth.createAccessToken(&app_state.conn, a, app_creds.id, user_id, "read write");
+    const auth_header = try std.fmt.allocPrint(a, "Bearer {s}", .{token});
+
+    const create = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/api/v1/lists",
+        .content_type = "application/x-www-form-urlencoded",
+        .body = "title=Friends",
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, create.status);
+    var create_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, create.body, .{});
+    defer create_json.deinit();
+
+    const list_id = create_json.value.object.get("id").?.string;
+    try std.testing.expectEqualStrings("Friends", create_json.value.object.get("title").?.string);
+
+    const index = handle(&app_state, a, .{
+        .method = .GET,
+        .target = "/api/v1/lists",
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, index.status);
+    var index_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, index.body, .{});
+    defer index_json.deinit();
+    try std.testing.expect(index_json.value == .array);
+    try std.testing.expectEqual(@as(usize, 1), index_json.value.array.items.len);
+
+    const show_target = try std.fmt.allocPrint(a, "/api/v1/lists/{s}", .{list_id});
+    const show = handle(&app_state, a, .{
+        .method = .GET,
+        .target = show_target,
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, show.status);
+    var show_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, show.body, .{});
+    defer show_json.deinit();
+    try std.testing.expectEqualStrings("Friends", show_json.value.object.get("title").?.string);
+
+    const update = handle(&app_state, a, .{
+        .method = .PUT,
+        .target = show_target,
+        .content_type = "application/x-www-form-urlencoded",
+        .body = "title=Besties",
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, update.status);
+    var update_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, update.body, .{});
+    defer update_json.deinit();
+    try std.testing.expectEqualStrings("Besties", update_json.value.object.get("title").?.string);
+
+    const del = handle(&app_state, a, .{
+        .method = .DELETE,
+        .target = show_target,
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, del.status);
+
+    const index2 = handle(&app_state, a, .{
+        .method = .GET,
+        .target = "/api/v1/lists",
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, index2.status);
+    var index2_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, index2.body, .{});
+    defer index2_json.deinit();
+    try std.testing.expect(index2_json.value == .array);
+    try std.testing.expectEqual(@as(usize, 0), index2_json.value.array.items.len);
 }
 
 test "timelines: home timeline pagination (Link + max_id/since_id)" {

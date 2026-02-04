@@ -16,10 +16,6 @@ pub fn maybeHandle(allocator: std.mem.Allocator, req: http_types.Request, path: 
         return common.jsonOk(allocator, [_]i32{});
     }
 
-    if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/lists")) {
-        return common.jsonOk(allocator, [_]i32{});
-    }
-
     if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/announcements")) {
         return common.jsonOk(allocator, [_]i32{});
     }

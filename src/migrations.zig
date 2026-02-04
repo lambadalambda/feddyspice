@@ -154,6 +154,11 @@ const migrations = [_]Migration{
         .name = "status_replies",
         .sql = status_replies_v21_sql,
     },
+    .{
+        .version = 22,
+        .name = "create_lists",
+        .sql = lists_v22_sql,
+    },
 };
 
 const schema_migrations_sql: [:0]const u8 =
@@ -432,6 +437,26 @@ const status_replies_v21_sql: [:0]const u8 =
     \\CREATE INDEX IF NOT EXISTS statuses_in_reply_to_id_id ON statuses(in_reply_to_id, id);
 ++ "\x00";
 
+const lists_v22_sql: [:0]const u8 =
+    \\CREATE TABLE IF NOT EXISTS lists (
+    \\  id INTEGER PRIMARY KEY,
+    \\  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    \\  title TEXT NOT NULL,
+    \\  replies_policy TEXT NOT NULL DEFAULT 'list',
+    \\  created_at TEXT NOT NULL,
+    \\  updated_at TEXT NOT NULL
+    \\);
+    \\CREATE INDEX IF NOT EXISTS lists_user_id_id ON lists(user_id, id);
+    \\
+    \\CREATE TABLE IF NOT EXISTS list_accounts (
+    \\  list_id INTEGER NOT NULL REFERENCES lists(id) ON DELETE CASCADE,
+    \\  remote_actor_id TEXT NOT NULL REFERENCES remote_actors(id) ON DELETE CASCADE,
+    \\  created_at TEXT NOT NULL,
+    \\  PRIMARY KEY(list_id, remote_actor_id)
+    \\);
+    \\CREATE INDEX IF NOT EXISTS list_accounts_list_id ON list_accounts(list_id);
+++ "\x00";
+
 test "migrate: creates users table and records version" {
     var conn = try db.Db.openZ(":memory:");
     defer conn.close();
@@ -490,6 +515,8 @@ test "migrate: creates users table and records version" {
     try std.testing.expectEqual(@as(i64, 20), v_stmt.columnInt64(0));
     try std.testing.expectEqual(db.Stmt.Step.row, try v_stmt.step());
     try std.testing.expectEqual(@as(i64, 21), v_stmt.columnInt64(0));
+    try std.testing.expectEqual(db.Stmt.Step.row, try v_stmt.step());
+    try std.testing.expectEqual(@as(i64, 22), v_stmt.columnInt64(0));
     try std.testing.expectEqual(db.Stmt.Step.done, try v_stmt.step());
 }
 
@@ -504,6 +531,6 @@ test "migrate: is idempotent" {
     defer stmt.finalize();
 
     try std.testing.expectEqual(db.Stmt.Step.row, try stmt.step());
-    try std.testing.expectEqual(@as(i64, 21), stmt.columnInt64(0));
+    try std.testing.expectEqual(@as(i64, 22), stmt.columnInt64(0));
     try std.testing.expectEqual(db.Stmt.Step.done, try stmt.step());
 }
