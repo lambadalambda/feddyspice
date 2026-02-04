@@ -4,31 +4,21 @@ This file tracks “good future refactors” and known risks. Add items whenever
 
 ## Architecture / DRY
 
-- `src/http.zig` (~8k LOC) should be split into a small router + feature modules (e.g. `oauth`, `accounts`, `statuses`, `timelines`, `activitypub`) for maintainability and faster iteration.
-- Progress:
-  - Shared helpers extracted to `src/util/*` (`htmlEscapeAlloc`/`textToHtmlAlloc`, URL builders, remote account API ID mapping).
-  - HTTP `Request`/`Response` types moved to `src/http_types.zig` to avoid import cycles while splitting handlers.
-  - Started splitting HTTP handlers into `src/http/*` (discovery + instance endpoints) and `src/http/common.zig` for shared helper functions.
-- Federation delivery code has repeated “sign + POST” loops (Create/Delete, public/private/direct variants). Extract a single helper like:
-  - `deliverSignedActivity(activity_json, recipients)` where recipients map to inbox URLs + host headers.
-  - Goal: federation behavior depends on computed **addressing** (`to`/`cc`), not the activity type.
-- Direct-message recipient selection currently parses plaintext `@user@domain` mentions from the status text. Long-term:
-  - Store explicit recipient/mention metadata at post-create time.
-  - Base delivery on stored addressing rather than reparsing text.
+- [ ] Finish splitting `src/http.zig` into a small router + feature modules (for maintainability and faster iteration).
+  - [x] Shared helpers extracted to `src/util/*` (`htmlEscapeAlloc`/`textToHtmlAlloc`, URL builders, remote account API ID mapping).
+  - [x] HTTP `Request`/`Response` types moved to `src/http_types.zig` to avoid import cycles while splitting handlers.
+  - [x] Core handlers split into `src/http/*` (discovery/instance/pages/oauth/accounts/statuses/timelines/activitypub).
+  - [ ] Move remaining handlers still living in `src/http.zig` (media, notifications, conversations, misc compat endpoints).
+- [x] DRY federation delivery code (“sign + POST” loops) via shared helpers in `src/federation.zig`.
+- [ ] Store explicit recipient/mention metadata at post-create time (at least for `visibility=direct`) and base delivery on stored addressing rather than reparsing text.
 
 ## Performance / robustness
 
-- `src/server.zig` allocates response header arrays via `std.heap.page_allocator` per request; consider using the request arena (or stack/static headers) to reduce alloc churn.
-- Outbound fetches now enforce a maximum response size (`FEDDYSPICE_HTTP_MAX_BODY_BYTES`); consider per-request overrides for known-safe endpoints if needed.
+- [x] Avoid `std.heap.page_allocator` per request in `src/server.zig` response header building (use stack + request arena).
+- [x] Outbound fetches enforce a maximum response size (`FEDDYSPICE_HTTP_MAX_BODY_BYTES`) and allow per-request overrides (`FetchOptions.max_body_bytes`).
 
 ## Security
 
-- Inbound ActivityPub is effectively unauthenticated:
-  - We don’t verify HTTP Signatures for incoming inbox requests.
-  - The `http.Request` type currently doesn’t carry arbitrary headers, so verification isn’t possible yet.
-  - High priority: plumb request headers through `src/server.zig` → `src/http.zig` and verify signatures/digests for federation POSTs.
-- Remote HTML is trusted:
-  - We store and re-serve `object.content` from remote Notes without sanitization.
-  - Risk: XSS if clients render unsanitized HTML. Consider server-side sanitization (or store both sanitized HTML + plain text fallback).
-- Header-injection hardening:
-  - Any user-controlled header values (e.g. redirects, content types) should be validated/stripped for control characters (`\r`, `\n`, etc.) before being used in response headers.
+- [x] Verify inbound ActivityPub inbox requests using HTTP Signatures + `Digest` (including `hs2019`, `content-type`, `content-length`, and reverse-proxy host handling).
+- [ ] Sanitize remote HTML: do not store/re-serve untrusted `object.content` without sanitization (XSS risk).
+- [ ] Header-injection hardening: validate/strip control characters (`\r`, `\n`, etc.) from any user-controlled header values (e.g. redirects) before sending responses.
