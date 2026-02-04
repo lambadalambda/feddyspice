@@ -44,6 +44,8 @@ pub fn serveOnce(app_state: *app.App, listener: *net.Server) !void {
 
     var host_hdr: ?[]const u8 = null;
     var xf_host_hdr: ?[]const u8 = null;
+    var origin_hdr: ?[]const u8 = null;
+    var referer_hdr: ?[]const u8 = null;
     var date_hdr: ?[]const u8 = null;
     var digest_hdr: ?[]const u8 = null;
     var signature_hdr: ?[]const u8 = null;
@@ -59,6 +61,8 @@ pub fn serveOnce(app_state: *app.App, listener: *net.Server) !void {
     while (it.next()) |h| {
         if (std.ascii.eqlIgnoreCase(h.name, "host")) host_hdr = h.value;
         if (std.ascii.eqlIgnoreCase(h.name, "x-forwarded-host")) xf_host_hdr = h.value;
+        if (std.ascii.eqlIgnoreCase(h.name, "origin")) origin_hdr = h.value;
+        if (std.ascii.eqlIgnoreCase(h.name, "referer")) referer_hdr = h.value;
         if (std.ascii.eqlIgnoreCase(h.name, "date")) date_hdr = h.value;
         if (std.ascii.eqlIgnoreCase(h.name, "digest")) digest_hdr = h.value;
         if (std.ascii.eqlIgnoreCase(h.name, "signature")) signature_hdr = h.value;
@@ -170,6 +174,8 @@ pub fn serveOnce(app_state: *app.App, listener: *net.Server) !void {
         .content_type = content_type,
         .body = body,
         .host = host_hdr,
+        .origin = origin_hdr,
+        .referer = referer_hdr,
         .date = date_hdr,
         .digest = digest_hdr,
         .signature = signature_hdr,

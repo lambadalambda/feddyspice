@@ -23,7 +23,7 @@ This file tracks “good future refactors” and known risks. Add items whenever
 - [x] Sanitize remote HTML: do not store/re-serve untrusted `object.content` without sanitization (XSS risk).
 - [x] Header-injection hardening: validate/strip control characters (`\r`, `\n`, etc.) from any user-controlled header values (e.g. redirects, media content-types) before sending responses.
 - [ ] Add a baseline “security headers” set on all HTTP responses (nosniff, referrer policy, clickjacking protection; CSP for HTML).
-- [ ] Add OAuth hardening: `Cache-Control: no-store` for `/oauth/token` + auth-code flows; consider CSRF protection for HTML form POSTs even with `SameSite=Lax`.
+- [x] Add OAuth hardening: `Cache-Control: no-store` for `/oauth/token` + auth-code flows; enforce same-origin on HTML form POSTs when `Origin`/`Referer` is present.
 - [x] Validate inbound signature freshness: parse `Date` and enforce max clock skew (configurable).
 - [x] Reject excessively nested JSON request bodies before parsing (`FEDDYSPICE_JSON_MAX_NESTING_DEPTH`).
 - [ ] Replay protection: dedupe signed inbox requests even when activity `id` is missing (hash fallback).

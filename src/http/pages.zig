@@ -33,6 +33,7 @@ pub fn signupPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_t
     if (!common.isForm(req.content_type)) {
         return .{ .status = .bad_request, .body = "invalid content-type\n" };
     }
+    if (!common.isSameOrigin(req)) return .{ .status = .forbidden, .body = "forbidden\n" };
 
     var parsed = form.parse(allocator, req.body) catch
         return .{ .status = .bad_request, .body = "invalid form\n" };
@@ -98,6 +99,7 @@ pub fn loginPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
     if (!common.isForm(req.content_type)) {
         return .{ .status = .bad_request, .body = "invalid content-type\n" };
     }
+    if (!common.isSameOrigin(req)) return .{ .status = .forbidden, .body = "forbidden\n" };
 
     var parsed = form.parse(allocator, req.body) catch
         return .{ .status = .bad_request, .body = "invalid form\n" };

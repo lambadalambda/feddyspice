@@ -1102,6 +1102,8 @@ test "oauth: authorization code flow (oob)" {
         .body = token_body,
     });
     try std.testing.expectEqual(std.http.Status.ok, token_resp.status);
+    try std.testing.expectEqualStrings("no-store", headerValue(token_resp.headers, "cache-control").?);
+    try std.testing.expectEqualStrings("no-cache", headerValue(token_resp.headers, "pragma").?);
 
     var token_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, token_resp.body, .{});
     defer token_json.deinit();

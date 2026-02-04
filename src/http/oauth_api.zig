@@ -104,6 +104,7 @@ pub fn authorizePost(app_state: *app.App, allocator: std.mem.Allocator, req: htt
     if (!common.isForm(req.content_type)) {
         return .{ .status = .bad_request, .body = "invalid content-type\n" };
     }
+    if (!common.isSameOrigin(req)) return .{ .status = .forbidden, .body = "forbidden\n" };
 
     const user_id = session.currentUserId(app_state, req) catch null;
     if (user_id == null) return common.redirect(allocator, "/login");
@@ -142,7 +143,9 @@ pub fn authorizePost(app_state: *app.App, allocator: std.mem.Allocator, req: htt
     if (std.mem.eql(u8, redirect_uri, "urn:ietf:wg:oauth:2.0:oob")) {
         const page = std.fmt.allocPrint(allocator, "<p>Authorization code:</p><pre id=\"code\">{s}</pre>", .{code}) catch
             return .{ .status = .internal_server_error, .body = "internal server error\n" };
-        return common.htmlPage(allocator, "Authorization code", page);
+        var resp = common.htmlPage(allocator, "Authorization code", page);
+        resp.headers = noStoreHeadersAlloc(allocator);
+        return resp;
     }
 
     const loc = oauthCodeRedirect(allocator, redirect_uri, code, state) catch redirect_uri;
@@ -214,6 +217,7 @@ pub fn token(app_state: *app.App, allocator: std.mem.Allocator, req: http_types.
     return .{
         .content_type = "application/json; charset=utf-8",
         .body = body,
+        .headers = noStoreHeadersAlloc(allocator),
     };
 }
 
@@ -252,5 +256,13 @@ fn oauthErrorResponse(
         .status = status,
         .content_type = "application/json; charset=utf-8",
         .body = body,
+        .headers = noStoreHeadersAlloc(allocator),
     };
+}
+
+fn noStoreHeadersAlloc(allocator: std.mem.Allocator) []const std.http.Header {
+    var headers = allocator.alloc(std.http.Header, 2) catch return &.{};
+    headers[0] = .{ .name = "cache-control", .value = "no-store" };
+    headers[1] = .{ .name = "pragma", .value = "no-cache" };
+    return headers;
 }

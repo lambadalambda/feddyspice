@@ -74,6 +74,71 @@ pub fn safeReturnTo(return_to: ?[]const u8) ?[]const u8 {
     return rt;
 }
 
+pub fn isSameOrigin(req: http_types.Request) bool {
+    const host_hdr = req.host orelse return true;
+    const expected = parseHostHeader(host_hdr);
+
+    if (req.origin) |o| return uriHasSameHost(o, expected);
+    if (req.referer) |r| return uriHasSameHost(r, expected);
+    return true;
+}
+
+const HostAndPort = struct {
+    host: []const u8,
+    port: ?u16,
+};
+
+fn parseHostHeader(host_hdr_raw: []const u8) HostAndPort {
+    const host_hdr = std.mem.trim(u8, host_hdr_raw, " \t");
+    if (host_hdr.len == 0) return .{ .host = host_hdr, .port = null };
+
+    if (host_hdr[0] == '[') {
+        const close_i = std.mem.indexOfScalar(u8, host_hdr, ']') orelse
+            return .{ .host = host_hdr, .port = null };
+        const host = host_hdr[1..close_i];
+        if (close_i + 1 < host_hdr.len and host_hdr[close_i + 1] == ':') {
+            const port_str = host_hdr[close_i + 2 ..];
+            const port = std.fmt.parseInt(u16, port_str, 10) catch null;
+            return .{ .host = host, .port = port };
+        }
+        return .{ .host = host, .port = null };
+    }
+
+    if (std.mem.lastIndexOfScalar(u8, host_hdr, ':')) |colon_i| {
+        const host = host_hdr[0..colon_i];
+        const port_str = host_hdr[colon_i + 1 ..];
+        const port = std.fmt.parseInt(u16, port_str, 10) catch null;
+        if (port != null and host.len > 0) return .{ .host = host, .port = port };
+    }
+
+    return .{ .host = host_hdr, .port = null };
+}
+
+fn uriHasSameHost(uri_str: []const u8, expected: HostAndPort) bool {
+    const uri = std.Uri.parse(uri_str) catch return false;
+    if (!schemeIsHttp(uri.scheme)) return false;
+
+    var host_buf: [std.Uri.host_name_max]u8 = undefined;
+    const host = uri.getHost(&host_buf) catch return false;
+    if (!std.ascii.eqlIgnoreCase(host, expected.host)) return false;
+
+    if (expected.port) |p| {
+        const got_port: u16 = uri.port orelse defaultPortForScheme(uri.scheme);
+        return got_port == p;
+    }
+
+    return true;
+}
+
+fn schemeIsHttp(scheme: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(scheme, "http") or std.ascii.eqlIgnoreCase(scheme, "https");
+}
+
+fn defaultPortForScheme(scheme: []const u8) u16 {
+    if (std.ascii.eqlIgnoreCase(scheme, "http")) return 80;
+    return 443;
+}
+
 pub fn percentEncodeAlloc(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {
     var aw: std.Io.Writer.Allocating = .init(allocator);
     errdefer aw.deinit();
@@ -142,6 +207,41 @@ test "redirect sanitizes Location header" {
     const resp = redirect(a, "/\r\nx: y");
     try std.testing.expectEqual(std.http.Status.see_other, resp.status);
     try std.testing.expectEqualStrings("/", resp.headers[0].value);
+}
+
+test "isSameOrigin validates Origin/Referer host and port (when present)" {
+    const base: http_types.Request = .{
+        .method = .POST,
+        .target = "/",
+        .host = "example.test",
+    };
+
+    try std.testing.expect(isSameOrigin(base));
+
+    var origin_ok = base;
+    origin_ok.origin = "https://example.test";
+    try std.testing.expect(isSameOrigin(origin_ok));
+
+    var origin_bad = base;
+    origin_bad.origin = "https://evil.test";
+    try std.testing.expect(!isSameOrigin(origin_bad));
+
+    const with_port: http_types.Request = .{
+        .method = .POST,
+        .target = "/",
+        .host = "example.test:8080",
+    };
+    var origin_port_ok = with_port;
+    origin_port_ok.origin = "http://example.test:8080/some/path";
+    try std.testing.expect(isSameOrigin(origin_port_ok));
+
+    var origin_port_bad = with_port;
+    origin_port_bad.origin = "http://example.test:3000/";
+    try std.testing.expect(!isSameOrigin(origin_port_bad));
+
+    var referer_ok = with_port;
+    referer_ok.referer = "https://example.test:8080/x";
+    try std.testing.expect(isSameOrigin(referer_ok));
 }
 
 pub fn isJson(content_type: ?[]const u8) bool {
