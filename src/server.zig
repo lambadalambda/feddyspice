@@ -186,6 +186,12 @@ fn targetPath(target: []const u8) []const u8 {
     return target;
 }
 
+fn sanitizeTargetForLog(target: []const u8) []const u8 {
+    const path = targetPath(target);
+    if (std.mem.startsWith(u8, path, "/media/")) return "/media/<token>";
+    return path;
+}
+
 fn targetQuery(target: []const u8) []const u8 {
     const idx = std.mem.indexOfScalar(u8, target, '?') orelse return "";
     return target[idx + 1 ..];
@@ -426,10 +432,18 @@ fn logAccess(
     const elapsed_ms: i64 = std.time.milliTimestamp() - start_ms;
     var addr_buf: [128]u8 = undefined;
     const addr_str = std.fmt.bufPrint(&addr_buf, "{any}", .{remote_addr}) catch "unknown";
+    const safe_target = sanitizeTargetForLog(target);
     app_state.logger.info(
         "access remote={s} method={s} target={s} status={d} dur_ms={d}",
-        .{ addr_str, @tagName(method), target, @intFromEnum(status), elapsed_ms },
+        .{ addr_str, @tagName(method), safe_target, @intFromEnum(status), elapsed_ms },
     );
+}
+
+test "sanitizeTargetForLog strips query and redacts media tokens" {
+    try std.testing.expectEqualStrings("/api/v1/streaming/", sanitizeTargetForLog("/api/v1/streaming/?access_token=abc"));
+    try std.testing.expectEqualStrings("/api/v1/instance", sanitizeTargetForLog("/api/v1/instance?x=y"));
+    try std.testing.expectEqualStrings("/media/<token>", sanitizeTargetForLog("/media/abcd"));
+    try std.testing.expectEqualStrings("/media/<token>", sanitizeTargetForLog("/media/abcd?x=y"));
 }
 
 test "serveOnce: GET /healthz -> 200" {
