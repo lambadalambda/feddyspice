@@ -2810,6 +2810,54 @@ test "statuses: create includes tags/mentions/emojis arrays (Elk compatibility)"
     try std.testing.expect(create_json.value.object.get("edited_at") != null);
 }
 
+test "statuses: content linkifies mentions and populates mentions array" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const app_creds = try oauth.createApp(
+        &app_state.conn,
+        a,
+        "elk",
+        "urn:ietf:wg:oauth:2.0:oob",
+        "read write",
+        "",
+    );
+    const token = try oauth.createAccessToken(&app_state.conn, a, app_creds.id, user_id, "read write");
+    const auth_header = try std.fmt.allocPrint(a, "Bearer {s}", .{token});
+
+    const create_resp = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/api/v1/statuses",
+        .content_type = "application/x-www-form-urlencoded",
+        .body = "status=@alice+hello&visibility=public",
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, create_resp.status);
+
+    var create_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, create_resp.body, .{});
+    defer create_json.deinit();
+
+    const content = create_json.value.object.get("content").?.string;
+    try std.testing.expect(std.mem.indexOf(u8, content, "class=\"u-url mention\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "href=\"http://example.test/users/alice\"") != null);
+
+    const mentions = create_json.value.object.get("mentions").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), mentions.len);
+
+    const account_id = create_json.value.object.get("account").?.object.get("id").?.string;
+    try std.testing.expectEqualStrings(account_id, mentions[0].object.get("id").?.string);
+    try std.testing.expectEqualStrings("alice", mentions[0].object.get("username").?.string);
+    try std.testing.expectEqualStrings("alice", mentions[0].object.get("acct").?.string);
+    try std.testing.expectEqualStrings("http://example.test/users/alice", mentions[0].object.get("url").?.string);
+}
+
 test "timelines: public timeline excludes unlisted/private/direct statuses (local + remote)" {
     var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
     defer app_state.deinit();

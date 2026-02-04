@@ -111,6 +111,13 @@ pub const MediaAttachmentPayload = struct {
     blurhash: ?[]const u8 = null,
 };
 
+pub const StatusMentionPayload = struct {
+    id: []const u8,
+    username: []const u8,
+    url: []const u8,
+    acct: []const u8,
+};
+
 pub const StatusPayload = struct {
     id: []const u8,
     uri: []const u8,
@@ -126,12 +133,7 @@ pub const StatusPayload = struct {
         name: []const u8,
         website: ?[]const u8 = null,
     },
-    mentions: []const struct {
-        id: []const u8,
-        username: []const u8,
-        url: []const u8,
-        acct: []const u8,
-    },
+    mentions: []const StatusMentionPayload,
     tags: []const struct {
         name: []const u8,
         url: []const u8,
@@ -160,6 +162,235 @@ pub fn statusPayloadNewerFirst(_: void, a: StatusPayload, b: StatusPayload) bool
         .lt => false,
         .eq => statusPayloadIdInt(a) > statusPayloadIdInt(b),
     };
+}
+
+fn isMentionUsernameChar(c: u8) bool {
+    return (c >= 'a' and c <= 'z') or
+        (c >= 'A' and c <= 'Z') or
+        (c >= '0' and c <= '9') or
+        c == '_' or
+        c == '-' or
+        c == '.';
+}
+
+fn isMentionHostChar(c: u8) bool {
+    return (c >= 'a' and c <= 'z') or
+        (c >= 'A' and c <= 'Z') or
+        (c >= '0' and c <= '9') or
+        c == '-' or
+        c == '.' or
+        c == ':' or
+        c == '_';
+}
+
+fn trimTrailingMentionPunct(s: []const u8) []const u8 {
+    var end = s.len;
+    while (end > 0) {
+        const c = s[end - 1];
+        if (c == '.' or c == ',' or c == ':' or c == ';' or c == '!' or c == '?' or c == ')' or c == ']' or c == '}' or c == '>' or c == '"' or c == '\'') {
+            end -= 1;
+            continue;
+        }
+        break;
+    }
+    return s[0..end];
+}
+
+fn isMentionBoundary(text: []const u8, idx: usize) bool {
+    if (idx == 0) return true;
+    const prev = text[idx - 1];
+    return !((prev >= 'a' and prev <= 'z') or
+        (prev >= 'A' and prev <= 'Z') or
+        (prev >= '0' and prev <= '9') or
+        prev == '_');
+}
+
+const ContentAndMentions = struct {
+    html: []const u8,
+    mentions: []const StatusMentionPayload,
+};
+
+fn hasMention(mentions: []const StatusMentionPayload, url_str: []const u8) bool {
+    for (mentions) |m| {
+        if (std.mem.eql(u8, m.url, url_str)) return true;
+    }
+    return false;
+}
+
+fn contentHtmlAndMentionsAlloc(app_state: *app.App, allocator: std.mem.Allocator, user: users.User, text: []const u8) ContentAndMentions {
+    const user_url = urls.userUrlAlloc(app_state, allocator, user.username) catch "";
+    const user_id_str = std.fmt.allocPrint(allocator, "{d}", .{user.id}) catch "0";
+
+    var mentions: std.ArrayListUnmanaged(StatusMentionPayload) = .empty;
+
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+
+    aw.writer.writeAll("<p>") catch {};
+
+    var seg_start: usize = 0;
+    var i: usize = 0;
+    while (i < text.len) {
+        if (text[i] == '\n') {
+            if (i > seg_start) {
+                const escaped_opt: ?[]u8 = util_html.htmlEscapeAlloc(allocator, text[seg_start..i]) catch null;
+                const escaped = escaped_opt orelse "";
+                defer if (escaped_opt) |s| allocator.free(s);
+                aw.writer.writeAll(escaped) catch {};
+            }
+            aw.writer.writeAll("<br>") catch {};
+            i += 1;
+            seg_start = i;
+            continue;
+        }
+
+        if (text[i] == '@' and isMentionBoundary(text, i)) {
+            var j = i + 1;
+            if (j >= text.len) {
+                i += 1;
+                continue;
+            }
+
+            const username_start = j;
+            while (j < text.len and isMentionUsernameChar(text[j])) : (j += 1) {}
+            const username = text[username_start..j];
+            if (username.len == 0) {
+                i += 1;
+                continue;
+            }
+
+            // Remote mention: @user@host
+            if (j < text.len and text[j] == '@') {
+                j += 1;
+                const domain_start = j;
+                while (j < text.len and isMentionHostChar(text[j])) : (j += 1) {}
+
+                const domain_raw = text[domain_start..j];
+                const domain_trimmed = trimTrailingMentionPunct(domain_raw);
+                if (domain_trimmed.len == 0) {
+                    i += 1;
+                    continue;
+                }
+
+                const domain_end = domain_start + domain_trimmed.len;
+
+                const host_only = blk: {
+                    const colon = std.mem.lastIndexOfScalar(u8, domain_trimmed, ':') orelse break :blk domain_trimmed;
+                    const port_str = domain_trimmed[colon + 1 ..];
+                    if (port_str.len == 0) break :blk domain_trimmed;
+                    _ = std.fmt.parseInt(u16, port_str, 10) catch break :blk domain_trimmed;
+                    const host = domain_trimmed[0..colon];
+                    if (host.len == 0) break :blk domain_trimmed;
+                    break :blk host;
+                };
+
+                const actor = remote_actors.lookupByHandle(&app_state.conn, allocator, username, host_only) catch null;
+                if (actor) |a| {
+                    const href = a.id;
+                    if (!hasMention(mentions.items, href)) {
+                        const api_id = util_ids.remoteAccountApiIdAlloc(app_state, allocator, a.id);
+                        const acct = std.fmt.allocPrint(allocator, "{s}@{s}", .{ a.preferred_username, a.domain }) catch a.preferred_username;
+                        mentions.append(allocator, .{
+                            .id = api_id,
+                            .username = a.preferred_username,
+                            .acct = acct,
+                            .url = href,
+                        }) catch {
+                            const html_out = aw.toOwnedSlice() catch "<p></p>";
+                            aw.deinit();
+                            mentions.deinit(allocator);
+                            return .{ .html = html_out, .mentions = &.{} };
+                        };
+                    }
+
+                    if (i > seg_start) {
+                        const escaped_opt: ?[]u8 = util_html.htmlEscapeAlloc(allocator, text[seg_start..i]) catch null;
+                        const escaped = escaped_opt orelse "";
+                        defer if (escaped_opt) |s| allocator.free(s);
+                        aw.writer.writeAll(escaped) catch {};
+                    }
+
+                    const href_esc_opt: ?[]u8 = util_html.htmlEscapeAlloc(allocator, href) catch null;
+                    const href_esc = href_esc_opt orelse href;
+                    defer if (href_esc_opt) |s| allocator.free(s);
+                    const uname_esc_opt: ?[]u8 = util_html.htmlEscapeAlloc(allocator, username) catch null;
+                    const uname_esc = uname_esc_opt orelse username;
+                    defer if (uname_esc_opt) |s| allocator.free(s);
+
+                    aw.writer.print(
+                        "<span class=\"h-card\"><a href=\"{s}\" class=\"u-url mention\">@<span>{s}</span></a></span>",
+                        .{ href_esc, uname_esc },
+                    ) catch {};
+
+                    seg_start = domain_end;
+                    i = domain_end;
+                    continue;
+                }
+
+                i += 1;
+                continue;
+            }
+
+            // Local mention: @user
+            if (std.mem.eql(u8, username, user.username)) {
+                if (!hasMention(mentions.items, user_url)) {
+                    mentions.append(allocator, .{
+                        .id = user_id_str,
+                        .username = user.username,
+                        .acct = user.username,
+                        .url = user_url,
+                    }) catch {
+                        const html_out = aw.toOwnedSlice() catch "<p></p>";
+                        aw.deinit();
+                        mentions.deinit(allocator);
+                        return .{ .html = html_out, .mentions = &.{} };
+                    };
+                }
+
+                if (i > seg_start) {
+                    const escaped_opt: ?[]u8 = util_html.htmlEscapeAlloc(allocator, text[seg_start..i]) catch null;
+                    const escaped = escaped_opt orelse "";
+                    defer if (escaped_opt) |s| allocator.free(s);
+                    aw.writer.writeAll(escaped) catch {};
+                }
+
+                const href_esc_opt: ?[]u8 = util_html.htmlEscapeAlloc(allocator, user_url) catch null;
+                const href_esc = href_esc_opt orelse user_url;
+                defer if (href_esc_opt) |s| allocator.free(s);
+                const uname_esc_opt: ?[]u8 = util_html.htmlEscapeAlloc(allocator, username) catch null;
+                const uname_esc = uname_esc_opt orelse username;
+                defer if (uname_esc_opt) |s| allocator.free(s);
+
+                aw.writer.print(
+                    "<span class=\"h-card\"><a href=\"{s}\" class=\"u-url mention\">@<span>{s}</span></a></span>",
+                    .{ href_esc, uname_esc },
+                ) catch {};
+
+                seg_start = j;
+                i = j;
+                continue;
+            }
+        }
+
+        i += 1;
+    }
+
+    if (text.len > seg_start) {
+        const escaped_opt: ?[]u8 = util_html.htmlEscapeAlloc(allocator, text[seg_start..]) catch null;
+        const escaped = escaped_opt orelse "";
+        defer if (escaped_opt) |s| allocator.free(s);
+        aw.writer.writeAll(escaped) catch {};
+    }
+    aw.writer.writeAll("</p>") catch {};
+
+    const html_out = aw.toOwnedSlice() catch "<p></p>";
+    aw.deinit();
+
+    const mentions_out = mentions.toOwnedSlice(allocator) catch blk: {
+        mentions.deinit(allocator);
+        break :blk &.{};
+    };
+
+    return .{ .html = html_out, .mentions = mentions_out };
 }
 
 fn mediaAttachmentType(content_type: []const u8) []const u8 {
@@ -280,7 +511,9 @@ pub fn makeStatusPayload(app_state: *app.App, allocator: std.mem.Allocator, user
     const id_str = std.fmt.allocPrint(allocator, "{d}", .{st.id}) catch "0";
     const user_id_str = std.fmt.allocPrint(allocator, "{d}", .{user.id}) catch "0";
 
-    const html_content = util_html.textToHtmlAlloc(allocator, st.text) catch st.text;
+    const cm = contentHtmlAndMentionsAlloc(app_state, allocator, user, st.text);
+    const html_content = cm.html;
+    const mentions_payload = cm.mentions;
 
     const user_url = urls.userUrlAlloc(app_state, allocator, user.username) catch "";
     const avatar_url = urls.userAvatarUrlAlloc(app_state, allocator, user);
@@ -355,7 +588,7 @@ pub fn makeStatusPayload(app_state: *app.App, allocator: std.mem.Allocator, user
         .spoiler_text = "",
         .media_attachments = attachments,
         .application = .{ .name = "feddyspice", .website = null },
-        .mentions = &.{},
+        .mentions = mentions_payload,
         .tags = &.{},
         .emojis = &.{},
         .reblogs_count = 0,
