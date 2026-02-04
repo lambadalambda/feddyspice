@@ -171,7 +171,7 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json(404, {"error": "not found"})
 
     def do_POST(self) -> None:  # noqa: N802
-        if self.path != "/send":
+        if self.path not in ("/send", "/update"):
             self._send_json(404, {"error": "not found"})
             return
 
@@ -182,6 +182,7 @@ class Handler(BaseHTTPRequestHandler):
         inbox = req.get("inbox")
         to_actor = req.get("to")
         marker = req.get("marker")
+        note_id = req.get("note_id")
 
         if not isinstance(inbox, str) or not inbox:
             self._send_json(400, {"error": "missing inbox"})
@@ -193,13 +194,19 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": "missing marker"})
             return
 
-        note_id = f"{ACTOR_ID}/objects/{time.time()}"
+        if self.path == "/update":
+            if not isinstance(note_id, str) or not note_id:
+                self._send_json(400, {"error": "missing note_id"})
+                return
+        else:
+            note_id = f"{ACTOR_ID}/objects/{time.time()}"
+
         activity_id = f"{ACTOR_ID}/activities/{time.time()}"
 
-        create = {
+        activity = {
             "@context": "https://www.w3.org/ns/activitystreams",
             "id": activity_id,
-            "type": "Create",
+            "type": "Update" if self.path == "/update" else "Create",
             "actor": ACTOR_ID,
             "to": [to_actor],
             "object": {
@@ -211,7 +218,7 @@ class Handler(BaseHTTPRequestHandler):
             },
         }
 
-        body = json.dumps(create, separators=(",", ":"), ensure_ascii=False).encode()
+        body = json.dumps(activity, separators=(",", ":"), ensure_ascii=False).encode()
 
         inbox_parsed = urlparse(inbox)
         inbox_host = inbox_parsed.netloc
@@ -230,6 +237,8 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json(
             200,
             {
+                "activity_id": activity_id,
+                "note_id": note_id,
                 "inbox_status": status,
                 "inbox_response": resp_body[:1024].decode(errors="replace"),
             },
@@ -243,4 +252,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

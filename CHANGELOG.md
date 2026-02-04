@@ -54,6 +54,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Docker image for feddyspice + fedbox compose integration (`docker/federation/compose.yml`).
 - Fedbox E2E tests cover feddyspice federation (follow + post delivery).
 - Fedbox E2E test covers inbound signed `direct` messages and ensures they never leak into the public timeline.
+- Fedbox E2E tests now cover remote edits (`Update(Note)`), replies/threads, deletes, unfollow (`Undo(Follow)`), and Like/Announce interactions (+ Undo).
 - Basic access logging plus optional file logs (`FEDDYSPICE_LOG_FILE`, `FEDDYSPICE_LOG_LEVEL`).
 - Access logs now record microsecond durations (`dur_us`) to avoid `dur_ms=0` for fast requests.
 - Prometheus-style metrics endpoint (`GET /metrics`).
