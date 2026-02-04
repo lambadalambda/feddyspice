@@ -105,10 +105,6 @@ pub fn maybeHandle(allocator: std.mem.Allocator, req: http_types.Request, path: 
         }
     }
 
-    if (req.method == .GET and std.mem.startsWith(u8, path, "/api/v1/timelines/tag/")) {
-        return common.jsonOk(allocator, [_]i32{});
-    }
-
     if (req.method == .GET and std.mem.startsWith(u8, path, "/api/v1/timelines/list/")) {
         return common.jsonOk(allocator, [_]i32{});
     }

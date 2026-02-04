@@ -43,7 +43,7 @@ This is a “rough backlog” based on Mastodon’s `config/routes/api.rb` and P
 - [x] Add notification extras: `GET /api/v1/notifications/:id` and `GET /api/v1/notifications/unread_count`.
 - [x] Add status auxiliary endpoints: `GET /api/v1/statuses/:id/reblogged_by`, `/favourited_by`, `/history`, `/source` (placeholders ok initially).
 - [x] Add bulk status lookup: `GET /api/v1/statuses?ids[]=...` (Mastodon “hydrate by id list” pattern).
-- [ ] Add direct timeline: `GET /api/v1/timelines/direct` (DMs), and make `GET /api/v1/timelines/tag/:tag` return real results (currently stubbed empty).
+- [x] Add direct timeline: `GET /api/v1/timelines/direct` (DMs), and make `GET /api/v1/timelines/tag/:tag` return real results (currently stubbed empty).
 - [ ] Add lists/filters CRUD (or robust stubs): `GET/POST/PUT/DELETE /api/v1/lists*` and `GET/POST/PUT/DELETE /api/v1/filters*`.
 - [x] Add favourites/bookmarks index endpoints: `GET /api/v1/favourites` and `GET /api/v1/bookmarks`.
 - [x] Add blocks/mutes index endpoints: `GET /api/v1/blocks` and `GET /api/v1/mutes`.

@@ -23,7 +23,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Bearer-token auth for `/api/v1/accounts/verify_credentials`.
 - Status posting and timelines (SQLite `statuses` table; `POST /api/v1/statuses`, `GET /api/v1/timelines/home`, `GET /api/v1/statuses/:id`).
 - Public timeline endpoint (`GET /api/v1/timelines/public`).
-- Additional timeline placeholder endpoints (`GET /api/v1/timelines/tag/:tag`, `GET /api/v1/timelines/list/:id`, `GET /api/v1/timelines/link`).
+- Tag timeline endpoint (`GET /api/v1/timelines/tag/:tag`).
+- Direct timeline endpoint (`GET /api/v1/timelines/direct`) for DMs.
+- Additional timeline placeholder endpoints (`GET /api/v1/timelines/list/:id`, `GET /api/v1/timelines/link`).
 - Mastodon streaming endpoint via WebSockets (`GET /api/v1/streaming`, `stream=user`, `access_token=...`).
 - Local and remote posts publish `event=update` on the streaming user stream.
 - Local and remote deletes publish `event=delete` on the streaming user stream.

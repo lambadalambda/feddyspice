@@ -390,6 +390,14 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
         return timelines_api.homeTimeline(app_state, allocator, req);
     }
 
+    if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/timelines/direct")) {
+        return timelines_api.directTimeline(app_state, allocator, req);
+    }
+
+    if (req.method == .GET and std.mem.startsWith(u8, path, "/api/v1/timelines/tag/")) {
+        return timelines_api.tagTimeline(app_state, allocator, req, path);
+    }
+
     if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/statuses")) {
         return statuses_api.statusesBulkGet(app_state, allocator, req);
     }
@@ -3319,7 +3327,113 @@ test "timelines: public timeline excludes unlisted/private/direct statuses (loca
     try std.testing.expect(saw_rpub);
 }
 
-test "timelines: tag/list/link placeholders return empty arrays" {
+test "timelines: tag timeline returns public statuses with hashtag" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    _ = try statuses.create(&app_state.conn, a, user_id, "hello #test", "public", null);
+    _ = try statuses.create(&app_state.conn, a, user_id, "hide #test", "direct", null);
+    _ = try statuses.create(&app_state.conn, a, user_id, "hide2 #test", "unlisted", null);
+    _ = try statuses.create(&app_state.conn, a, user_id, "hello #other", "public", null);
+
+    const resp = handle(&app_state, a, .{ .method = .GET, .target = "/api/v1/timelines/tag/test" });
+    try std.testing.expectEqual(std.http.Status.ok, resp.status);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, resp.body, .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value == .array);
+    try std.testing.expectEqual(@as(usize, 1), parsed.value.array.items.len);
+    try std.testing.expectEqualStrings("<p>hello #test</p>", parsed.value.array.items[0].object.get("content").?.string);
+}
+
+test "timelines: direct timeline returns direct statuses only" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const app_creds = try oauth.createApp(
+        &app_state.conn,
+        a,
+        "pl-fe",
+        "urn:ietf:wg:oauth:2.0:oob",
+        "read write",
+        "",
+    );
+    const token = try oauth.createAccessToken(&app_state.conn, a, app_creds.id, user_id, "read write");
+    const auth_header = try std.fmt.allocPrint(a, "Bearer {s}", .{token});
+
+    _ = try statuses.create(&app_state.conn, a, user_id, "Lpub", "public", null);
+    _ = try statuses.create(&app_state.conn, a, user_id, "Ldm", "direct", null);
+
+    try remote_actors.upsert(&app_state.conn, .{
+        .id = "https://remote.test/users/bob",
+        .inbox = "https://remote.test/users/bob/inbox",
+        .shared_inbox = null,
+        .preferred_username = "bob",
+        .domain = "remote.test",
+        .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
+    });
+
+    _ = try remote_statuses.createIfNotExists(
+        &app_state.conn,
+        a,
+        "https://remote.test/notes/1",
+        "https://remote.test/users/bob",
+        "<p>Rpub</p>",
+        null,
+        "public",
+        "2020-01-01T00:00:00.000Z",
+    );
+    _ = try remote_statuses.createIfNotExists(
+        &app_state.conn,
+        a,
+        "https://remote.test/notes/2",
+        "https://remote.test/users/bob",
+        "<p>Rdm</p>",
+        null,
+        "direct",
+        "2020-01-01T00:00:01.000Z",
+    );
+
+    const tl_resp = handle(&app_state, a, .{
+        .method = .GET,
+        .target = "/api/v1/timelines/direct",
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, tl_resp.status);
+
+    var tl_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, tl_resp.body, .{});
+    defer tl_json.deinit();
+    try std.testing.expect(tl_json.value == .array);
+    try std.testing.expectEqual(@as(usize, 2), tl_json.value.array.items.len);
+
+    var saw_ldm: bool = false;
+    var saw_rdm: bool = false;
+    for (tl_json.value.array.items) |it| {
+        const content = it.object.get("content").?.string;
+        if (std.mem.eql(u8, content, "<p>Ldm</p>")) saw_ldm = true;
+        if (std.mem.eql(u8, content, "<p>Rdm</p>")) saw_rdm = true;
+        try std.testing.expect(!std.mem.eql(u8, content, "<p>Lpub</p>"));
+        try std.testing.expect(!std.mem.eql(u8, content, "<p>Rpub</p>"));
+    }
+    try std.testing.expect(saw_ldm);
+    try std.testing.expect(saw_rdm);
+}
+
+test "timelines: list/link placeholders return empty arrays" {
     var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
     defer app_state.deinit();
 
@@ -3328,7 +3442,6 @@ test "timelines: tag/list/link placeholders return empty arrays" {
     const a = arena.allocator();
 
     const targets = [_][]const u8{
-        "/api/v1/timelines/tag/test",
         "/api/v1/timelines/list/1",
         "/api/v1/timelines/link?url=https%3A%2F%2Fexample.test%2F",
     };
