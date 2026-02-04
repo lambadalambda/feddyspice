@@ -4,6 +4,7 @@ const app = @import("../app.zig");
 const common = @import("common.zig");
 const form = @import("../form.zig");
 const http_types = @import("../http_types.zig");
+const log = @import("../log.zig");
 const oauth = @import("../oauth.zig");
 const rate_limit = @import("../rate_limit.zig");
 const session = @import("session.zig");
@@ -190,22 +191,27 @@ pub fn token(app_state: *app.App, allocator: std.mem.Allocator, req: http_types.
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
     if (consumed == null) {
         app_state.logger.warn(
-            "oauth token invalid_code reason=not_found client_id={s} redirect_uri={s} code_prefix={s}",
-            .{ client_id, redirect_uri, code[0..@min(code.len, 8)] },
+            "oauth token invalid_code reason=not_found client_id={s} redirect_uri={f} code_prefix={f}",
+            .{ client_id, log.safe(redirect_uri), log.safe(code[0..@min(code.len, 8)]) },
         );
         return oauthErrorResponse(allocator, .bad_request, "invalid_grant", "invalid code");
     }
     if (consumed.?.app_id != app_row.?.id) {
         app_state.logger.warn(
-            "oauth token invalid_code reason=app_mismatch client_id={s} redirect_uri={s} code_prefix={s} consumed_app_id={d}",
-            .{ client_id, redirect_uri, code[0..@min(code.len, 8)], consumed.?.app_id },
+            "oauth token invalid_code reason=app_mismatch client_id={s} redirect_uri={f} code_prefix={f} consumed_app_id={d}",
+            .{ client_id, log.safe(redirect_uri), log.safe(code[0..@min(code.len, 8)]), consumed.?.app_id },
         );
         return oauthErrorResponse(allocator, .bad_request, "invalid_grant", "invalid code");
     }
     if (!std.mem.eql(u8, consumed.?.redirect_uri, redirect_uri)) {
         app_state.logger.warn(
-            "oauth token invalid_code reason=redirect_mismatch client_id={s} code_prefix={s} expected_redirect_uri={s} got_redirect_uri={s}",
-            .{ client_id, code[0..@min(code.len, 8)], consumed.?.redirect_uri, redirect_uri },
+            "oauth token invalid_code reason=redirect_mismatch client_id={s} code_prefix={f} expected_redirect_uri={f} got_redirect_uri={f}",
+            .{
+                client_id,
+                log.safe(code[0..@min(code.len, 8)]),
+                log.safe(consumed.?.redirect_uri),
+                log.safe(redirect_uri),
+            },
         );
         return oauthErrorResponse(allocator, .bad_request, "invalid_grant", "invalid code");
     }

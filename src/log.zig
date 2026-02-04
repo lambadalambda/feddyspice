@@ -7,6 +7,31 @@ pub const Level = enum(u8) {
     err = 3,
 };
 
+pub const SafeString = struct {
+    s: []const u8,
+
+    pub fn format(self: SafeString, writer: anytype) !void {
+        for (self.s) |c| {
+            switch (c) {
+                '\n' => try writer.writeAll("\\n"),
+                '\r' => try writer.writeAll("\\r"),
+                '\t' => try writer.writeAll("\\t"),
+                else => {
+                    if (c < 0x20 or c == 0x7f) {
+                        try writer.print("\\x{X:0>2}", .{c});
+                    } else {
+                        try writer.writeByte(c);
+                    }
+                },
+            }
+        }
+    }
+};
+
+pub fn safe(s: []const u8) SafeString {
+    return .{ .s = s };
+}
+
 pub fn levelFromString(s: []const u8) Level {
     if (std.ascii.eqlIgnoreCase(s, "debug")) return .debug;
     if (std.ascii.eqlIgnoreCase(s, "info")) return .info;
@@ -134,4 +159,11 @@ test "Logger writes to file" {
 
     try std.testing.expect(std.mem.indexOf(u8, got, "hello world") != null);
     try std.testing.expect(std.mem.indexOf(u8, got, "test 123") != null);
+}
+
+test "safe escapes control characters" {
+    const allocator = std.testing.allocator;
+    const got = try std.fmt.allocPrint(allocator, "a{f}b", .{safe("\n\r\t\x01")});
+    defer allocator.free(got);
+    try std.testing.expectEqualStrings("a\\n\\r\\t\\x01b", got);
 }

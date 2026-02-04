@@ -8,6 +8,7 @@ const ids = @import("util/ids.zig");
 const follows = @import("follows.zig");
 const followers = @import("followers.zig");
 const http_signatures = @import("http_signatures.zig");
+const log = @import("log.zig");
 const notifications = @import("notifications.zig");
 const remote_actors = @import("remote_actors.zig");
 const statuses = @import("statuses.zig");
@@ -620,8 +621,8 @@ pub fn sendFollowActivity(
     if (resp.status.class() != .success) {
         const snippet = resp.body[0..@min(resp.body.len, 256)];
         app_state.logger.err(
-            "sendFollowActivity: inbox={s} status={d} body={s}",
-            .{ inbox_url, @intFromEnum(resp.status), snippet },
+            "sendFollowActivity: inbox={s} status={d} body={f}",
+            .{ inbox_url, @intFromEnum(resp.status), log.safe(snippet) },
         );
         return error.FollowSendFailed;
     }
