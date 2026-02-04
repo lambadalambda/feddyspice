@@ -36,6 +36,7 @@ const statuses_api = @import("http/statuses_api.zig");
 const timelines_api = @import("http/timelines_api.zig");
 const activitypub_api = @import("http/activitypub_api.zig");
 const media_api = @import("http/media_api.zig");
+const notifications_api = @import("http/notifications_api.zig");
 
 const transparent_png = [_]u8{
     0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
@@ -197,15 +198,15 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
     }
 
     if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/notifications")) {
-        return notificationsGet(app_state, allocator, req);
+        return notifications_api.notificationsGet(app_state, allocator, req);
     }
 
     if (req.method == .POST and std.mem.eql(u8, path, "/api/v1/notifications/clear")) {
-        return notificationsClear(app_state, allocator, req);
+        return notifications_api.notificationsClear(app_state, allocator, req);
     }
 
     if (req.method == .POST and std.mem.startsWith(u8, path, "/api/v1/notifications/") and std.mem.endsWith(u8, path, "/dismiss")) {
-        return notificationsDismiss(app_state, allocator, req, path);
+        return notifications_api.notificationsDismiss(app_state, allocator, req, path);
     }
 
     if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/conversations")) {
@@ -609,97 +610,6 @@ fn apiFollow(app_state: *app.App, allocator: std.mem.Allocator, req: Request) Re
         .content_type = "application/json; charset=utf-8",
         .body = body,
     };
-}
-
-const NotificationPayload = struct {
-    id: []const u8,
-    type: []const u8,
-    created_at: []const u8,
-    account: AccountPayload,
-    status: ?StatusPayload = null,
-};
-
-fn notificationsGet(app_state: *app.App, allocator: std.mem.Allocator, req: Request) Response {
-    const token = bearerToken(req.authorization) orelse return unauthorized(allocator);
-    const info = oauth.verifyAccessToken(&app_state.conn, allocator, token) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-    if (info == null) return unauthorized(allocator);
-
-    const q = queryString(req.target);
-    var params = form.parse(allocator, q) catch form.Form{ .map = .empty };
-
-    const limit: usize = blk: {
-        const lim_str = params.get("limit") orelse break :blk 20;
-        const parsed = std.fmt.parseInt(usize, lim_str, 10) catch 20;
-        break :blk @min(parsed, 200);
-    };
-
-    const max_id: ?i64 = blk: {
-        const s = params.get("max_id") orelse break :blk null;
-        break :blk std.fmt.parseInt(i64, s, 10) catch null;
-    };
-
-    const rows = notifications.list(&app_state.conn, allocator, info.?.user_id, limit, max_id) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-
-    var out: std.ArrayListUnmanaged(NotificationPayload) = .empty;
-    defer out.deinit(allocator);
-
-    for (rows) |n| {
-        const actor = remote_actors.lookupById(&app_state.conn, allocator, n.actor_id) catch
-            return .{ .status = .internal_server_error, .body = "internal server error\n" };
-        if (actor == null) continue;
-
-        const api_id = remoteAccountApiIdAlloc(app_state, allocator, actor.?.id);
-        const acct = makeRemoteAccountPayload(app_state, allocator, api_id, actor.?);
-
-        out.append(allocator, .{
-            .id = std.fmt.allocPrint(allocator, "{d}", .{n.id}) catch "0",
-            .type = n.kind,
-            .created_at = n.created_at,
-            .account = acct,
-            .status = null,
-        }) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
-    }
-
-    return jsonOk(allocator, out.items);
-}
-
-fn notificationsClear(app_state: *app.App, allocator: std.mem.Allocator, req: Request) Response {
-    const token = bearerToken(req.authorization) orelse return unauthorized(allocator);
-    const info = oauth.verifyAccessToken(&app_state.conn, allocator, token) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-    if (info == null) return unauthorized(allocator);
-
-    notifications.clear(&app_state.conn, info.?.user_id) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-
-    return jsonOk(allocator, .{});
-}
-
-fn notificationsDismiss(app_state: *app.App, allocator: std.mem.Allocator, req: Request, path: []const u8) Response {
-    const token = bearerToken(req.authorization) orelse return unauthorized(allocator);
-    const info = oauth.verifyAccessToken(&app_state.conn, allocator, token) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-    if (info == null) return unauthorized(allocator);
-
-    const prefix = "/api/v1/notifications/";
-    const suffix = "/dismiss";
-    if (!std.mem.startsWith(u8, path, prefix)) return .{ .status = .not_found, .body = "not found\n" };
-    if (!std.mem.endsWith(u8, path, suffix)) return .{ .status = .not_found, .body = "not found\n" };
-
-    const id_part = path[prefix.len .. path.len - suffix.len];
-    if (id_part.len == 0) return .{ .status = .not_found, .body = "not found\n" };
-    if (std.mem.indexOfScalar(u8, id_part, '/') != null) return .{ .status = .not_found, .body = "not found\n" };
-
-    const id = std.fmt.parseInt(i64, id_part, 10) catch
-        return .{ .status = .not_found, .body = "not found\n" };
-
-    const ok = notifications.dismiss(&app_state.conn, info.?.user_id, id) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-    if (!ok) return .{ .status = .not_found, .body = "not found\n" };
-
-    return jsonOk(allocator, .{});
 }
 
 const ConversationPayload = struct {
