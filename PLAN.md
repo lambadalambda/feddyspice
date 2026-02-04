@@ -155,4 +155,4 @@ These are explicitly security-focused tasks (not just “compat” work). Each i
 - [ ] Define/verify media URL exposure policy for non-public posts (capability URLs vs auth-gated).
 - [x] Tighten request parsing limits: reject overly nested JSON (`FEDDYSPICE_JSON_MAX_NESTING_DEPTH`).
 - [x] Tighten request parsing limits: cap attachment counts where applicable (max 4 media attachments).
-- [ ] Tighten request parsing limits: cap JSON field counts (and other large lists) where applicable.
+- [x] Tighten request parsing limits: cap JSON structural tokens (`FEDDYSPICE_JSON_MAX_TOKENS`) to limit field/array explosion DoS.

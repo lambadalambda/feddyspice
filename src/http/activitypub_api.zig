@@ -736,6 +736,10 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
         return .{ .status = .bad_request, .body = "json too deep\n" };
     }
 
+    if (util_json.structuralTokenCount(req.body) > app_state.cfg.json_max_tokens) {
+        return .{ .status = .bad_request, .body = "json too many tokens\n" };
+    }
+
     const ok = rate_limit.allowNow(&app_state.conn, "ap_inbox", 60_000, 1200) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
     if (!ok) return .{ .status = .too_many_requests, .body = "too many requests\n" };

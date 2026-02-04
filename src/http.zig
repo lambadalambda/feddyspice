@@ -3222,6 +3222,28 @@ test "POST /users/:name/inbox rejects overly nested JSON" {
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "json too deep") != null);
 }
 
+test "POST /users/:name/inbox rejects overly complex JSON" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    _ = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+    app_state.cfg.json_max_tokens = 4;
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const resp = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/users/alice/inbox",
+        .content_type = "application/activity+json",
+        .body = "{\"a\":1,\"b\":2,\"c\":3}",
+    });
+    try std.testing.expectEqual(std.http.Status.bad_request, resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "json too many tokens") != null);
+}
+
 test "POST /users/:name/inbox Follow stores follower and sends Accept" {
     var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
     defer app_state.deinit();

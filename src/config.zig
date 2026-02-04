@@ -23,6 +23,7 @@ pub const Config = struct {
     http_failure_backoff_base_ms: i64 = 1000,
     http_failure_backoff_max_ms: i64 = 60_000,
     json_max_nesting_depth: usize = 64,
+    json_max_tokens: usize = 4096,
     signature_max_clock_skew_sec: u32 = 15 * 60,
     jobs_mode: jobs.Mode,
 
@@ -42,6 +43,7 @@ pub const Config = struct {
         const backoff_base_env = std.posix.getenv("FEDDYSPICE_HTTP_FAILURE_BACKOFF_BASE_MS") orelse "1000";
         const backoff_max_env = std.posix.getenv("FEDDYSPICE_HTTP_FAILURE_BACKOFF_MAX_MS") orelse "60000";
         const json_depth_env = std.posix.getenv("FEDDYSPICE_JSON_MAX_NESTING_DEPTH") orelse "64";
+        const json_tokens_env = std.posix.getenv("FEDDYSPICE_JSON_MAX_TOKENS") orelse "4096";
         const skew_env = std.posix.getenv("FEDDYSPICE_SIGNATURE_MAX_CLOCK_SKEW_SEC") orelse "900";
         const jobs_mode_env = std.posix.getenv("FEDDYSPICE_JOBS_MODE") orelse "spawn";
 
@@ -99,6 +101,11 @@ pub const Config = struct {
             break :blk @max(parsed, 1);
         };
 
+        const json_max_tokens: usize = blk: {
+            const parsed = std.fmt.parseInt(usize, json_tokens_env, 10) catch break :blk 4096;
+            break :blk @max(parsed, 1);
+        };
+
         const signature_max_clock_skew_sec: u32 = blk: {
             const parsed = std.fmt.parseInt(u32, skew_env, 10) catch break :blk 15 * 60;
             break :blk parsed;
@@ -126,6 +133,7 @@ pub const Config = struct {
             .http_failure_backoff_base_ms = http_failure_backoff_base_ms,
             .http_failure_backoff_max_ms = http_failure_backoff_max_ms,
             .json_max_nesting_depth = json_max_nesting_depth,
+            .json_max_tokens = json_max_tokens,
             .signature_max_clock_skew_sec = signature_max_clock_skew_sec,
             .jobs_mode = jobs_mode,
         };

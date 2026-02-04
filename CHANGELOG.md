@@ -129,6 +129,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - HTTP responses include baseline security headers (nosniff, no-referrer, deny framing; CSP for HTML pages).
 - Inbound ActivityPub inbox signature verification now enforces `Date` max clock skew (`FEDDYSPICE_SIGNATURE_MAX_CLOCK_SKEW_SEC`) to reduce replay risk.
 - ActivityPub inbox requests now reject excessively nested JSON payloads (`FEDDYSPICE_JSON_MAX_NESTING_DEPTH`) to reduce DoS risk.
+- ActivityPub inbox requests now reject JSON payloads with too many structural tokens (`FEDDYSPICE_JSON_MAX_TOKENS`) to reduce DoS risk.
 - Status creation now enforces a max of 4 media attachments; inbound remote Note attachments are capped to 4 (reduces abuse/DoS risk).
 - Outbound federation fetches now reject explicit nonstandard ports by default (`FEDDYSPICE_HTTP_ALLOW_NONSTANDARD_PORTS=false`) to reduce SSRF blast radius.
 - OAuth token responses include `Cache-Control: no-store` / `Pragma: no-cache`; HTML form POSTs (`/login`, `/signup`, `/oauth/authorize`) enforce same-origin when `Origin`/`Referer` is present.
