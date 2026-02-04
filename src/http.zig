@@ -2696,6 +2696,66 @@ test "timelines: public timeline returns local statuses" {
     try std.testing.expectEqualStrings(id, tl_json.value.array.items[0].object.get("id").?.string);
 }
 
+test "statuses: create includes tags/mentions/emojis arrays (Elk compatibility)" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const app_creds = try oauth.createApp(
+        &app_state.conn,
+        a,
+        "elk",
+        "urn:ietf:wg:oauth:2.0:oob",
+        "read write",
+        "",
+    );
+    const token = try oauth.createAccessToken(&app_state.conn, a, app_creds.id, user_id, "read write");
+    const auth_header = try std.fmt.allocPrint(a, "Bearer {s}", .{token});
+
+    const create_resp = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/api/v1/statuses",
+        .content_type = "application/x-www-form-urlencoded",
+        .body = "status=hello&visibility=public",
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, create_resp.status);
+
+    var create_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, create_resp.body, .{});
+    defer create_json.deinit();
+
+    try std.testing.expect(create_json.value == .object);
+
+    try std.testing.expect(create_json.value.object.get("tags") != null);
+    try std.testing.expect(create_json.value.object.get("tags").? == .array);
+
+    try std.testing.expect(create_json.value.object.get("mentions") != null);
+    try std.testing.expect(create_json.value.object.get("mentions").? == .array);
+
+    try std.testing.expect(create_json.value.object.get("emojis") != null);
+    try std.testing.expect(create_json.value.object.get("emojis").? == .array);
+
+    try std.testing.expect(create_json.value.object.get("replies_count") != null);
+    try std.testing.expect(create_json.value.object.get("replies_count").? == .integer);
+
+    try std.testing.expect(create_json.value.object.get("reblogs_count") != null);
+    try std.testing.expect(create_json.value.object.get("reblogs_count").? == .integer);
+
+    try std.testing.expect(create_json.value.object.get("favourites_count") != null);
+    try std.testing.expect(create_json.value.object.get("favourites_count").? == .integer);
+
+    try std.testing.expect(create_json.value.object.get("spoiler_text") != null);
+    try std.testing.expect(create_json.value.object.get("spoiler_text").? == .string);
+
+    try std.testing.expect(create_json.value.object.get("edited_at") != null);
+}
+
 test "timelines: public timeline excludes unlisted/private/direct statuses (local + remote)" {
     var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
     defer app_state.deinit();

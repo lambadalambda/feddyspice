@@ -46,14 +46,39 @@ pub const MediaAttachmentPayload = struct {
 
 pub const StatusPayload = struct {
     id: []const u8,
+    uri: []const u8,
     created_at: []const u8,
+    edited_at: ?[]const u8 = null,
+    account: AccountPayload,
     content: []const u8,
     visibility: []const u8,
     sensitive: bool,
-    uri: []const u8,
-    url: []const u8,
-    account: AccountPayload,
+    spoiler_text: []const u8,
     media_attachments: []const MediaAttachmentPayload,
+    application: struct {
+        name: []const u8,
+        website: ?[]const u8 = null,
+    },
+    mentions: []const struct {
+        id: []const u8,
+        username: []const u8,
+        url: []const u8,
+        acct: []const u8,
+    },
+    tags: []const struct {
+        name: []const u8,
+        url: []const u8,
+    },
+    emojis: []const struct {
+        shortcode: []const u8,
+        url: []const u8,
+        static_url: []const u8,
+        visible_in_picker: bool,
+    },
+    reblogs_count: i64,
+    favourites_count: i64,
+    replies_count: i64,
+    url: []const u8,
 };
 
 fn statusPayloadIdInt(p: StatusPayload) i64 {
@@ -168,14 +193,22 @@ pub fn makeStatusPayload(app_state: *app.App, allocator: std.mem.Allocator, user
 
     return .{
         .id = id_str,
+        .uri = uri,
         .created_at = st.created_at,
+        .account = acct,
         .content = html_content,
         .visibility = st.visibility,
         .sensitive = false,
-        .uri = uri,
-        .url = uri,
-        .account = acct,
+        .spoiler_text = "",
         .media_attachments = attachments,
+        .application = .{ .name = "feddyspice", .website = null },
+        .mentions = &.{},
+        .tags = &.{},
+        .emojis = &.{},
+        .reblogs_count = 0,
+        .favourites_count = 0,
+        .replies_count = 0,
+        .url = uri,
     };
 }
 
@@ -280,13 +313,21 @@ pub fn makeRemoteStatusPayload(
 
     return .{
         .id = id_str,
+        .uri = st.remote_uri,
         .created_at = st.created_at,
+        .account = acct,
         .content = st.content_html,
         .visibility = st.visibility,
         .sensitive = false,
-        .uri = st.remote_uri,
-        .url = st.remote_uri,
-        .account = acct,
+        .spoiler_text = "",
         .media_attachments = attachments,
+        .application = .{ .name = "feddyspice", .website = null },
+        .mentions = &.{},
+        .tags = &.{},
+        .emojis = &.{},
+        .reblogs_count = 0,
+        .favourites_count = 0,
+        .replies_count = 0,
+        .url = st.remote_uri,
     };
 }
