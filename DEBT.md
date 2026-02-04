@@ -22,3 +22,10 @@ This file tracks “good future refactors” and known risks. Add items whenever
 - [x] Verify inbound ActivityPub inbox requests using HTTP Signatures + `Digest` (including `hs2019`, `content-type`, `content-length`, and reverse-proxy host handling).
 - [x] Sanitize remote HTML: do not store/re-serve untrusted `object.content` without sanitization (XSS risk).
 - [x] Header-injection hardening: validate/strip control characters (`\r`, `\n`, etc.) from any user-controlled header values (e.g. redirects, media content-types) before sending responses.
+- [ ] Add a baseline “security headers” set on all HTTP responses (nosniff, referrer policy, clickjacking protection; CSP for HTML).
+- [ ] Add OAuth hardening: `Cache-Control: no-store` for `/oauth/token` + auth-code flows; consider CSRF protection for HTML form POSTs even with `SameSite=Lax`.
+- [ ] Validate inbound signature freshness: parse `Date` and enforce max clock skew (configurable).
+- [ ] Replay protection: dedupe signed inbox requests even when activity `id` is missing (hash fallback).
+- [ ] Outbound transport: reject nonstandard ports by default; re-validate on redirects if we ever enable follow-redirects.
+- [ ] Add rate limiting/backpressure for high-risk entrypoints (login/token/apps/inbox) and remote fetch storms.
+- [ ] Add regression tests for visibility/data leakage (direct/private never exposed via public/tag timelines or unauthenticated endpoints; document media exposure expectations).
