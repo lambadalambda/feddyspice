@@ -50,7 +50,7 @@ This is a “rough backlog” based on Mastodon’s `config/routes/api.rb` and P
 - [x] Add account block/mute actions: `POST /api/v1/accounts/:id/(block|unblock|mute|unmute)` (no-op acceptable for single-user, but avoid 404).
 - [x] Add reporting stub: `POST /api/v1/reports`.
 - [x] Add media deletion: `DELETE /api/v1/media/:id` (and match Mastodon’s “return attachment” semantics).
-- [ ] Add tags endpoints: `GET /api/v1/tags/:id` and `POST /api/v1/tags/:id/(follow|unfollow)` (even if empty/422 for unknown tags).
+- [x] Add tags endpoints: `GET /api/v1/tags/:id` and `POST /api/v1/tags/:id/(follow|unfollow)` (even if empty/422 for unknown tags).
 - [x] Add missing v1 instance endpoints used by clients: `/api/v1/instance/rules`, `/api/v1/instance/domain_blocks`, `/api/v1/instance/translation_languages`.
 - [ ] Flesh out `/api/v1/instance` payload fields (stats/urls/languages/contact) if clients require it.
 - [x] Fill out `/api/v1/preferences` with Mastodon-shaped keys (currently `{}`) for clients that assume keys exist.

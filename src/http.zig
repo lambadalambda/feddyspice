@@ -29,6 +29,7 @@ const http_urls = @import("http/urls.zig");
 const masto = @import("http/mastodon.zig");
 const statuses_api = @import("http/statuses_api.zig");
 const timelines_api = @import("http/timelines_api.zig");
+const tags_api = @import("http/tags_api.zig");
 const activitypub_api = @import("http/activitypub_api.zig");
 const media_api = @import("http/media_api.zig");
 const notifications_api = @import("http/notifications_api.zig");
@@ -412,6 +413,21 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
 
     if (req.method == .GET and std.mem.startsWith(u8, path, "/api/v1/timelines/tag/")) {
         return timelines_api.tagTimeline(app_state, allocator, req, path);
+    }
+
+    if (req.method == .GET and std.mem.startsWith(u8, path, "/api/v1/tags/")) {
+        const rest = path["/api/v1/tags/".len..];
+        if (std.mem.indexOfScalar(u8, rest, '/') == null) {
+            return tags_api.tagGet(app_state, allocator, path);
+        }
+    }
+
+    if (req.method == .POST and std.mem.startsWith(u8, path, "/api/v1/tags/") and std.mem.endsWith(u8, path, "/follow")) {
+        return tags_api.tagFollowUnfollow(app_state, allocator, req, path, "/follow");
+    }
+
+    if (req.method == .POST and std.mem.startsWith(u8, path, "/api/v1/tags/") and std.mem.endsWith(u8, path, "/unfollow")) {
+        return tags_api.tagFollowUnfollow(app_state, allocator, req, path, "/unfollow");
     }
 
     if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/statuses")) {
@@ -3471,6 +3487,55 @@ test "timelines: list/link placeholders return empty arrays" {
         try std.testing.expect(parsed.value == .array);
         try std.testing.expectEqual(@as(usize, 0), parsed.value.array.items.len);
     }
+}
+
+test "tags: get + follow/unfollow" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const app_creds = try oauth.createApp(
+        &app_state.conn,
+        a,
+        "pl-fe",
+        "urn:ietf:wg:oauth:2.0:oob",
+        "read write",
+        "",
+    );
+    const token = try oauth.createAccessToken(&app_state.conn, a, app_creds.id, user_id, "read write");
+    const auth_header = try std.fmt.allocPrint(a, "Bearer {s}", .{token});
+
+    const get_resp = handle(&app_state, a, .{ .method = .GET, .target = "/api/v1/tags/test" });
+    try std.testing.expectEqual(std.http.Status.ok, get_resp.status);
+    var get_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, get_resp.body, .{});
+    defer get_json.deinit();
+    try std.testing.expectEqualStrings("test", get_json.value.object.get("name").?.string);
+
+    const follow_resp = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/api/v1/tags/test/follow",
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, follow_resp.status);
+    var follow_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, follow_resp.body, .{});
+    defer follow_json.deinit();
+    try std.testing.expect(follow_json.value.object.get("following").?.bool);
+
+    const unfollow_resp = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/api/v1/tags/test/unfollow",
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, unfollow_resp.status);
+    var unfollow_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, unfollow_resp.body, .{});
+    defer unfollow_json.deinit();
+    try std.testing.expect(!unfollow_json.value.object.get("following").?.bool);
 }
 
 test "timelines: home timeline pagination (Link + max_id/since_id)" {
