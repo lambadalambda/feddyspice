@@ -28,6 +28,22 @@ pub fn maybeHandle(allocator: std.mem.Allocator, req: http_types.Request, path: 
         return common.jsonOk(allocator, [_]i32{});
     }
 
+    if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/trends")) {
+        return common.jsonOk(allocator, [_]i32{});
+    }
+
+    if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/suggestions")) {
+        return common.jsonOk(allocator, [_]i32{});
+    }
+
+    if (req.method == .DELETE and std.mem.startsWith(u8, path, "/api/v1/suggestions/")) {
+        const rest = path["/api/v1/suggestions/".len..];
+        if (rest.len > 0 and std.mem.indexOfScalar(u8, rest, '/') == null) {
+            const payload: struct {} = .{};
+            return common.jsonOk(allocator, payload);
+        }
+    }
+
     if (req.method == .GET and std.mem.eql(u8, path, "/api/v2/filters")) {
         return common.jsonOk(allocator, [_]i32{});
     }

@@ -56,6 +56,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `mise` loads local env from `.env` (gitignored) and provides `.env.example`.
 - Additional Mastodon API placeholder endpoints used by Elk/pl-fe (notifications, markers, preferences, search, etc.).
 - Added Mastodon v1 search compatibility endpoints (`GET /api/v1/search`, `GET /api/v1/accounts/search`).
+- Added placeholder discovery endpoints (`GET /api/v1/trends`, `GET /api/v1/suggestions`, `DELETE /api/v1/suggestions/:account_id`).
 - Notifications API endpoints (`GET /api/v1/notifications`, `POST /api/v1/notifications/clear`, `POST /api/v1/notifications/:id/dismiss`).
 - Streaming health endpoint (`GET /api/v1/streaming/health`).
 - Account lookup + profile endpoint (`GET /api/v1/accounts/lookup`, `GET /api/v1/accounts/:id`).
