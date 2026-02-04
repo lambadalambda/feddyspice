@@ -144,13 +144,13 @@ This is the “eventually” list. We should keep it scoped to what pl-fe needs,
 
 These are explicitly security-focused tasks (not just “compat” work). Each item needs tests.
 
-- [ ] Add baseline security headers for all HTTP responses (at least: `X-Content-Type-Options`, `Referrer-Policy`, clickjacking/CSP).
+- [x] Add baseline security headers for all HTTP responses (at least: `X-Content-Type-Options`, `Referrer-Policy`, clickjacking/CSP).
 - [x] OAuth: add `Cache-Control: no-store` to token/code-related responses; enforce same-origin on HTML form POSTs when `Origin`/`Referer` is present.
 - [x] HTTP Signatures: validate `Date` header format + max clock skew (configurable).
 - [x] HTTP Signatures: replay protection when ActivityPub activity `id` is missing (fallback dedupe key).
 - [x] Transport: disallow outbound `http(s)` URLs with nonstandard ports by default (configurable).
 - [x] Rate limiting/backpressure for public entrypoints (`/login`, `/oauth/token`, `/api/v1/apps`, `/users/:name/inbox`).
-- [ ] Outbound fetch storm protection (per-domain concurrency/backoff) for actor discovery/delivery.
+- [x] Outbound fetch storm protection (per-domain concurrency/backoff) for actor discovery/delivery.
 - [x] Add visibility regression tests: no `direct`/`private` content in unauthenticated timelines/profile lists (and empty placeholders stay empty).
 - [ ] Define/verify media URL exposure policy for non-public posts (capability URLs vs auth-gated).
 - [x] Tighten request parsing limits: reject overly nested JSON (`FEDDYSPICE_JSON_MAX_NESTING_DEPTH`).

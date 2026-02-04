@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const config = @import("config.zig");
+const fetch_limiter = @import("fetch_limiter.zig");
 const ssrf = @import("ssrf.zig");
 
 pub const Error =
@@ -19,6 +20,7 @@ pub const Error =
         NetworkDisabled,
         UnexpectedRequest,
         OutboundUrlInvalid,
+        OutboundThrottled,
         ResolveFailed,
         SsrfBlocked,
         ResponseTooLarge,
@@ -88,6 +90,7 @@ pub const RealTransport = struct {
     allow_private_networks: bool,
     allow_nonstandard_ports: bool,
     max_body_bytes: usize,
+    limiter: fetch_limiter.Limiter,
 
     pub fn init(allocator: std.mem.Allocator, cfg: config.Config) !RealTransport {
         var client: std.http.Client = .{ .allocator = allocator };
@@ -104,10 +107,16 @@ pub const RealTransport = struct {
             .allow_private_networks = cfg.allow_private_networks,
             .allow_nonstandard_ports = cfg.http_allow_nonstandard_ports,
             .max_body_bytes = cfg.http_max_body_bytes,
+            .limiter = fetch_limiter.Limiter.init(allocator, .{
+                .max_inflight = cfg.http_max_inflight_per_host,
+                .backoff_base_ms = cfg.http_failure_backoff_base_ms,
+                .backoff_max_ms = cfg.http_failure_backoff_max_ms,
+            }),
         };
     }
 
     pub fn deinit(self: *RealTransport) void {
+        self.limiter.deinit();
         self.client.deinit();
         self.* = undefined;
     }
@@ -135,6 +144,16 @@ pub const RealTransport = struct {
 
         const uri = try std.Uri.parse(opts.url);
         try validateOutboundUri(allocator, uri, self.allow_private_networks, self.allow_nonstandard_ports);
+
+        var host_buf: [std.Uri.host_name_max]u8 = undefined;
+        const host = uri.getHost(&host_buf) catch return error.OutboundUrlInvalid;
+        const now_ms: i64 = std.time.milliTimestamp();
+        var ticket = self.limiter.acquire(host, now_ms) catch |err| switch (err) {
+            error.Throttled => return error.OutboundThrottled,
+            else => |e| return e,
+        };
+        var limiter_ok: bool = false;
+        defer ticket.finish(std.time.milliTimestamp(), limiter_ok);
 
         var req = try self.client.request(opts.method, uri, .{
             .headers = opts.headers,
@@ -172,6 +191,7 @@ pub const RealTransport = struct {
             else => |e| return e,
         };
 
+        limiter_ok = response.head.status.class() == .success;
         return .{
             .status = response.head.status,
             .body = body_bytes,

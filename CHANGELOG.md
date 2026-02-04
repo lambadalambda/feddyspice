@@ -123,6 +123,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Logs escape control characters when printing untrusted strings (prevents log forging via newlines in remote responses or OAuth params).
 - Remote ActivityPub ingest now ignores non-`http(s)` Note IDs and attachment URLs; remote actor docs with mismatched IDs are rejected (hardens against URL-scheme injection and actor ID spoofing).
 - Outbound fetch SSRF checks now also validate the connected peer IP address (mitigates DNS-rebinding bypass of pre-connect DNS checks).
+- Outbound HTTP fetches now apply per-host concurrency limits and failure backoff (`FEDDYSPICE_HTTP_MAX_INFLIGHT_PER_HOST`, `FEDDYSPICE_HTTP_FAILURE_BACKOFF_*`) to reduce fetch-storm impact.
 - Remote ActivityPub Note `content` is sanitized on ingest before being stored/re-served (prevents XSS via remote HTML).
 - Response header values are filtered to prevent CR/LF injection; user-controlled media `content_type` is sanitized to a safe default.
 - HTTP responses include baseline security headers (nosniff, no-referrer, deny framing; CSP for HTML pages).
