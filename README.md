@@ -1,18 +1,27 @@
 # feddyspice
 
-Minimal **single-user** Fediverse server written in **Zig**, using **SQLite**, with **no built-in frontend** (beyond the minimum needed for OAuth signup/login). The primary UI is intended to be **pl-fe**: https://github.com/mkljczk/pl-fe
+Minimal **single-user** Fediverse server written in **Zig**, using **SQLite**, with **no built-in frontend** (beyond the minimum needed for signup/login + OAuth). The primary UI is intended to be **pl-fe**: https://github.com/mkljczk/pl-fe
 
 ## Project goals
 
 - Single-user first (one local account; simplest thing that can federate).
 - SQLite-backed, small/efficient, minimal moving parts.
-- ActivityPub federation + enough Mastodon-compatible API surface for pl-fe.
+- ActivityPub federation + enough Mastodon-compatible API surface for pl-fe (and a bit of Elk).
 - Development by TDD (unit + integration + federation-in-a-box E2E).
 
 Non-goals (at least initially):
 
 - Multi-user hosting, moderation tooling, advanced admin UI.
 - Full Mastodon API compatibility.
+
+## What works (today)
+
+- Single local user via `GET/POST /signup`, `GET/POST /login`.
+- OAuth 2.0 authorization-code flow for clients (`/api/v1/apps`, `/oauth/authorize`, `/oauth/token`).
+- Posting + timelines (home/public + pagination) with Mastodon-ish JSON shapes.
+- Media uploads (`POST /api/v1/media`) and attaching uploads to statuses.
+- WebSocket streaming (`GET /api/v1/streaming?stream=user&access_token=...`) with `update`/`delete`/`notification` events.
+- ActivityPub federation: WebFinger/NodeInfo/actor, inbox/outbox, follow/accept, Create/Delete, direct messages, unfollow (`Undo(Follow)`), and basic interactions (Like/Announce + Undo).
 
 ## Development
 
@@ -26,9 +35,9 @@ Copy `.env.example` to `.env` (gitignored) and adjust as needed.
 
 Common workflows:
 
-- `zig build test`
-- `zig build run`
-- `zig fmt .`
+- `mise run zig:test`
+- `mise run zig:fmt`
+- `mise run fed:test` (E2E federation smoke tests)
 
 ## Running locally
 
@@ -39,6 +48,30 @@ FEDDYSPICE_LISTEN=0.0.0.0:8080 \
 FEDDYSPICE_DB_PATH=./feddyspice.sqlite3 \
 zig build run
 ```
+
+First-time setup:
+
+- Open `http://localhost:8080/signup` to create the single local user.
+- Then use pl-fe (or visit `/login` for the HTML flow used during OAuth authorization).
+
+## Configuration (env vars)
+
+`mise` loads `.env` automatically for tasks. For production or `zig build run`, export variables explicitly.
+
+Key settings:
+
+- `FEDDYSPICE_DOMAIN` / `FEDDYSPICE_SCHEME`: public-facing base used to generate ActivityPub URLs.
+- `FEDDYSPICE_LISTEN`: bind address (default `0.0.0.0:8080`).
+- `FEDDYSPICE_DB_PATH`: SQLite path (default `feddyspice.sqlite3`).
+- `FEDDYSPICE_JOBS_MODE`: `spawn` (default) | `sync` | `disabled`.
+- `FEDDYSPICE_LOG_FILE`, `FEDDYSPICE_LOG_LEVEL`: optional file logging.
+
+Federation/dev-only knobs (security-sensitive):
+
+- `FEDDYSPICE_ALLOW_PRIVATE_NETWORKS`: allow outbound fetches to RFC1918/loopback/etc (needed for fedbox).
+- `FEDDYSPICE_HTTP_ALLOW_NONSTANDARD_PORTS`: allow explicit `:port` URLs (fedbox enables this for helper services).
+
+See `.env.example` for the current full list and defaults.
 
 ## Logging
 
@@ -105,6 +138,12 @@ In practice, this means implementing a minimal set of:
 
 - OAuth 2.0 endpoints (`/oauth/authorize`, `/oauth/token`, app registration)
 - Mastodon-ish REST endpoints pl-fe expects (accounts, timelines, posting)
+
+## Docs
+
+- Architecture: `docs/architecture.md`
+- Milestones and endpoint checklist: `PLAN.md`
+- Refactoring/security notes: `DEBT.md`
 
 ## API compatibility target
 
