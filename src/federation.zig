@@ -255,12 +255,6 @@ fn fetchBodySuccessAlloc(app_state: *app.App, allocator: std.mem.Allocator, opts
     return resp.body;
 }
 
-fn fetchOkDiscardBody(app_state: *app.App, allocator: std.mem.Allocator, opts: transport.FetchOptions) Error!void {
-    const resp = try app_state.transport.fetch(allocator, opts);
-    allocator.free(resp.body);
-    if (resp.status.class() != .success) return error.FollowSendFailed;
-}
-
 fn deliveryInboxUrl(actor: remote_actors.RemoteActor) []const u8 {
     return actor.shared_inbox orelse actor.inbox;
 }
@@ -734,59 +728,7 @@ pub fn deliverStatusToFollowers(app_state: *app.App, allocator: std.mem.Allocato
 
         const inbox_url = deliveryInboxUrl(actor.?);
         app_state.logger.debug("deliverStatusToFollowers: inbox={s}", .{inbox_url});
-        const inbox_uri = std.Uri.parse(inbox_url) catch |err| {
-            app_state.logger.err("deliverStatusToFollowers: invalid inbox url={s} err={any}", .{ inbox_url, err });
-            continue;
-        };
-        const inbox_target = requestTargetAlloc(allocator, inbox_uri) catch |err| {
-            app_state.logger.err("deliverStatusToFollowers: requestTargetAlloc failed inbox={s} err={any}", .{ inbox_url, err });
-            continue;
-        };
-
-        const inbox_host_part = inbox_uri.host orelse {
-            app_state.logger.err("deliverStatusToFollowers: inbox url missing host url={s}", .{inbox_url});
-            continue;
-        };
-        const inbox_host = inbox_host_part.toRawMaybeAlloc(allocator) catch |err| {
-            app_state.logger.err("deliverStatusToFollowers: toRawMaybeAlloc failed inbox={s} err={any}", .{ inbox_url, err });
-            continue;
-        };
-        const inbox_host_header = hostHeaderAlloc(allocator, inbox_host, inbox_uri.port, app_state.cfg.scheme) catch |err| {
-            app_state.logger.err("deliverStatusToFollowers: hostHeaderAlloc failed inbox={s} err={any}", .{ inbox_url, err });
-            continue;
-        };
-
-        const signed = http_signatures.signRequest(
-            allocator,
-            keys.private_key_pem,
-            key_id,
-            .POST,
-            inbox_target,
-            inbox_host_header,
-            create_body,
-            std.time.timestamp(),
-        ) catch |err| {
-            app_state.logger.err("deliverStatusToFollowers: signRequest failed inbox={s} err={any}", .{ inbox_url, err });
-            continue;
-        };
-
-        fetchOkDiscardBody(app_state, allocator, .{
-            .url = inbox_url,
-            .method = .POST,
-            .headers = .{
-                .host = .{ .override = inbox_host_header },
-                .content_type = .{ .override = "application/activity+json" },
-                .accept_encoding = .omit,
-                .user_agent = .{ .override = "feddyspice" },
-            },
-            .extra_headers = &.{
-                .{ .name = "accept", .value = "application/activity+json" },
-                .{ .name = "date", .value = signed.date },
-                .{ .name = "digest", .value = signed.digest },
-                .{ .name = "signature", .value = signed.signature },
-            },
-            .payload = create_body,
-        }) catch |err| {
+        deliverSignedInboxPostOkDiscardBody(app_state, allocator, keys.private_key_pem, key_id, inbox_url, create_body) catch |err| {
             app_state.logger.err("deliverStatusToFollowers: deliver failed inbox={s} err={any}", .{ inbox_url, err });
             continue;
         };
@@ -838,59 +780,7 @@ fn deliverDirectStatus(app_state: *app.App, allocator: std.mem.Allocator, user: 
 
     for (recipients) |actor| {
         const inbox_url = deliveryInboxUrl(actor);
-        const inbox_uri = std.Uri.parse(inbox_url) catch |err| {
-            app_state.logger.err("deliverDirectStatus: invalid inbox url={s} err={any}", .{ inbox_url, err });
-            continue;
-        };
-        const inbox_target = requestTargetAlloc(allocator, inbox_uri) catch |err| {
-            app_state.logger.err("deliverDirectStatus: requestTargetAlloc failed inbox={s} err={any}", .{ inbox_url, err });
-            continue;
-        };
-
-        const inbox_host_part = inbox_uri.host orelse {
-            app_state.logger.err("deliverDirectStatus: inbox url missing host url={s}", .{inbox_url});
-            continue;
-        };
-        const inbox_host = inbox_host_part.toRawMaybeAlloc(allocator) catch |err| {
-            app_state.logger.err("deliverDirectStatus: toRawMaybeAlloc failed inbox={s} err={any}", .{ inbox_url, err });
-            continue;
-        };
-        const inbox_host_header = hostHeaderAlloc(allocator, inbox_host, inbox_uri.port, app_state.cfg.scheme) catch |err| {
-            app_state.logger.err("deliverDirectStatus: hostHeaderAlloc failed inbox={s} err={any}", .{ inbox_url, err });
-            continue;
-        };
-
-        const signed = http_signatures.signRequest(
-            allocator,
-            keys.private_key_pem,
-            key_id,
-            .POST,
-            inbox_target,
-            inbox_host_header,
-            create_body,
-            std.time.timestamp(),
-        ) catch |err| {
-            app_state.logger.err("deliverDirectStatus: signRequest failed inbox={s} err={any}", .{ inbox_url, err });
-            continue;
-        };
-
-        fetchOkDiscardBody(app_state, allocator, .{
-            .url = inbox_url,
-            .method = .POST,
-            .headers = .{
-                .host = .{ .override = inbox_host_header },
-                .content_type = .{ .override = "application/activity+json" },
-                .accept_encoding = .omit,
-                .user_agent = .{ .override = "feddyspice" },
-            },
-            .extra_headers = &.{
-                .{ .name = "accept", .value = "application/activity+json" },
-                .{ .name = "date", .value = signed.date },
-                .{ .name = "digest", .value = signed.digest },
-                .{ .name = "signature", .value = signed.signature },
-            },
-            .payload = create_body,
-        }) catch |err| {
+        deliverSignedInboxPostOkDiscardBody(app_state, allocator, keys.private_key_pem, key_id, inbox_url, create_body) catch |err| {
             app_state.logger.err("deliverDirectStatus: deliver failed inbox={s} err={any}", .{ inbox_url, err });
             continue;
         };
@@ -975,59 +865,7 @@ pub fn deliverDeleteToFollowers(app_state: *app.App, allocator: std.mem.Allocato
 
         const inbox_url = deliveryInboxUrl(actor.?);
         app_state.logger.debug("deliverDeleteToFollowers: inbox={s}", .{inbox_url});
-        const inbox_uri = std.Uri.parse(inbox_url) catch |err| {
-            app_state.logger.err("deliverDeleteToFollowers: invalid inbox url={s} err={any}", .{ inbox_url, err });
-            continue;
-        };
-        const inbox_target = requestTargetAlloc(allocator, inbox_uri) catch |err| {
-            app_state.logger.err("deliverDeleteToFollowers: requestTargetAlloc failed inbox={s} err={any}", .{ inbox_url, err });
-            continue;
-        };
-
-        const inbox_host_part = inbox_uri.host orelse {
-            app_state.logger.err("deliverDeleteToFollowers: inbox url missing host url={s}", .{inbox_url});
-            continue;
-        };
-        const inbox_host = inbox_host_part.toRawMaybeAlloc(allocator) catch |err| {
-            app_state.logger.err("deliverDeleteToFollowers: toRawMaybeAlloc failed inbox={s} err={any}", .{ inbox_url, err });
-            continue;
-        };
-        const inbox_host_header = hostHeaderAlloc(allocator, inbox_host, inbox_uri.port, app_state.cfg.scheme) catch |err| {
-            app_state.logger.err("deliverDeleteToFollowers: hostHeaderAlloc failed inbox={s} err={any}", .{ inbox_url, err });
-            continue;
-        };
-
-        const signed = http_signatures.signRequest(
-            allocator,
-            keys.private_key_pem,
-            key_id,
-            .POST,
-            inbox_target,
-            inbox_host_header,
-            delete_body,
-            std.time.timestamp(),
-        ) catch |err| {
-            app_state.logger.err("deliverDeleteToFollowers: signRequest failed inbox={s} err={any}", .{ inbox_url, err });
-            continue;
-        };
-
-        fetchOkDiscardBody(app_state, allocator, .{
-            .url = inbox_url,
-            .method = .POST,
-            .headers = .{
-                .host = .{ .override = inbox_host_header },
-                .content_type = .{ .override = "application/activity+json" },
-                .accept_encoding = .omit,
-                .user_agent = .{ .override = "feddyspice" },
-            },
-            .extra_headers = &.{
-                .{ .name = "accept", .value = "application/activity+json" },
-                .{ .name = "date", .value = signed.date },
-                .{ .name = "digest", .value = signed.digest },
-                .{ .name = "signature", .value = signed.signature },
-            },
-            .payload = delete_body,
-        }) catch |err| {
+        deliverSignedInboxPostOkDiscardBody(app_state, allocator, keys.private_key_pem, key_id, inbox_url, delete_body) catch |err| {
             app_state.logger.err("deliverDeleteToFollowers: deliver failed inbox={s} err={any}", .{ inbox_url, err });
             continue;
         };
@@ -1075,59 +913,7 @@ fn deliverDirectDelete(app_state: *app.App, allocator: std.mem.Allocator, user: 
 
     for (recipients) |actor| {
         const inbox_url = deliveryInboxUrl(actor);
-        const inbox_uri = std.Uri.parse(inbox_url) catch |err| {
-            app_state.logger.err("deliverDirectDelete: invalid inbox url={s} err={any}", .{ inbox_url, err });
-            continue;
-        };
-        const inbox_target = requestTargetAlloc(allocator, inbox_uri) catch |err| {
-            app_state.logger.err("deliverDirectDelete: requestTargetAlloc failed inbox={s} err={any}", .{ inbox_url, err });
-            continue;
-        };
-
-        const inbox_host_part = inbox_uri.host orelse {
-            app_state.logger.err("deliverDirectDelete: inbox url missing host url={s}", .{inbox_url});
-            continue;
-        };
-        const inbox_host = inbox_host_part.toRawMaybeAlloc(allocator) catch |err| {
-            app_state.logger.err("deliverDirectDelete: toRawMaybeAlloc failed inbox={s} err={any}", .{ inbox_url, err });
-            continue;
-        };
-        const inbox_host_header = hostHeaderAlloc(allocator, inbox_host, inbox_uri.port, app_state.cfg.scheme) catch |err| {
-            app_state.logger.err("deliverDirectDelete: hostHeaderAlloc failed inbox={s} err={any}", .{ inbox_url, err });
-            continue;
-        };
-
-        const signed = http_signatures.signRequest(
-            allocator,
-            keys.private_key_pem,
-            key_id,
-            .POST,
-            inbox_target,
-            inbox_host_header,
-            delete_body,
-            std.time.timestamp(),
-        ) catch |err| {
-            app_state.logger.err("deliverDirectDelete: signRequest failed inbox={s} err={any}", .{ inbox_url, err });
-            continue;
-        };
-
-        fetchOkDiscardBody(app_state, allocator, .{
-            .url = inbox_url,
-            .method = .POST,
-            .headers = .{
-                .host = .{ .override = inbox_host_header },
-                .content_type = .{ .override = "application/activity+json" },
-                .accept_encoding = .omit,
-                .user_agent = .{ .override = "feddyspice" },
-            },
-            .extra_headers = &.{
-                .{ .name = "accept", .value = "application/activity+json" },
-                .{ .name = "date", .value = signed.date },
-                .{ .name = "digest", .value = signed.digest },
-                .{ .name = "signature", .value = signed.signature },
-            },
-            .payload = delete_body,
-        }) catch |err| {
+        deliverSignedInboxPostOkDiscardBody(app_state, allocator, keys.private_key_pem, key_id, inbox_url, delete_body) catch |err| {
             app_state.logger.err("deliverDirectDelete: deliver failed inbox={s} err={any}", .{ inbox_url, err });
             continue;
         };
