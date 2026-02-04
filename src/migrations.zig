@@ -174,6 +174,11 @@ const migrations = [_]Migration{
         .name = "remote_status_in_reply_to",
         .sql = remote_status_in_reply_to_v25_sql,
     },
+    .{
+        .version = 26,
+        .name = "status_reactions",
+        .sql = status_reactions_v26_sql,
+    },
 };
 
 const schema_migrations_sql: [:0]const u8 =
@@ -508,6 +513,21 @@ const remote_status_in_reply_to_v25_sql: [:0]const u8 =
     \\CREATE INDEX IF NOT EXISTS remote_statuses_in_reply_to_id_id ON remote_statuses(in_reply_to_id, id);
 ++ "\x00";
 
+const status_reactions_v26_sql: [:0]const u8 =
+    \\CREATE TABLE IF NOT EXISTS status_reactions (
+    \\  status_id INTEGER NOT NULL REFERENCES statuses(id) ON DELETE CASCADE,
+    \\  remote_actor_id TEXT NOT NULL REFERENCES remote_actors(id) ON DELETE CASCADE,
+    \\  kind TEXT NOT NULL,
+    \\  activity_id TEXT,
+    \\  active INTEGER NOT NULL DEFAULT 1,
+    \\  updated_at_ms INTEGER NOT NULL,
+    \\  PRIMARY KEY(status_id, remote_actor_id, kind)
+    \\);
+    \\CREATE INDEX IF NOT EXISTS status_reactions_status_id_kind_active ON status_reactions(status_id, kind, active);
+    \\CREATE INDEX IF NOT EXISTS status_reactions_remote_actor_id_kind_active ON status_reactions(remote_actor_id, kind, active);
+    \\CREATE INDEX IF NOT EXISTS status_reactions_remote_actor_id_activity_id ON status_reactions(remote_actor_id, activity_id);
+++ "\x00";
+
 test "migrate: creates users table and records version" {
     var conn = try db.Db.openZ(":memory:");
     defer conn.close();
@@ -574,6 +594,8 @@ test "migrate: creates users table and records version" {
     try std.testing.expectEqual(@as(i64, 24), v_stmt.columnInt64(0));
     try std.testing.expectEqual(db.Stmt.Step.row, try v_stmt.step());
     try std.testing.expectEqual(@as(i64, 25), v_stmt.columnInt64(0));
+    try std.testing.expectEqual(db.Stmt.Step.row, try v_stmt.step());
+    try std.testing.expectEqual(@as(i64, 26), v_stmt.columnInt64(0));
     try std.testing.expectEqual(db.Stmt.Step.done, try v_stmt.step());
 }
 
@@ -588,6 +610,6 @@ test "migrate: is idempotent" {
     defer stmt.finalize();
 
     try std.testing.expectEqual(db.Stmt.Step.row, try stmt.step());
-    try std.testing.expectEqual(@as(i64, 25), stmt.columnInt64(0));
+    try std.testing.expectEqual(@as(i64, 26), stmt.columnInt64(0));
     try std.testing.expectEqual(db.Stmt.Step.done, try stmt.step());
 }
