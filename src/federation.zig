@@ -729,8 +729,13 @@ pub fn deliverStatusToFollowers(app_state: *app.App, allocator: std.mem.Allocato
 
     app_state.logger.debug("deliverStatusToFollowers: user_id={d}", .{user.id});
     const follower_ids = try followers.listAcceptedRemoteActorIds(&app_state.conn, allocator, user.id, 200);
-    app_state.logger.debug("deliverStatusToFollowers: followers={d}", .{follower_ids.len});
-    if (follower_ids.len == 0) return;
+    const mentioned_ids = try directRecipientActorIdsAlloc(app_state, allocator, st.id, st.text);
+
+    app_state.logger.debug(
+        "deliverStatusToFollowers: followers={d} mentioned={d}",
+        .{ follower_ids.len, mentioned_ids.len },
+    );
+    if (follower_ids.len == 0 and mentioned_ids.len == 0) return;
 
     const base = try baseUrlAlloc(app_state, allocator);
     const local_actor_id = try std.fmt.allocPrint(allocator, "{s}/users/{s}", .{ base, user.username });
@@ -744,29 +749,47 @@ pub fn deliverStatusToFollowers(app_state: *app.App, allocator: std.mem.Allocato
 
     const public_iri = "https://www.w3.org/ns/activitystreams#Public";
 
-    var to_buf: [1][]const u8 = undefined;
-    var cc_buf: [1][]const u8 = undefined;
-
-    var to: []const []const u8 = &.{};
-    var cc: []const []const u8 = &.{};
+    var to_list: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer to_list.deinit(allocator);
+    var cc_list: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer cc_list.deinit(allocator);
 
     if (std.mem.eql(u8, st.visibility, "public")) {
-        to_buf[0] = public_iri;
-        cc_buf[0] = followers_url;
-        to = to_buf[0..];
-        cc = cc_buf[0..];
+        try to_list.append(allocator, public_iri);
+        try cc_list.append(allocator, followers_url);
     } else if (std.mem.eql(u8, st.visibility, "unlisted")) {
-        to_buf[0] = followers_url;
-        cc_buf[0] = public_iri;
-        to = to_buf[0..];
-        cc = cc_buf[0..];
+        try to_list.append(allocator, followers_url);
+        try cc_list.append(allocator, public_iri);
     } else if (std.mem.eql(u8, st.visibility, "private")) {
-        to_buf[0] = followers_url;
-        to = to_buf[0..];
-        cc = &.{};
+        try to_list.append(allocator, followers_url);
     } else {
         app_state.logger.info("deliverStatusToFollowers: skipping visibility={s}", .{st.visibility});
         return;
+    }
+
+    for (mentioned_ids) |actor_id| {
+        var already: bool = false;
+        for (to_list.items) |existing| {
+            if (std.mem.eql(u8, existing, actor_id)) {
+                already = true;
+                break;
+            }
+        }
+        if (!already) try to_list.append(allocator, actor_id);
+    }
+
+    var deliver_ids: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer deliver_ids.deinit(allocator);
+    for (follower_ids) |id| try deliver_ids.append(allocator, id);
+    for (mentioned_ids) |id| {
+        var already: bool = false;
+        for (deliver_ids.items) |existing| {
+            if (std.mem.eql(u8, existing, id)) {
+                already = true;
+                break;
+            }
+        }
+        if (!already) try deliver_ids.append(allocator, id);
     }
 
     const payload = .{
@@ -775,16 +798,16 @@ pub fn deliverStatusToFollowers(app_state: *app.App, allocator: std.mem.Allocato
         .type = "Create",
         .actor = local_actor_id,
         .published = st.created_at,
-        .to = to,
-        .cc = cc,
+        .to = to_list.items,
+        .cc = cc_list.items,
         .object = .{
             .id = status_url,
             .type = "Note",
             .attributedTo = local_actor_id,
             .content = content_html,
             .published = st.created_at,
-            .to = to,
-            .cc = cc,
+            .to = to_list.items,
+            .cc = cc_list.items,
         },
     };
 
@@ -793,7 +816,7 @@ pub fn deliverStatusToFollowers(app_state: *app.App, allocator: std.mem.Allocato
 
     const keys = try actor_keys.ensureForUser(&app_state.conn, allocator, user.id);
 
-    for (follower_ids) |remote_actor_id| {
+    for (deliver_ids.items) |remote_actor_id| {
         const actor = remote_actors.lookupById(&app_state.conn, allocator, remote_actor_id) catch |err| {
             app_state.logger.err("deliverStatusToFollowers: lookup remote actor failed actor_id={s} err={any}", .{ remote_actor_id, err });
             continue;
@@ -876,7 +899,8 @@ pub fn deliverDeleteToFollowers(app_state: *app.App, allocator: std.mem.Allocato
     }
 
     const follower_ids = try followers.listAcceptedRemoteActorIds(&app_state.conn, allocator, user.id, 200);
-    if (follower_ids.len == 0) return;
+    const mentioned_ids = try directRecipientActorIdsAlloc(app_state, allocator, st.id, st.text);
+    if (follower_ids.len == 0 and mentioned_ids.len == 0) return;
 
     const base = try baseUrlAlloc(app_state, allocator);
     const local_actor_id = try std.fmt.allocPrint(allocator, "{s}/users/{s}", .{ base, user.username });
@@ -888,29 +912,47 @@ pub fn deliverDeleteToFollowers(app_state: *app.App, allocator: std.mem.Allocato
 
     const public_iri = "https://www.w3.org/ns/activitystreams#Public";
 
-    var to_buf: [1][]const u8 = undefined;
-    var cc_buf: [1][]const u8 = undefined;
-
-    var to: []const []const u8 = &.{};
-    var cc: []const []const u8 = &.{};
+    var to_list: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer to_list.deinit(allocator);
+    var cc_list: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer cc_list.deinit(allocator);
 
     if (std.mem.eql(u8, st.visibility, "public")) {
-        to_buf[0] = public_iri;
-        cc_buf[0] = followers_url;
-        to = to_buf[0..];
-        cc = cc_buf[0..];
+        try to_list.append(allocator, public_iri);
+        try cc_list.append(allocator, followers_url);
     } else if (std.mem.eql(u8, st.visibility, "unlisted")) {
-        to_buf[0] = followers_url;
-        cc_buf[0] = public_iri;
-        to = to_buf[0..];
-        cc = cc_buf[0..];
+        try to_list.append(allocator, followers_url);
+        try cc_list.append(allocator, public_iri);
     } else if (std.mem.eql(u8, st.visibility, "private")) {
-        to_buf[0] = followers_url;
-        to = to_buf[0..];
-        cc = &.{};
+        try to_list.append(allocator, followers_url);
     } else {
         app_state.logger.info("deliverDeleteToFollowers: skipping visibility={s}", .{st.visibility});
         return;
+    }
+
+    for (mentioned_ids) |actor_id| {
+        var already: bool = false;
+        for (to_list.items) |existing| {
+            if (std.mem.eql(u8, existing, actor_id)) {
+                already = true;
+                break;
+            }
+        }
+        if (!already) try to_list.append(allocator, actor_id);
+    }
+
+    var deliver_ids: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer deliver_ids.deinit(allocator);
+    for (follower_ids) |id| try deliver_ids.append(allocator, id);
+    for (mentioned_ids) |id| {
+        var already: bool = false;
+        for (deliver_ids.items) |existing| {
+            if (std.mem.eql(u8, existing, id)) {
+                already = true;
+                break;
+            }
+        }
+        if (!already) try deliver_ids.append(allocator, id);
     }
 
     const payload = .{
@@ -918,8 +960,8 @@ pub fn deliverDeleteToFollowers(app_state: *app.App, allocator: std.mem.Allocato
         .id = delete_id,
         .type = "Delete",
         .actor = local_actor_id,
-        .to = to,
-        .cc = cc,
+        .to = to_list.items,
+        .cc = cc_list.items,
         .object = .{
             .id = status_url,
             .type = "Tombstone",
@@ -933,7 +975,7 @@ pub fn deliverDeleteToFollowers(app_state: *app.App, allocator: std.mem.Allocato
 
     const keys = try actor_keys.ensureForUser(&app_state.conn, allocator, user.id);
 
-    for (follower_ids) |remote_actor_id| {
+    for (deliver_ids.items) |remote_actor_id| {
         const actor = remote_actors.lookupById(&app_state.conn, allocator, remote_actor_id) catch |err| {
             app_state.logger.err("deliverDeleteToFollowers: lookup remote actor failed actor_id={s} err={any}", .{ remote_actor_id, err });
             continue;
@@ -1038,6 +1080,104 @@ test "deliverStatusToFollowers direct uses stored recipients without resolving h
     try std.testing.expectEqual(@as(usize, 1), mock.requests.items.len);
     try std.testing.expectEqual(std.http.Method.POST, mock.requests.items[0].method);
     try std.testing.expectEqualStrings(remote_inbox, mock.requests.items[0].url);
+}
+
+fn jsonArrayHasString(val: std.json.Value, needle: []const u8) bool {
+    if (val != .array) return false;
+    for (val.array.items) |item| {
+        if (item == .string and std.mem.eql(u8, item.string, needle)) return true;
+    }
+    return false;
+}
+
+test "deliverStatusToFollowers includes stored recipients for non-direct statuses" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    var mock = transport.MockTransport.init(std.testing.allocator);
+    app_state.transport = mock.transport();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const remote_actor_id = "http://remote.test/users/bob";
+    const remote_inbox = "http://remote.test/users/bob/inbox";
+    try remote_actors.upsert(&app_state.conn, .{
+        .id = remote_actor_id,
+        .inbox = remote_inbox,
+        .shared_inbox = null,
+        .preferred_username = "bob",
+        .domain = "remote.test",
+        .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
+    });
+
+    const user = (try users.lookupUserById(&app_state.conn, a, user_id)).?;
+    const st = try statuses.create(&app_state.conn, a, user_id, "hello", "private");
+    try status_recipients.add(&app_state.conn, st.id, remote_actor_id);
+
+    try mock.pushExpected(.{ .method = .POST, .url = remote_inbox, .response_status = .accepted, .response_body = "" });
+
+    try deliverStatusToFollowers(&app_state, a, user, st);
+    try std.testing.expectEqual(@as(usize, 1), mock.requests.items.len);
+
+    const payload_bytes = mock.requests.items[0].payload.?;
+    var parsed = try std.json.parseFromSlice(std.json.Value, a, payload_bytes, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("Create", parsed.value.object.get("type").?.string);
+
+    const base = try baseUrlAlloc(&app_state, a);
+    const followers_url = try std.fmt.allocPrint(a, "{s}/users/{s}/followers", .{ base, user.username });
+
+    try std.testing.expect(jsonArrayHasString(parsed.value.object.get("to").?, followers_url));
+    try std.testing.expect(jsonArrayHasString(parsed.value.object.get("to").?, remote_actor_id));
+    try std.testing.expect(jsonArrayHasString(parsed.value.object.get("object").?.object.get("to").?, remote_actor_id));
+}
+
+test "deliverDeleteToFollowers includes stored recipients for non-direct statuses" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    var mock = transport.MockTransport.init(std.testing.allocator);
+    app_state.transport = mock.transport();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const remote_actor_id = "http://remote.test/users/bob";
+    const remote_inbox = "http://remote.test/users/bob/inbox";
+    try remote_actors.upsert(&app_state.conn, .{
+        .id = remote_actor_id,
+        .inbox = remote_inbox,
+        .shared_inbox = null,
+        .preferred_username = "bob",
+        .domain = "remote.test",
+        .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
+    });
+
+    const user = (try users.lookupUserById(&app_state.conn, a, user_id)).?;
+    const created = try statuses.create(&app_state.conn, a, user_id, "hello", "private");
+    try status_recipients.add(&app_state.conn, created.id, remote_actor_id);
+    try std.testing.expect(try statuses.markDeleted(&app_state.conn, created.id, user_id));
+    const st = (try statuses.lookupIncludingDeleted(&app_state.conn, a, created.id)).?;
+
+    try mock.pushExpected(.{ .method = .POST, .url = remote_inbox, .response_status = .accepted, .response_body = "" });
+
+    try deliverDeleteToFollowers(&app_state, a, user, st);
+    try std.testing.expectEqual(@as(usize, 1), mock.requests.items.len);
+
+    const payload_bytes = mock.requests.items[0].payload.?;
+    var parsed = try std.json.parseFromSlice(std.json.Value, a, payload_bytes, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("Delete", parsed.value.object.get("type").?.string);
+    try std.testing.expect(jsonArrayHasString(parsed.value.object.get("to").?, remote_actor_id));
 }
 
 test "followHandle sends signed Follow to remote inbox" {

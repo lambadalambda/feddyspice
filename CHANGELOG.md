@@ -160,6 +160,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Inbox `Accept` handling tolerates trailing-slash variants of the follow activity ID.
 - `job_worker` uses `std.Thread.sleep` (fixes Linux/Docker builds with Zig 0.15.2).
 - ActivityPub visibility is enforced more strictly: outbox/object endpoints exclude `private`/`direct`, unlisted uses `cc=Public`, and outbound Create/Delete deliveries no longer leak non-public posts to `Public`.
+- Outbound Create/Delete deliveries now also fan out to stored recipients (e.g. mentions) even when there are no followers.
 - Inbound ActivityPub `Create` distinguishes `unlisted` (Public in `cc`) from `public` (Public in `to`).
 - `mise run fed:test` is more reliable by bringing up the fedbox stack explicitly before running the test runner.
 - Outbound HTTP requests enforce basic SSRF protections (DNS-based) by blocking private/loopback/link-local/multicast ranges by default; fedbox enables private ranges via `FEDDYSPICE_ALLOW_PRIVATE_NETWORKS=true`.
