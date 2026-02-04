@@ -186,6 +186,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `job_worker` uses `std.Thread.sleep` (fixes Linux/Docker builds with Zig 0.15.2).
 - ActivityPub visibility is enforced more strictly: outbox/object endpoints exclude `private`/`direct`, unlisted uses `cc=Public`, and outbound Create/Delete deliveries no longer leak non-public posts to `Public`.
 - Outbound Create/Delete deliveries now also fan out to stored recipients (e.g. mentions) even when there are no followers.
+- Outbound ActivityPub `Create(Note)` now includes `inReplyTo` for replies and `tag` mention objects for mentions (better reply/mention federation).
 - `POST /api/v1/accounts/:id/unfollow` now sends ActivityPub `Undo(Follow)` to the remote inbox (previously local-only).
 - Inbox handling now supports ActivityPub `Undo(Follow)` to remove inbound followers.
 - `POST /api/v1/statuses/:id/{favourite,unfavourite}` now federates `Like` / `Undo(Like)` for remote statuses.

@@ -12,6 +12,7 @@ const http_urls = @import("http/urls.zig");
 const log = @import("log.zig");
 const notifications = @import("notifications.zig");
 const remote_actors = @import("remote_actors.zig");
+const remote_statuses = @import("remote_statuses.zig");
 const statuses = @import("statuses.zig");
 const status_recipients = @import("status_recipients.zig");
 const transport = @import("transport.zig");
@@ -63,6 +64,12 @@ const AccountPayload = struct {
     avatar_static: []const u8,
     header: []const u8,
     header_static: []const u8,
+};
+
+const MentionTag = struct {
+    type: []const u8,
+    href: []const u8,
+    name: []const u8,
 };
 
 const ParsedHandle = struct {
@@ -1022,6 +1029,22 @@ pub fn deliverStatusToFollowers(app_state: *app.App, allocator: std.mem.Allocato
 
     const public_iri = "https://www.w3.org/ns/activitystreams#Public";
 
+    const in_reply_to_url: ?[]const u8 = if (st.in_reply_to_id) |rid| blk: {
+        if (rid < 0) {
+            const parent = remote_statuses.lookup(&app_state.conn, allocator, rid) catch break :blk null;
+            if (parent == null) break :blk null;
+            break :blk parent.?.remote_uri;
+        }
+
+        const parent = statuses.lookup(&app_state.conn, allocator, rid) catch break :blk null;
+        if (parent == null) break :blk null;
+
+        const parent_user = users.lookupUserById(&app_state.conn, allocator, parent.?.user_id) catch break :blk null;
+        if (parent_user == null) break :blk null;
+
+        break :blk std.fmt.allocPrint(allocator, "{s}/users/{s}/statuses/{d}", .{ base, parent_user.?.username, rid }) catch null;
+    } else null;
+
     var to_list: std.ArrayListUnmanaged([]const u8) = .empty;
     defer to_list.deinit(allocator);
     var cc_list: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -1065,6 +1088,20 @@ pub fn deliverStatusToFollowers(app_state: *app.App, allocator: std.mem.Allocato
         if (!already) try deliver_ids.append(allocator, id);
     }
 
+    var tag_list: std.ArrayListUnmanaged(MentionTag) = .empty;
+    defer tag_list.deinit(allocator);
+    for (mentioned_ids) |actor_id| {
+        const actor = remote_actors.lookupById(&app_state.conn, allocator, actor_id) catch null;
+        if (actor == null) continue;
+        const name = std.fmt.allocPrint(allocator, "@{s}@{s}", .{ actor.?.preferred_username, actor.?.domain }) catch continue;
+        tag_list.append(allocator, .{
+            .type = "Mention",
+            .href = actor_id,
+            .name = name,
+        }) catch return error.OutOfMemory;
+    }
+    const tags: ?[]const MentionTag = if (tag_list.items.len == 0) null else tag_list.items;
+
     const payload = .{
         .@"@context" = "https://www.w3.org/ns/activitystreams",
         .id = create_id,
@@ -1081,6 +1118,8 @@ pub fn deliverStatusToFollowers(app_state: *app.App, allocator: std.mem.Allocato
             .published = st.created_at,
             .to = to_list.items,
             .cc = cc_list.items,
+            .inReplyTo = in_reply_to_url,
+            .tag = tags,
         },
     };
 
@@ -1210,11 +1249,41 @@ fn deliverDirectStatus(app_state: *app.App, allocator: std.mem.Allocator, user: 
 
     const content_html = try textToHtmlAlloc(allocator, st.text);
 
+    const in_reply_to_url: ?[]const u8 = if (st.in_reply_to_id) |rid| blk: {
+        if (rid < 0) {
+            const parent = remote_statuses.lookup(&app_state.conn, allocator, rid) catch break :blk null;
+            if (parent == null) break :blk null;
+            break :blk parent.?.remote_uri;
+        }
+
+        const parent = statuses.lookup(&app_state.conn, allocator, rid) catch break :blk null;
+        if (parent == null) break :blk null;
+
+        const parent_user = users.lookupUserById(&app_state.conn, allocator, parent.?.user_id) catch break :blk null;
+        if (parent_user == null) break :blk null;
+
+        break :blk std.fmt.allocPrint(allocator, "{s}/users/{s}/statuses/{d}", .{ base, parent_user.?.username, rid }) catch null;
+    } else null;
+
     const to = try allocator.alloc([]const u8, recipient_ids.len);
     for (recipient_ids, 0..) |actor_id, idx| {
         to[idx] = actor_id;
     }
     const cc: []const []const u8 = &.{};
+
+    var tag_list: std.ArrayListUnmanaged(MentionTag) = .empty;
+    defer tag_list.deinit(allocator);
+    for (recipient_ids) |actor_id| {
+        const actor = remote_actors.lookupById(&app_state.conn, allocator, actor_id) catch null;
+        if (actor == null) continue;
+        const name = std.fmt.allocPrint(allocator, "@{s}@{s}", .{ actor.?.preferred_username, actor.?.domain }) catch continue;
+        tag_list.append(allocator, .{
+            .type = "Mention",
+            .href = actor_id,
+            .name = name,
+        }) catch return error.OutOfMemory;
+    }
+    const tags: ?[]const MentionTag = if (tag_list.items.len == 0) null else tag_list.items;
 
     const payload = .{
         .@"@context" = "https://www.w3.org/ns/activitystreams",
@@ -1232,6 +1301,8 @@ fn deliverDirectStatus(app_state: *app.App, allocator: std.mem.Allocator, user: 
             .published = st.created_at,
             .to = to,
             .cc = cc,
+            .inReplyTo = in_reply_to_url,
+            .tag = tags,
         },
     };
 
@@ -1442,6 +1513,19 @@ test "deliverStatusToFollowers direct uses stored recipients without resolving h
     try std.testing.expectEqual(@as(usize, 1), mock.requests.items.len);
     try std.testing.expectEqual(std.http.Method.POST, mock.requests.items[0].method);
     try std.testing.expectEqualStrings(remote_inbox, mock.requests.items[0].url);
+
+    const payload_bytes = mock.requests.items[0].payload.?;
+    var parsed = try std.json.parseFromSlice(std.json.Value, a, payload_bytes, .{});
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("Create", parsed.value.object.get("type").?.string);
+    const obj = parsed.value.object.get("object").?.object;
+    const tags_val = obj.get("tag") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(tags_val == .array);
+    try std.testing.expectEqual(@as(usize, 1), tags_val.array.items.len);
+    try std.testing.expectEqualStrings("Mention", tags_val.array.items[0].object.get("type").?.string);
+    try std.testing.expectEqualStrings(remote_actor_id, tags_val.array.items[0].object.get("href").?.string);
+    try std.testing.expectEqualStrings("@bob@remote.test", tags_val.array.items[0].object.get("name").?.string);
 }
 
 fn jsonArrayHasString(val: std.json.Value, needle: []const u8) bool {
@@ -1497,6 +1581,69 @@ test "deliverStatusToFollowers includes stored recipients for non-direct statuse
     try std.testing.expect(jsonArrayHasString(parsed.value.object.get("to").?, followers_url));
     try std.testing.expect(jsonArrayHasString(parsed.value.object.get("to").?, remote_actor_id));
     try std.testing.expect(jsonArrayHasString(parsed.value.object.get("object").?.object.get("to").?, remote_actor_id));
+
+    const obj = parsed.value.object.get("object").?.object;
+    const tags_val = obj.get("tag") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(tags_val == .array);
+    try std.testing.expectEqual(@as(usize, 1), tags_val.array.items.len);
+    try std.testing.expectEqualStrings("Mention", tags_val.array.items[0].object.get("type").?.string);
+    try std.testing.expectEqualStrings(remote_actor_id, tags_val.array.items[0].object.get("href").?.string);
+    try std.testing.expectEqualStrings("@bob@remote.test", tags_val.array.items[0].object.get("name").?.string);
+}
+
+test "deliverStatusToFollowers includes inReplyTo when replying to remote statuses" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    var mock = transport.MockTransport.init(std.testing.allocator);
+    app_state.transport = mock.transport();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const remote_actor_id = "http://remote.test/users/bob";
+    const remote_inbox = "http://remote.test/users/bob/inbox";
+    try remote_actors.upsert(&app_state.conn, .{
+        .id = remote_actor_id,
+        .inbox = remote_inbox,
+        .shared_inbox = null,
+        .preferred_username = "bob",
+        .domain = "remote.test",
+        .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
+    });
+
+    const parent_uri = "http://remote.test/notes/parent";
+    const parent = try @import("remote_statuses.zig").createIfNotExists(
+        &app_state.conn,
+        a,
+        parent_uri,
+        remote_actor_id,
+        null,
+        "<p>parent</p>",
+        null,
+        "public",
+        "2020-01-01T00:00:00.000Z",
+    );
+
+    const user = (try users.lookupUserById(&app_state.conn, a, user_id)).?;
+    const st = try statuses.create(&app_state.conn, a, user_id, "reply", "private", parent.id);
+    try status_recipients.add(&app_state.conn, st.id, remote_actor_id);
+
+    try mock.pushExpected(.{ .method = .POST, .url = remote_inbox, .response_status = .accepted, .response_body = "" });
+
+    try deliverStatusToFollowers(&app_state, a, user, st);
+    try std.testing.expectEqual(@as(usize, 1), mock.requests.items.len);
+
+    const payload_bytes = mock.requests.items[0].payload.?;
+    var parsed = try std.json.parseFromSlice(std.json.Value, a, payload_bytes, .{});
+    defer parsed.deinit();
+
+    const obj = parsed.value.object.get("object").?.object;
+    try std.testing.expectEqualStrings(parent_uri, obj.get("inReplyTo").?.string);
 }
 
 test "deliverDeleteToFollowers includes stored recipients for non-direct statuses" {
