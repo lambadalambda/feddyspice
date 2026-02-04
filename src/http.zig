@@ -3079,6 +3079,78 @@ test "POST /api/v1/accounts/:id/follow creates pending follow and delivers Follo
     try std.testing.expectEqualStrings("Follow", delivered_json.value.object.get("type").?.string);
 }
 
+test "POST /api/v1/accounts/:id/unfollow deletes follow and delivers Undo(Follow)" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    var mock = transport.MockTransport.init(std.testing.allocator);
+    app_state.transport = mock.transport();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const remote_actor_id = "http://remote.test/users/bob";
+    const remote_inbox = "http://remote.test/users/bob/inbox";
+
+    try remote_actors.upsert(&app_state.conn, .{
+        .id = remote_actor_id,
+        .inbox = remote_inbox,
+        .shared_inbox = null,
+        .preferred_username = "bob",
+        .domain = "remote.test",
+        .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
+    });
+
+    const follow_activity_id = "http://example.test/follows/1";
+    _ = try follows.createPending(&app_state.conn, user_id, remote_actor_id, follow_activity_id);
+
+    const rowid = (try remote_actors.lookupRowIdById(&app_state.conn, remote_actor_id)).?;
+    const account_id_str = try std.fmt.allocPrint(a, "{d}", .{remote_actor_id_base + rowid});
+
+    const app_creds = try oauth.createApp(
+        &app_state.conn,
+        a,
+        "pl-fe",
+        "urn:ietf:wg:oauth:2.0:oob",
+        "read follow",
+        "",
+    );
+    const token = try oauth.createAccessToken(&app_state.conn, a, app_creds.id, user_id, "read follow");
+    const auth_header = try std.fmt.allocPrint(a, "Bearer {s}", .{token});
+
+    try mock.pushExpected(.{ .method = .POST, .url = remote_inbox, .response_status = .accepted, .response_body = "" });
+
+    const unfollow_target = try std.fmt.allocPrint(a, "/api/v1/accounts/{s}/unfollow", .{account_id_str});
+    const unfollow_resp = handle(&app_state, a, .{
+        .method = .POST,
+        .target = unfollow_target,
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, unfollow_resp.status);
+
+    try std.testing.expect((try follows.lookupByUserAndRemoteActorId(&app_state.conn, a, user_id, remote_actor_id)) == null);
+
+    try background.runQueued(&app_state, a);
+
+    try std.testing.expectEqual(@as(usize, 1), mock.requests.items.len);
+    const delivered = mock.requests.items[0];
+    try std.testing.expectEqual(std.http.Method.POST, delivered.method);
+    try std.testing.expectEqualStrings(remote_inbox, delivered.url);
+
+    const delivered_body = delivered.payload orelse return error.TestUnexpectedResult;
+    var delivered_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, delivered_body, .{});
+    defer delivered_json.deinit();
+    try std.testing.expectEqualStrings("Undo", delivered_json.value.object.get("type").?.string);
+
+    const obj = delivered_json.value.object.get("object").?.object;
+    try std.testing.expectEqualStrings("Follow", obj.get("type").?.string);
+    try std.testing.expectEqualStrings(follow_activity_id, obj.get("id").?.string);
+}
+
 test "GET /.well-known/webfinger returns actor self link" {
     var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
     defer app_state.deinit();

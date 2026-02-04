@@ -470,8 +470,16 @@ pub fn accountUnfollow(app_state: *app.App, allocator: std.mem.Allocator, req: h
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
     if (actor == null) return .{ .status = .not_found, .body = "not found\n" };
 
+    const existing = follows.lookupByUserAndRemoteActorId(&app_state.conn, allocator, info.?.user_id, actor.?.id) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (existing == null) {
+        return common.jsonOk(allocator, relationshipPayload(id_part, null));
+    }
+
     _ = follows.deleteByUserAndRemoteActorId(&app_state.conn, info.?.user_id, actor.?.id) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    background.sendUndoFollow(app_state, allocator, info.?.user_id, actor.?.id, existing.?.follow_activity_id);
 
     return common.jsonOk(allocator, relationshipPayload(id_part, null));
 }

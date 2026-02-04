@@ -206,6 +206,14 @@ fn encodeJob(allocator: std.mem.Allocator, job: jobs.Job) Error!EncodedJob {
                 .dedupe_key = try std.fmt.allocPrint(allocator, "send_follow:{d}:{s}", .{ j.user_id, j.remote_actor_id }),
             };
         },
+        .send_undo_follow => |j| {
+            const payload = .{ .user_id = j.user_id, .remote_actor_id = j.remote_actor_id, .follow_activity_id = j.follow_activity_id };
+            return .{
+                .job_type = "send_undo_follow",
+                .payload_json = try std.json.Stringify.valueAlloc(allocator, payload, .{}),
+                .dedupe_key = try std.fmt.allocPrint(allocator, "send_undo_follow:{d}:{s}", .{ j.user_id, j.remote_actor_id }),
+            };
+        },
         .accept_inbound_follow => |j| {
             const payload = .{
                 .user_id = j.user_id,
@@ -258,6 +266,23 @@ fn decodeJob(allocator: std.mem.Allocator, job_type: []const u8, payload_json: [
 
         return .{
             .send_follow = .{
+                .user_id = user_id_val.integer,
+                .remote_actor_id = try allocator.dupe(u8, remote_actor_id_val.string),
+                .follow_activity_id = try allocator.dupe(u8, follow_activity_id_val.string),
+            },
+        };
+    }
+
+    if (std.mem.eql(u8, job_type, "send_undo_follow")) {
+        const user_id_val = o.get("user_id") orelse return error.InvalidPayload;
+        const remote_actor_id_val = o.get("remote_actor_id") orelse return error.InvalidPayload;
+        const follow_activity_id_val = o.get("follow_activity_id") orelse return error.InvalidPayload;
+        if (user_id_val != .integer) return error.InvalidPayload;
+        if (remote_actor_id_val != .string) return error.InvalidPayload;
+        if (follow_activity_id_val != .string) return error.InvalidPayload;
+
+        return .{
+            .send_undo_follow = .{
                 .user_id = user_id_val.integer,
                 .remote_actor_id = try allocator.dupe(u8, remote_actor_id_val.string),
                 .follow_activity_id = try allocator.dupe(u8, follow_activity_id_val.string),

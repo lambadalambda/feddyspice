@@ -19,6 +19,9 @@ pub fn runJob(app_state: *app.App, allocator: std.mem.Allocator, job: jobs.Job) 
         .send_follow => |j| {
             try federation.sendFollowActivity(app_state, allocator, j.user_id, j.remote_actor_id, j.follow_activity_id);
         },
+        .send_undo_follow => |j| {
+            try federation.sendUndoFollowActivity(app_state, allocator, j.user_id, j.remote_actor_id, j.follow_activity_id);
+        },
         .accept_inbound_follow => |j| {
             try federation.acceptInboundFollow(
                 app_state,
@@ -110,6 +113,74 @@ pub fn sendFollow(
 
     var t = std.Thread.spawn(.{}, SendFollowJob.run, .{job}) catch |err| {
         app_state.logger.err("sendFollow: thread spawn failed err={any}", .{err});
+        return;
+    };
+    t.detach();
+}
+
+pub fn sendUndoFollow(
+    app_state: *app.App,
+    allocator: std.mem.Allocator,
+    user_id: i64,
+    remote_actor_id: []const u8,
+    follow_activity_id: []const u8,
+) void {
+    switch (app_state.jobs_mode) {
+        .sync => {
+            federation.sendUndoFollowActivity(app_state, allocator, user_id, remote_actor_id, follow_activity_id) catch |err| {
+                app_state.logger.err("sendUndoFollow: sync deliver failed remote_actor_id={s} err={any}", .{ remote_actor_id, err });
+            };
+            return;
+        },
+        .disabled => {
+            const remote_actor_id_copy = app_state.allocator.dupe(u8, remote_actor_id) catch return;
+            errdefer app_state.allocator.free(remote_actor_id_copy);
+            const follow_activity_id_copy = app_state.allocator.dupe(u8, follow_activity_id) catch return;
+            errdefer app_state.allocator.free(follow_activity_id_copy);
+            app_state.jobs_queue.push(app_state.allocator, .{
+                .send_undo_follow = .{
+                    .user_id = user_id,
+                    .remote_actor_id = remote_actor_id_copy,
+                    .follow_activity_id = follow_activity_id_copy,
+                },
+            }) catch {};
+            return;
+        },
+        .spawn => {},
+    }
+
+    if (jobs_db.enqueue(&app_state.conn, allocator, .{
+        .send_undo_follow = .{
+            .user_id = user_id,
+            .remote_actor_id = @constCast(remote_actor_id),
+            .follow_activity_id = @constCast(follow_activity_id),
+        },
+    }, .{})) |_| {
+        return;
+    } else |err| {
+        app_state.logger.err("sendUndoFollow: enqueue failed remote_actor_id={s} err={any}", .{ remote_actor_id, err });
+        // Fallback to per-job thread execution.
+    }
+
+    const job = std.heap.page_allocator.create(SendUndoFollowJob) catch return;
+    errdefer std.heap.page_allocator.destroy(job);
+
+    const remote_actor_id_copy = std.heap.page_allocator.dupe(u8, remote_actor_id) catch return;
+    errdefer std.heap.page_allocator.free(remote_actor_id_copy);
+
+    const follow_activity_id_copy = std.heap.page_allocator.dupe(u8, follow_activity_id) catch return;
+    errdefer std.heap.page_allocator.free(follow_activity_id_copy);
+
+    job.* = .{
+        .cfg = app_state.cfg,
+        .logger = app_state.logger,
+        .user_id = user_id,
+        .remote_actor_id = remote_actor_id_copy,
+        .follow_activity_id = follow_activity_id_copy,
+    };
+
+    var t = std.Thread.spawn(.{}, SendUndoFollowJob.run, .{job}) catch |err| {
+        app_state.logger.err("sendUndoFollow: thread spawn failed err={any}", .{err});
         return;
     };
     t.detach();
@@ -340,6 +411,52 @@ const SendFollowJob = struct {
             return;
         };
         job.logger.info("SendFollowJob: delivered remote_actor_id={s}", .{job.remote_actor_id});
+    }
+};
+
+const SendUndoFollowJob = struct {
+    cfg: config.Config,
+    logger: *log.Logger,
+    user_id: i64,
+    remote_actor_id: []u8,
+    follow_activity_id: []u8,
+
+    fn run(job: *@This()) void {
+        defer {
+            std.heap.page_allocator.free(job.remote_actor_id);
+            std.heap.page_allocator.free(job.follow_activity_id);
+            std.heap.page_allocator.destroy(job);
+        }
+
+        var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+
+        var conn = db.Db.open(a, job.cfg.db_path) catch return;
+        defer conn.close();
+
+        var hub: streaming_hub.Hub = streaming_hub.Hub.init(std.heap.page_allocator);
+        defer hub.deinit();
+
+        var thread_app: app.App = .{
+            .allocator = a,
+            .cfg = job.cfg,
+            .conn = conn,
+            .logger = job.logger,
+            .jobs_mode = .sync,
+            .jobs_queue = .{},
+            .streaming = &hub,
+            .transport = undefined,
+            .null_transport = transport.NullTransport.init(),
+            .real_transport = transport.RealTransport.init(a, job.cfg) catch return,
+        };
+        thread_app.transport = thread_app.real_transport.transport();
+        defer thread_app.transport.deinit();
+
+        federation.sendUndoFollowActivity(&thread_app, a, job.user_id, job.remote_actor_id, job.follow_activity_id) catch |err| {
+            job.logger.err("SendUndoFollowJob: deliver failed remote_actor_id={s} err={any}", .{ job.remote_actor_id, err });
+            return;
+        };
     }
 };
 
