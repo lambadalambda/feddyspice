@@ -3073,6 +3073,32 @@ test "GET /users/:name returns ActivityPub actor" {
     try std.testing.expect(std.mem.indexOf(u8, pk_pem, "BEGIN PUBLIC KEY") != null);
 }
 
+test "POST /users/:name/inbox rejects overly nested JSON" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    _ = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const depth: usize = 100;
+    var body = try a.alloc(u8, depth * 2);
+    for (0..depth) |i| body[i] = '[';
+    for (0..depth) |i| body[depth + i] = ']';
+
+    const resp = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/users/alice/inbox",
+        .content_type = "application/activity+json",
+        .body = body,
+    });
+    try std.testing.expectEqual(std.http.Status.bad_request, resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "json too deep") != null);
+}
+
 test "POST /users/:name/inbox Follow stores follower and sends Accept" {
     var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
     defer app_state.deinit();

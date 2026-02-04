@@ -20,6 +20,7 @@ const statuses = @import("../statuses.zig");
 const urls = @import("urls.zig");
 const users = @import("../users.zig");
 const util_html = @import("../util/html.zig");
+const util_json = @import("../util/json.zig");
 const util_url = @import("../util/url.zig");
 
 fn isPubliclyVisibleVisibility(visibility: []const u8) bool {
@@ -697,6 +698,10 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
     const user = users.lookupUserByUsername(&app_state.conn, allocator, username) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
     if (user == null) return .{ .status = .not_found, .body = "not found\n" };
+
+    if (util_json.maxNestingDepth(req.body) > app_state.cfg.json_max_nesting_depth) {
+        return .{ .status = .bad_request, .body = "json too deep\n" };
+    }
 
     var parsed = std.json.parseFromSlice(std.json.Value, allocator, req.body, .{}) catch
         return .{ .status = .bad_request, .body = "invalid json\n" };
