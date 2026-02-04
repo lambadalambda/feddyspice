@@ -22,7 +22,8 @@ pub fn redirectWithSession(
     const headers = allocator.alloc(std.http.Header, 2) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
 
-    headers[0] = .{ .name = "location", .value = location };
+    const common = @import("common.zig");
+    headers[0] = .{ .name = "location", .value = if (common.headerValueIsSafe(location)) location else "/" };
     headers[1] = .{ .name = "set-cookie", .value = cookie };
 
     return .{
@@ -46,4 +47,15 @@ fn cookieValue(allocator: std.mem.Allocator, secure_cookie: bool, token: []const
         "{s}={s}; HttpOnly; SameSite=Lax; Path=/",
         .{ sessions.CookieName, token },
     );
+}
+
+test "redirectWithSession sanitizes Location header" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const resp = redirectWithSession(a, false, "abc", "/\r\nx: y");
+    try std.testing.expectEqual(std.http.Status.see_other, resp.status);
+    try std.testing.expectEqualStrings("/", resp.headers[0].value);
+    try std.testing.expect(std.mem.startsWith(u8, resp.headers[1].value, sessions.CookieName));
 }

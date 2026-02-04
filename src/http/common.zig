@@ -50,7 +50,7 @@ pub fn parseQueryParam(
 pub fn redirect(allocator: std.mem.Allocator, location: []const u8) http_types.Response {
     const headers = allocator.alloc(std.http.Header, 1) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
-    headers[0] = .{ .name = "location", .value = location };
+    headers[0] = .{ .name = "location", .value = if (headerValueIsSafe(location)) location else "/" };
 
     return .{
         .status = .see_other,
@@ -59,10 +59,18 @@ pub fn redirect(allocator: std.mem.Allocator, location: []const u8) http_types.R
     };
 }
 
+pub fn headerValueIsSafe(value: []const u8) bool {
+    for (value) |c| {
+        if (c == '\r' or c == '\n' or c == 0) return false;
+    }
+    return true;
+}
+
 pub fn safeReturnTo(return_to: ?[]const u8) ?[]const u8 {
     const rt = return_to orelse return null;
     if (!std.mem.startsWith(u8, rt, "/")) return null;
     if (std.mem.indexOf(u8, rt, "://") != null) return null;
+    if (!headerValueIsSafe(rt)) return null;
     return rt;
 }
 
@@ -118,6 +126,22 @@ pub fn htmlPage(allocator: std.mem.Allocator, title: []const u8, inner_html: []c
 pub fn isForm(content_type: ?[]const u8) bool {
     const ct = content_type orelse return false;
     return std.mem.startsWith(u8, ct, "application/x-www-form-urlencoded");
+}
+
+test "safeReturnTo rejects header injection" {
+    try std.testing.expectEqualStrings("/ok", safeReturnTo("/ok").?);
+    try std.testing.expect(safeReturnTo("/\r\nx: y") == null);
+    try std.testing.expect(safeReturnTo("/\nx") == null);
+}
+
+test "redirect sanitizes Location header" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const resp = redirect(a, "/\r\nx: y");
+    try std.testing.expectEqual(std.http.Status.see_other, resp.status);
+    try std.testing.expectEqualStrings("/", resp.headers[0].value);
 }
 
 pub fn isJson(content_type: ?[]const u8) bool {
