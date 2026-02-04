@@ -20,5 +20,5 @@ This file tracks “good future refactors” and known risks. Add items whenever
 ## Security
 
 - [x] Verify inbound ActivityPub inbox requests using HTTP Signatures + `Digest` (including `hs2019`, `content-type`, `content-length`, and reverse-proxy host handling).
-- [ ] Sanitize remote HTML: do not store/re-serve untrusted `object.content` without sanitization (XSS risk).
+- [x] Sanitize remote HTML: do not store/re-serve untrusted `object.content` without sanitization (XSS risk).
 - [ ] Header-injection hardening: validate/strip control characters (`\r`, `\n`, etc.) from any user-controlled header values (e.g. redirects) before sending responses.

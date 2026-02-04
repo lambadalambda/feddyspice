@@ -733,12 +733,15 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
         const attachments_json = remoteAttachmentsJsonAlloc(allocator, obj.object) catch
             return .{ .status = .internal_server_error, .body = "internal server error\n" };
 
+        const safe_content_html = util_html.safeHtmlFromRemoteHtmlAlloc(allocator, content_val.string) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
         const created = remote_statuses.createIfNotExists(
             &app_state.conn,
             allocator,
             note_id_val.string,
             remote_actor.?.id,
-            content_val.string,
+            safe_content_html,
             attachments_json,
             visibility,
             created_at,
