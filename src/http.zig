@@ -168,6 +168,18 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
         return instance.instanceActivity(app_state, allocator);
     }
 
+    if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/instance/rules")) {
+        return instance.instanceRules(app_state, allocator);
+    }
+
+    if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/instance/domain_blocks")) {
+        return instance.instanceDomainBlocks(app_state, allocator);
+    }
+
+    if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/instance/translation_languages")) {
+        return instance.instanceTranslationLanguages(app_state, allocator);
+    }
+
     if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/instance/extended_description")) {
         return instance.instanceExtendedDescription(app_state, allocator);
     }
@@ -661,6 +673,9 @@ test "client compat: placeholder endpoints return JSON" {
         .{ .method = .GET, .target = "/api/v1/custom_emojis", .kind = .array },
         .{ .method = .GET, .target = "/api/v1/instance/peers", .kind = .array },
         .{ .method = .GET, .target = "/api/v1/instance/activity", .kind = .array },
+        .{ .method = .GET, .target = "/api/v1/instance/rules", .kind = .array },
+        .{ .method = .GET, .target = "/api/v1/instance/domain_blocks", .kind = .array },
+        .{ .method = .GET, .target = "/api/v1/instance/translation_languages", .kind = .object },
         .{ .method = .GET, .target = "/api/v1/follow_requests", .kind = .array },
         .{ .method = .GET, .target = "/api/v1/scheduled_statuses", .kind = .array },
         .{ .method = .GET, .target = "/api/v1/lists", .kind = .array },

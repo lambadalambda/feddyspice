@@ -28,6 +28,22 @@ pub fn instanceActivity(app_state: *app.App, allocator: std.mem.Allocator) http_
     return common.jsonOk(allocator, [_]i32{});
 }
 
+pub fn instanceRules(app_state: *app.App, allocator: std.mem.Allocator) http_types.Response {
+    _ = app_state;
+    return common.jsonOk(allocator, [_]i32{});
+}
+
+pub fn instanceDomainBlocks(app_state: *app.App, allocator: std.mem.Allocator) http_types.Response {
+    _ = app_state;
+    return common.jsonOk(allocator, [_]i32{});
+}
+
+pub fn instanceTranslationLanguages(app_state: *app.App, allocator: std.mem.Allocator) http_types.Response {
+    _ = app_state;
+    const payload: struct {} = .{};
+    return common.jsonOk(allocator, payload);
+}
+
 pub fn instanceExtendedDescription(app_state: *app.App, allocator: std.mem.Allocator) http_types.Response {
     _ = app_state;
     const updated_at = "1970-01-01T00:00:00.000Z";
