@@ -31,4 +31,4 @@ This file tracks “good future refactors” and known risks. Add items whenever
 - [x] Add rate limiting/backpressure for high-risk entrypoints (login/token/apps/inbox).
 - [x] Add outbound fetch storm protections (per-domain concurrency/backoff).
 - [x] Add regression tests for visibility/data leakage (direct/private never exposed via public timelines or unauthenticated endpoints).
-- [ ] Document/decide media exposure expectations for non-public posts (capability URLs vs auth-gated).
+- [x] Document/decide media exposure expectations for non-public posts (capability URLs vs auth-gated). Decision: capability URLs (`/media/:token`) with unguessable tokens; access logs redact tokens.

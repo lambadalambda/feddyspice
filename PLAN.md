@@ -152,7 +152,7 @@ These are explicitly security-focused tasks (not just “compat” work). Each i
 - [x] Rate limiting/backpressure for public entrypoints (`/login`, `/oauth/token`, `/api/v1/apps`, `/users/:name/inbox`).
 - [x] Outbound fetch storm protection (per-domain concurrency/backoff) for actor discovery/delivery.
 - [x] Add visibility regression tests: no `direct`/`private` content in unauthenticated timelines/profile lists (and empty placeholders stay empty).
-- [ ] Define/verify media URL exposure policy for non-public posts (capability URLs vs auth-gated).
+- [x] Media exposure policy: capability URLs via unguessable `/media/:token` (tokens are redacted from access logs).
 - [x] Tighten request parsing limits: reject overly nested JSON (`FEDDYSPICE_JSON_MAX_NESTING_DEPTH`).
 - [x] Tighten request parsing limits: cap attachment counts where applicable (max 4 media attachments).
 - [x] Tighten request parsing limits: cap JSON structural tokens (`FEDDYSPICE_JSON_MAX_TOKENS`) to limit field/array explosion DoS.
