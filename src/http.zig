@@ -350,6 +350,10 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
         return media_api.updateMedia(app_state, allocator, req, path);
     }
 
+    if (req.method == .DELETE and std.mem.startsWith(u8, path, "/api/v1/media/")) {
+        return media_api.deleteMedia(app_state, allocator, req, path);
+    }
+
     if (req.method == .POST and std.mem.eql(u8, path, "/api/v1/statuses")) {
         return statuses_api.createStatus(app_state, allocator, req);
     }
@@ -2554,6 +2558,75 @@ test "media: upload + update + fetch" {
     var get_meta_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, get_meta_resp.body, .{});
     defer get_meta_json.deinit();
     try std.testing.expectEqualStrings("new", get_meta_json.value.object.get("description").?.string);
+}
+
+test "media: DELETE /api/v1/media/:id deletes unattached media" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const app_creds = try oauth.createApp(
+        &app_state.conn,
+        a,
+        "pl-fe",
+        "urn:ietf:wg:oauth:2.0:oob",
+        "read write",
+        "",
+    );
+    const token = try oauth.createAccessToken(&app_state.conn, a, app_creds.id, user_id, "read write");
+    const auth_header = try std.fmt.allocPrint(a, "Bearer {s}", .{token});
+
+    const ct = "multipart/form-data; boundary=abc";
+    const body =
+        "--abc\r\n" ++
+        "Content-Disposition: form-data; name=\"file\"; filename=\"a.png\"\r\n" ++
+        "Content-Type: image/png\r\n" ++
+        "\r\n" ++
+        "PNGDATA\r\n" ++
+        "--abc--\r\n";
+
+    const upload_resp = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/api/v1/media",
+        .content_type = ct,
+        .body = body,
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, upload_resp.status);
+
+    var upload_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, upload_resp.body, .{});
+    defer upload_json.deinit();
+
+    const media_id = upload_json.value.object.get("id").?.string;
+    const url = upload_json.value.object.get("url").?.string;
+    const file_path = url["http://example.test".len..];
+
+    const del_target = try std.fmt.allocPrint(a, "/api/v1/media/{s}", .{media_id});
+    const del_resp = handle(&app_state, a, .{
+        .method = .DELETE,
+        .target = del_target,
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, del_resp.status);
+    var del_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, del_resp.body, .{});
+    defer del_json.deinit();
+    try std.testing.expectEqualStrings(media_id, del_json.value.object.get("id").?.string);
+
+    const get_meta_resp = handle(&app_state, a, .{
+        .method = .GET,
+        .target = del_target,
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.not_found, get_meta_resp.status);
+
+    const file_resp = handle(&app_state, a, .{ .method = .GET, .target = file_path });
+    try std.testing.expectEqual(std.http.Status.not_found, file_resp.status);
 }
 
 test "media: /api/v2/media upload works" {

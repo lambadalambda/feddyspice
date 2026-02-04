@@ -113,6 +113,39 @@ pub fn updateMedia(app_state: *app.App, allocator: std.mem.Allocator, req: http_
     };
 }
 
+pub fn deleteMedia(app_state: *app.App, allocator: std.mem.Allocator, req: http_types.Request, path: []const u8) http_types.Response {
+    const token = common.bearerToken(req.authorization) orelse return common.unauthorized(allocator);
+    const info = oauth.verifyAccessToken(&app_state.conn, allocator, token) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (info == null) return common.unauthorized(allocator);
+
+    const id_str = path["/api/v1/media/".len..];
+    const media_id = std.fmt.parseInt(i64, id_str, 10) catch
+        return .{ .status = .not_found, .body = "not found\n" };
+
+    var meta = media.lookupMeta(&app_state.conn, allocator, media_id) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (meta == null) return .{ .status = .not_found, .body = "not found\n" };
+    defer meta.?.deinit(allocator);
+    if (meta.?.user_id != info.?.user_id) return .{ .status = .not_found, .body = "not found\n" };
+
+    const attached = media.isAttachedToStatus(&app_state.conn, media_id) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (attached) return .{ .status = .unprocessable_entity, .body = "media is attached\n" };
+
+    const used = media.isUsedByProfile(&app_state.conn, media_id) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (used) return .{ .status = .unprocessable_entity, .body = "media is used by profile\n" };
+
+    const payload = masto.makeMediaAttachmentPayload(app_state, allocator, meta.?);
+
+    const deleted = media.deleteById(&app_state.conn, media_id, info.?.user_id) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (!deleted) return .{ .status = .not_found, .body = "not found\n" };
+
+    return common.jsonOk(allocator, payload);
+}
+
 pub fn mediaFileGet(app_state: *app.App, allocator: std.mem.Allocator, path: []const u8) http_types.Response {
     const token = path["/media/".len..];
     if (token.len == 0) return .{ .status = .not_found, .body = "not found\n" };

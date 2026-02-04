@@ -206,6 +206,37 @@ pub fn attachToStatus(conn: *db.Db, status_id: i64, media_id: i64, position: i64
     return conn.changes() > 0;
 }
 
+pub fn isAttachedToStatus(conn: *db.Db, media_id: i64) db.Error!bool {
+    var stmt = try conn.prepareZ("SELECT 1 FROM status_media_attachments WHERE media_id=?1 LIMIT 1;\x00");
+    defer stmt.finalize();
+    try stmt.bindInt64(1, media_id);
+
+    return switch (try stmt.step()) {
+        .row => true,
+        .done => false,
+    };
+}
+
+pub fn isUsedByProfile(conn: *db.Db, media_id: i64) db.Error!bool {
+    var stmt = try conn.prepareZ("SELECT 1 FROM users WHERE avatar_media_id=?1 OR header_media_id=?1 LIMIT 1;\x00");
+    defer stmt.finalize();
+    try stmt.bindInt64(1, media_id);
+
+    return switch (try stmt.step()) {
+        .row => true,
+        .done => false,
+    };
+}
+
+pub fn deleteById(conn: *db.Db, media_id: i64, user_id: i64) db.Error!bool {
+    var stmt = try conn.prepareZ("DELETE FROM media_attachments WHERE id=?1 AND user_id=?2;\x00");
+    defer stmt.finalize();
+    try stmt.bindInt64(1, media_id);
+    try stmt.bindInt64(2, user_id);
+    _ = try stmt.step();
+    return conn.changes() > 0;
+}
+
 pub fn listForStatus(conn: *db.Db, allocator: std.mem.Allocator, status_id: i64) Error![]MediaMeta {
     var stmt = try conn.prepareZ(
         "SELECT m.id, m.user_id, m.public_token, m.content_type, m.description, m.created_at_ms, m.updated_at_ms\n" ++

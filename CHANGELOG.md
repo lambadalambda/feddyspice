@@ -29,7 +29,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Local and remote deletes publish `event=delete` on the streaming user stream.
 - Inbound follows publish `event=notification` on the streaming user stream.
 - Mastodon v2 instance endpoint (`GET /api/v2/instance`) for client compatibility.
-- Media upload + serving (`POST /api/v1/media`, `PUT /api/v1/media/:id`, `GET /media/:token`).
+- Media upload + serving (`POST /api/v1/media`, `GET/PUT/DELETE /api/v1/media/:id`, `GET /media/:token`).
 - Status posting accepts `media_ids[]` and returns `media_attachments` on status payloads.
 - Deleting a status removes any attached media; stale unattached media is pruned opportunistically.
 - Initial ActivityPub discovery endpoints: WebFinger, NodeInfo, and actor document (`/.well-known/webfinger`, `/.well-known/nodeinfo`, `/nodeinfo/2.0`, `/users/:name`).
