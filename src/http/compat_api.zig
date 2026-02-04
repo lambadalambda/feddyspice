@@ -24,6 +24,27 @@ pub fn maybeHandle(allocator: std.mem.Allocator, req: http_types.Request, path: 
         return common.jsonOk(allocator, [_]i32{});
     }
 
+    if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/favourites")) {
+        return common.jsonOk(allocator, [_]i32{});
+    }
+
+    if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/bookmarks")) {
+        return common.jsonOk(allocator, [_]i32{});
+    }
+
+    if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/blocks")) {
+        return common.jsonOk(allocator, [_]i32{});
+    }
+
+    if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/mutes")) {
+        return common.jsonOk(allocator, [_]i32{});
+    }
+
+    if (req.method == .POST and std.mem.eql(u8, path, "/api/v1/reports")) {
+        const payload: struct {} = .{};
+        return common.jsonOk(allocator, payload);
+    }
+
     if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/trends/tags")) {
         return common.jsonOk(allocator, [_]i32{});
     }

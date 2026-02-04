@@ -45,9 +45,10 @@ This is a “rough backlog” based on Mastodon’s `config/routes/api.rb` and P
 - [ ] Add bulk status lookup: `GET /api/v1/statuses?ids[]=...` (Mastodon “hydrate by id list” pattern).
 - [ ] Add direct timeline: `GET /api/v1/timelines/direct` (DMs), and make `GET /api/v1/timelines/tag/:tag` return real results (currently stubbed empty).
 - [ ] Add lists/filters CRUD (or robust stubs): `GET/POST/PUT/DELETE /api/v1/lists*` and `GET/POST/PUT/DELETE /api/v1/filters*`.
-- [ ] Add favourites/bookmarks index endpoints: `GET /api/v1/favourites` and `GET /api/v1/bookmarks`.
-- [ ] Add blocks/mutes endpoints: `GET /api/v1/blocks`, `GET /api/v1/mutes`, and `POST /api/v1/accounts/:id/(block|unblock|mute|unmute)` (no-op acceptable for single-user, but avoid 404).
-- [ ] Add reporting stub: `POST /api/v1/reports`.
+- [x] Add favourites/bookmarks index endpoints: `GET /api/v1/favourites` and `GET /api/v1/bookmarks`.
+- [x] Add blocks/mutes index endpoints: `GET /api/v1/blocks` and `GET /api/v1/mutes`.
+- [ ] Add account block/mute actions: `POST /api/v1/accounts/:id/(block|unblock|mute|unmute)` (no-op acceptable for single-user, but avoid 404).
+- [x] Add reporting stub: `POST /api/v1/reports`.
 - [x] Add media deletion: `DELETE /api/v1/media/:id` (and match Mastodon’s “return attachment” semantics).
 - [ ] Add tags endpoints: `GET /api/v1/tags/:id` and `POST /api/v1/tags/:id/(follow|unfollow)` (even if empty/422 for unknown tags).
 - [x] Add missing v1 instance endpoints used by clients: `/api/v1/instance/rules`, `/api/v1/instance/domain_blocks`, `/api/v1/instance/translation_languages`.
