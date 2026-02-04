@@ -3,7 +3,6 @@ const std = @import("std");
 const app = @import("app.zig");
 const actor_keys = @import("actor_keys.zig");
 const db = @import("db.zig");
-const federation = @import("federation.zig");
 const background = @import("background.zig");
 const form = @import("form.zig");
 const follows = @import("follows.zig");
@@ -19,7 +18,6 @@ const remote_statuses = @import("remote_statuses.zig");
 const sessions = @import("sessions.zig");
 const statuses = @import("statuses.zig");
 const transport = @import("transport.zig");
-const util_url = @import("util/url.zig");
 const users = @import("users.zig");
 const version = @import("version.zig");
 const http_types = @import("http_types.zig");
@@ -37,6 +35,7 @@ const activitypub_api = @import("http/activitypub_api.zig");
 const media_api = @import("http/media_api.zig");
 const notifications_api = @import("http/notifications_api.zig");
 const conversations_api = @import("http/conversations_api.zig");
+const follows_api = @import("http/follows_api.zig");
 
 const transparent_png = [_]u8{
     0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
@@ -353,7 +352,7 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
     }
 
     if (req.method == .POST and std.mem.eql(u8, path, "/api/v1/follows")) {
-        return apiFollow(app_state, allocator, req);
+        return follows_api.followsPost(app_state, allocator, req);
     }
 
     if (req.method == .POST and std.mem.eql(u8, path, "/api/v1/media")) {
@@ -494,14 +493,6 @@ fn metrics(app_state: *app.App, allocator: std.mem.Allocator) Response {
     };
 }
 
-fn baseUrlAlloc(app_state: *app.App, allocator: std.mem.Allocator) ![]u8 {
-    return util_url.baseUrlAlloc(app_state, allocator);
-}
-
-fn streamingBaseUrlAlloc(app_state: *app.App, allocator: std.mem.Allocator) ![]u8 {
-    return util_url.streamingBaseUrlAlloc(app_state, allocator);
-}
-
 fn isPubliclyVisibleVisibility(visibility: []const u8) bool {
     return std.mem.eql(u8, visibility, "public") or std.mem.eql(u8, visibility, "unlisted");
 }
@@ -510,19 +501,6 @@ const MediaAttachmentPayload = masto.MediaAttachmentPayload;
 const StatusPayload = masto.StatusPayload;
 
 const remote_actor_id_base: i64 = util_ids.remote_actor_id_base;
-
-fn remoteAccountApiIdAlloc(app_state: *app.App, allocator: std.mem.Allocator, actor_id: []const u8) []const u8 {
-    return util_ids.remoteAccountApiIdAlloc(app_state, allocator, actor_id);
-}
-
-fn makeRemoteAccountPayload(
-    app_state: *app.App,
-    allocator: std.mem.Allocator,
-    api_id: []const u8,
-    actor: remote_actors.RemoteActor,
-) AccountPayload {
-    return masto.makeRemoteAccountPayload(app_state, allocator, api_id, actor);
-}
 
 fn makeStatusPayload(app_state: *app.App, allocator: std.mem.Allocator, user: users.User, st: statuses.Status) StatusPayload {
     return masto.makeStatusPayload(app_state, allocator, user, st);
@@ -549,67 +527,6 @@ fn remoteStatusResponse(app_state: *app.App, allocator: std.mem.Allocator, actor
 
 fn textToHtmlAlloc(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
     return util_html.textToHtmlAlloc(allocator, text);
-}
-
-fn apiFollow(app_state: *app.App, allocator: std.mem.Allocator, req: Request) Response {
-    const token = bearerToken(req.authorization) orelse return unauthorized(allocator);
-
-    const info = oauth.verifyAccessToken(&app_state.conn, allocator, token) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-    if (info == null) return unauthorized(allocator);
-
-    var parsed = parseBodyParams(allocator, req) catch
-        return .{ .status = .bad_request, .body = "invalid form\n" };
-
-    const uri = parsed.get("uri") orelse return .{ .status = .bad_request, .body = "missing uri\n" };
-
-    const actor = federation.resolveRemoteActorByHandle(app_state, allocator, uri) catch |err| switch (err) {
-        error.InvalidHandle, error.WebfingerNoSelfLink, error.ActorDocMissingFields => return .{
-            .status = .bad_request,
-            .body = "invalid uri\n",
-        },
-        else => return .{ .status = .internal_server_error, .body = "internal server error\n" },
-    };
-
-    // Idempotent behavior: if the follow already exists, just return the account.
-    const existing = follows.lookupByUserAndRemoteActorId(&app_state.conn, allocator, info.?.user_id, actor.id) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-    if (existing != null) {
-        const api_id = remoteAccountApiIdAlloc(app_state, allocator, actor.id);
-        const payload = makeRemoteAccountPayload(app_state, allocator, api_id, actor);
-        const body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch
-            return .{ .status = .internal_server_error, .body = "internal server error\n" };
-        return .{
-            .content_type = "application/json; charset=utf-8",
-            .body = body,
-        };
-    }
-
-    const base = baseUrlAlloc(app_state, allocator) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-
-    var id_bytes: [16]u8 = undefined;
-    std.crypto.random.bytes(&id_bytes);
-    const id_hex = std.fmt.bytesToHex(id_bytes, .lower);
-    const follow_activity_id = std.fmt.allocPrint(allocator, "{s}/follows/{s}", .{ base, id_hex[0..] }) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-
-    _ = follows.createPending(&app_state.conn, info.?.user_id, actor.id, follow_activity_id) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-
-    background.sendFollow(app_state, allocator, info.?.user_id, actor.id, follow_activity_id);
-
-    const api_id = remoteAccountApiIdAlloc(app_state, allocator, actor.id);
-
-    const payload = makeRemoteAccountPayload(app_state, allocator, api_id, actor);
-
-    const body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-
-    return .{
-        .content_type = "application/json; charset=utf-8",
-        .body = body,
-    };
 }
 
 fn jsonOk(allocator: std.mem.Allocator, payload: anytype) Response {
