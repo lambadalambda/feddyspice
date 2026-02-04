@@ -127,3 +127,29 @@ pub fn listPinnedStatusIds(conn: *db.Db, allocator: std.mem.Allocator, user_id: 
 
     return out.toOwnedSlice(allocator);
 }
+
+const count_favourited_sql: [:0]const u8 =
+    "SELECT COUNT(*) FROM status_interactions WHERE status_id = ?1 AND favourited = 1;\x00";
+
+pub fn countFavourited(conn: *db.Db, status_id: i64) db.Error!i64 {
+    var stmt = try conn.prepareZ(count_favourited_sql);
+    defer stmt.finalize();
+    try stmt.bindInt64(1, status_id);
+    switch (try stmt.step()) {
+        .row => return stmt.columnInt64(0),
+        .done => return 0,
+    }
+}
+
+const count_reblogged_sql: [:0]const u8 =
+    "SELECT COUNT(*) FROM status_interactions WHERE status_id = ?1 AND reblogged = 1;\x00";
+
+pub fn countReblogged(conn: *db.Db, status_id: i64) db.Error!i64 {
+    var stmt = try conn.prepareZ(count_reblogged_sql);
+    defer stmt.finalize();
+    try stmt.bindInt64(1, status_id);
+    switch (try stmt.step()) {
+        .row => return stmt.columnInt64(0),
+        .done => return 0,
+    }
+}

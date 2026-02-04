@@ -6,6 +6,7 @@ const remote_actors = @import("../remote_actors.zig");
 const remote_statuses = @import("../remote_statuses.zig");
 const statuses = @import("../statuses.zig");
 const status_interactions = @import("../status_interactions.zig");
+const status_reactions = @import("../status_reactions.zig");
 const url = @import("../util/url.zig");
 const util_html = @import("../util/html.zig");
 const util_ids = @import("../util/ids.zig");
@@ -583,6 +584,14 @@ pub fn makeStatusPayload(app_state: *app.App, allocator: std.mem.Allocator, user
         break :blk s;
     } else null;
 
+    const local_favourites = status_interactions.countFavourited(&app_state.conn, st.id) catch 0;
+    const remote_favourites = status_reactions.countActive(&app_state.conn, st.id, "favourite") catch 0;
+    const favourites_count = local_favourites + remote_favourites;
+
+    const local_reblogs = status_interactions.countReblogged(&app_state.conn, st.id) catch 0;
+    const remote_reblogs = status_reactions.countActive(&app_state.conn, st.id, "reblog") catch 0;
+    const reblogs_count = local_reblogs + remote_reblogs;
+
     return .{
         .id = id_str,
         .uri = uri,
@@ -597,8 +606,8 @@ pub fn makeStatusPayload(app_state: *app.App, allocator: std.mem.Allocator, user
         .mentions = mentions_payload,
         .tags = &.{},
         .emojis = &.{},
-        .reblogs_count = 0,
-        .favourites_count = 0,
+        .reblogs_count = reblogs_count,
+        .favourites_count = favourites_count,
         .replies_count = 0,
         .in_reply_to_id = in_reply_to_id,
         .in_reply_to_account_id = in_reply_to_account_id,
@@ -741,6 +750,9 @@ pub fn makeRemoteStatusPayload(
         break :blk s;
     } else null;
 
+    const favourites_count = status_interactions.countFavourited(&app_state.conn, st.id) catch 0;
+    const reblogs_count = status_interactions.countReblogged(&app_state.conn, st.id) catch 0;
+
     return .{
         .id = id_str,
         .uri = st.remote_uri,
@@ -755,8 +767,8 @@ pub fn makeRemoteStatusPayload(
         .mentions = &.{},
         .tags = &.{},
         .emojis = &.{},
-        .reblogs_count = 0,
-        .favourites_count = 0,
+        .reblogs_count = reblogs_count,
+        .favourites_count = favourites_count,
         .replies_count = 0,
         .in_reply_to_id = in_reply_to_id,
         .in_reply_to_account_id = in_reply_to_account_id,

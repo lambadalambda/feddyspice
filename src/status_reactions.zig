@@ -1,8 +1,75 @@
 const std = @import("std");
 
 const db = @import("db.zig");
+const remote_actors = @import("remote_actors.zig");
 
 pub const Error = db.Error || std.mem.Allocator.Error;
+
+pub fn countActive(conn: *db.Db, status_id: i64, kind: []const u8) db.Error!i64 {
+    var stmt = try conn.prepareZ(
+        "SELECT COUNT(*) FROM status_reactions WHERE status_id = ?1 AND kind = ?2 AND active = 1;\x00",
+    );
+    defer stmt.finalize();
+
+    try stmt.bindInt64(1, status_id);
+    try stmt.bindText(2, kind);
+
+    switch (try stmt.step()) {
+        .row => return stmt.columnInt64(0),
+        .done => return 0,
+    }
+}
+
+pub fn listActiveRemoteActors(
+    conn: *db.Db,
+    allocator: std.mem.Allocator,
+    status_id: i64,
+    kind: []const u8,
+    limit: usize,
+) Error![]remote_actors.RemoteActor {
+    const lim: i64 = @intCast(@min(limit, 200));
+
+    var stmt = try conn.prepareZ(
+        "SELECT a.id, a.inbox, a.shared_inbox, a.preferred_username, a.domain, a.public_key_pem, a.avatar_url, a.header_url\n" ++
+            "FROM status_reactions r\n" ++
+            "JOIN remote_actors a ON a.id = r.remote_actor_id\n" ++
+            "WHERE r.status_id = ?1 AND r.kind = ?2 AND r.active = 1\n" ++
+            "ORDER BY r.updated_at_ms DESC, a.id ASC\n" ++
+            "LIMIT ?3;\x00",
+    );
+    defer stmt.finalize();
+
+    try stmt.bindInt64(1, status_id);
+    try stmt.bindText(2, kind);
+    try stmt.bindInt64(3, lim);
+
+    var out: std.ArrayListUnmanaged(remote_actors.RemoteActor) = .empty;
+    errdefer out.deinit(allocator);
+
+    while (true) {
+        switch (try stmt.step()) {
+            .done => break,
+            .row => {
+                const shared = if (stmt.columnType(2) == .null) null else try allocator.dupe(u8, stmt.columnText(2));
+                const avatar_url = if (stmt.columnType(6) == .null) null else try allocator.dupe(u8, stmt.columnText(6));
+                const header_url = if (stmt.columnType(7) == .null) null else try allocator.dupe(u8, stmt.columnText(7));
+
+                out.append(allocator, .{
+                    .id = try allocator.dupe(u8, stmt.columnText(0)),
+                    .inbox = try allocator.dupe(u8, stmt.columnText(1)),
+                    .shared_inbox = shared,
+                    .preferred_username = try allocator.dupe(u8, stmt.columnText(3)),
+                    .domain = try allocator.dupe(u8, stmt.columnText(4)),
+                    .public_key_pem = try allocator.dupe(u8, stmt.columnText(5)),
+                    .avatar_url = avatar_url,
+                    .header_url = header_url,
+                }) catch return error.OutOfMemory;
+            },
+        }
+    }
+
+    return out.toOwnedSlice(allocator);
+}
 
 pub fn activate(
     conn: *db.Db,
@@ -132,12 +199,18 @@ test "status_reactions: activate/undo" {
 
     const now_ms: i64 = 1234;
     try std.testing.expect(try activate(&conn, st.id, remote_actor_id, "favourite", "https://remote.test/likes/1", now_ms));
+    try std.testing.expectEqual(@as(i64, 1), try countActive(&conn, st.id, "favourite"));
+
     try std.testing.expect(!try activate(&conn, st.id, remote_actor_id, "favourite", "https://remote.test/likes/2", now_ms + 1));
+    try std.testing.expectEqual(@as(i64, 1), try countActive(&conn, st.id, "favourite"));
 
     try std.testing.expect(try undoByActivityId(&conn, remote_actor_id, "https://remote.test/likes/2", now_ms + 2));
+    try std.testing.expectEqual(@as(i64, 0), try countActive(&conn, st.id, "favourite"));
     try std.testing.expect(!try undoByActivityId(&conn, remote_actor_id, "https://remote.test/likes/2", now_ms + 3));
 
     try std.testing.expect(try activate(&conn, st.id, remote_actor_id, "favourite", "https://remote.test/likes/3", now_ms + 4));
+    try std.testing.expectEqual(@as(i64, 1), try countActive(&conn, st.id, "favourite"));
     try std.testing.expect(try undo(&conn, st.id, remote_actor_id, "favourite", now_ms + 5));
+    try std.testing.expectEqual(@as(i64, 0), try countActive(&conn, st.id, "favourite"));
     try std.testing.expect(!try undo(&conn, st.id, remote_actor_id, "favourite", now_ms + 6));
 }

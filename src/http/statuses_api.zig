@@ -11,7 +11,9 @@ const oauth = @import("../oauth.zig");
 const remote_actors = @import("../remote_actors.zig");
 const remote_statuses = @import("../remote_statuses.zig");
 const status_interactions = @import("../status_interactions.zig");
+const status_reactions = @import("../status_reactions.zig");
 const statuses = @import("../statuses.zig");
+const util_ids = @import("../util/ids.zig");
 const users = @import("../users.zig");
 
 const StatusPayload = masto.StatusPayload;
@@ -133,6 +135,8 @@ pub fn statusAccountsListEmpty(app_state: *app.App, allocator: std.mem.Allocator
     else
         return .{ .status = .not_found, .body = "not found\n" };
 
+    const kind = if (std.mem.eql(u8, suffix, "/reblogged_by")) "reblog" else "favourite";
+
     const id_part = path[prefix.len .. path.len - suffix.len];
     const id = std.fmt.parseInt(i64, id_part, 10) catch
         return .{ .status = .not_found, .body = "not found\n" };
@@ -141,13 +145,28 @@ pub fn statusAccountsListEmpty(app_state: *app.App, allocator: std.mem.Allocator
         const st = remote_statuses.lookup(&app_state.conn, allocator, id) catch
             return .{ .status = .internal_server_error, .body = "internal server error\n" };
         if (st == null) return .{ .status = .not_found, .body = "not found\n" };
+
+        return common.jsonOk(allocator, [_]i32{});
     } else {
         const st = statuses.lookup(&app_state.conn, allocator, id) catch
             return .{ .status = .internal_server_error, .body = "internal server error\n" };
         if (st == null) return .{ .status = .not_found, .body = "not found\n" };
+        if (st.?.user_id != info.?.user_id) return .{ .status = .not_found, .body = "not found\n" };
     }
 
-    return common.jsonOk(allocator, [_]i32{});
+    const actors = status_reactions.listActiveRemoteActors(&app_state.conn, allocator, id, kind, 80) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    var accounts: std.ArrayListUnmanaged(masto.AccountPayload) = .empty;
+    defer accounts.deinit(allocator);
+
+    for (actors) |actor| {
+        const api_id = util_ids.remoteAccountApiIdAlloc(app_state, allocator, actor.id);
+        accounts.append(allocator, masto.makeRemoteAccountPayload(app_state, allocator, api_id, actor)) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    }
+
+    return common.jsonOk(allocator, accounts.items);
 }
 
 pub fn statusHistoryEmpty(app_state: *app.App, allocator: std.mem.Allocator, req: http_types.Request, path: []const u8) http_types.Response {
