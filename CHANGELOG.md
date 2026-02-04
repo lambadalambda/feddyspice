@@ -112,6 +112,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Hardened redirect handling by rejecting CR/LF in `Location` values (`/login?return_to=...`, OAuth/HTML redirects).
 - Added `src/http/media_api.zig` and moved media endpoints out of `src/http.zig` (`/media/:token`, `/api/v1/media`, `/api/v2/media`).
 - Added `src/http/notifications_api.zig` and moved notifications endpoints out of `src/http.zig` (`/api/v1/notifications`, `/api/v1/notifications/clear`, `/api/v1/notifications/:id/dismiss`).
+- Added `src/http/conversations_api.zig` and moved conversation endpoints out of `src/http.zig` (`/api/v1/conversations`, `/api/v1/conversations/:id/read`, `DELETE /api/v1/conversations/:id`).
 
 ### Fixed
 
