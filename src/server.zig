@@ -29,7 +29,7 @@ pub fn serveOnce(app_state: *app.App, listener: *net.Server) !void {
     var write_buffer: [16 * 1024]u8 = undefined;
     var body_read_buffer: [16 * 1024]u8 = undefined;
 
-    const start_ms: i64 = std.time.milliTimestamp();
+    const start_us: i64 = std.time.microTimestamp();
 
     var reader = net.Stream.Reader.init(conn.stream, &read_buffer);
     var writer = net.Stream.Writer.init(conn.stream, &write_buffer);
@@ -125,7 +125,7 @@ pub fn serveOnce(app_state: *app.App, listener: *net.Server) !void {
         if (info == null) {
             const resp: routes.Response = .{ .status = .unauthorized, .body = "unauthorized\n" };
             try writeResponse(alloc, &request, resp);
-            logAccess(app_state, conn.address, method, target, resp.status, start_ms);
+            logAccess(app_state, conn.address, method, target, resp.status, start_us);
             return;
         }
 
@@ -144,13 +144,13 @@ pub fn serveOnce(app_state: *app.App, listener: *net.Server) !void {
         const sub = app_state.streaming.subscribe(info.?.user_id, streams) catch {
             const resp: routes.Response = .{ .status = .internal_server_error, .body = "internal server error\n" };
             try writeResponse(alloc, &request, resp);
-            logAccess(app_state, conn.address, method, target, resp.status, start_ms);
+            logAccess(app_state, conn.address, method, target, resp.status, start_us);
             return;
         };
         errdefer app_state.streaming.unsubscribe(sub);
 
         try writeWebSocketHandshake(conn.stream.handle, sec_ws_key.?, selected_protocol);
-        logAccess(app_state, conn.address, method, target, .switching_protocols, start_ms);
+        logAccess(app_state, conn.address, method, target, .switching_protocols, start_us);
 
         const handler = try std.heap.page_allocator.create(StreamingHandler);
         handler.* = .{
@@ -185,7 +185,7 @@ pub fn serveOnce(app_state: *app.App, listener: *net.Server) !void {
                 .body = "payload too large\n",
             };
             try writeResponse(alloc, &request, resp);
-            logAccess(app_state, conn.address, method, target, resp.status, start_ms);
+            logAccess(app_state, conn.address, method, target, resp.status, start_us);
             return;
         }
 
@@ -210,7 +210,7 @@ pub fn serveOnce(app_state: *app.App, listener: *net.Server) !void {
     });
 
     try writeResponse(alloc, &request, resp);
-    logAccess(app_state, conn.address, method, target, resp.status, start_ms);
+    logAccess(app_state, conn.address, method, target, resp.status, start_us);
 }
 
 fn targetPath(target: []const u8) []const u8 {
@@ -484,15 +484,16 @@ fn logAccess(
     method: http.Method,
     target: []const u8,
     status: http.Status,
-    start_ms: i64,
+    start_us: i64,
 ) void {
-    const elapsed_ms: i64 = std.time.milliTimestamp() - start_ms;
+    const now_us: i64 = std.time.microTimestamp();
+    const elapsed_us: i64 = if (now_us >= start_us) now_us - start_us else 0;
     var addr_buf: [128]u8 = undefined;
     const addr_str = std.fmt.bufPrint(&addr_buf, "{any}", .{remote_addr}) catch "unknown";
     const safe_target = sanitizeTargetForLog(target);
     app_state.logger.info(
-        "access remote={s} method={s} target={s} status={d} dur_ms={d}",
-        .{ addr_str, @tagName(method), safe_target, @intFromEnum(status), elapsed_ms },
+        "access remote={s} method={s} target={s} status={d} dur_us={d}",
+        .{ addr_str, @tagName(method), safe_target, @intFromEnum(status), elapsed_us },
     );
 }
 
@@ -501,6 +502,64 @@ test "sanitizeTargetForLog strips query and redacts media tokens" {
     try std.testing.expectEqualStrings("/api/v1/instance", sanitizeTargetForLog("/api/v1/instance?x=y"));
     try std.testing.expectEqualStrings("/media/<token>", sanitizeTargetForLog("/media/abcd"));
     try std.testing.expectEqualStrings("/media/<token>", sanitizeTargetForLog("/media/abcd?x=y"));
+}
+
+test "serveOnce: access logs include dur_us" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var listener = try (try net.Address.parseIp("127.0.0.1", 0)).listen(.{ .reuse_address = true });
+    defer listener.deinit();
+
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const f = try tmp.dir.createFile("access.log", .{ .truncate = true });
+    app_state.logger.* = try log.Logger.initWithFile(f, .{ .to_stderr = false, .min_level = .debug });
+
+    var ctx: struct {
+        addr: net.Address,
+        ok: bool = false,
+    } = .{ .addr = listener.listen_address };
+
+    const Client = struct {
+        fn run(c: *@TypeOf(ctx)) !void {
+            var stream = try net.tcpConnectToAddress(c.addr);
+            defer stream.close();
+
+            const req = "GET /healthz HTTP/1.1\r\n" ++
+                "Host: localhost\r\n" ++
+                "Connection: close\r\n" ++
+                "\r\n";
+
+            try writeAll(stream.handle, req);
+
+            var buf: [4096]u8 = undefined;
+            var used: usize = 0;
+
+            while (used < buf.len) {
+                const n = try std.posix.read(stream.handle, buf[used..]);
+                if (n == 0) break;
+                used += n;
+            }
+
+            c.ok = std.mem.startsWith(u8, buf[0..used], "HTTP/1.1 200");
+        }
+    };
+
+    var t = try std.Thread.spawn(.{}, Client.run, .{&ctx});
+    try serveOnce(&app_state, &listener);
+    t.join();
+
+    try std.testing.expect(ctx.ok);
+
+    const rf = try tmp.dir.openFile("access.log", .{});
+    defer rf.close();
+
+    const got = try rf.readToEndAlloc(std.testing.allocator, 64 * 1024);
+    defer std.testing.allocator.free(got);
+
+    try std.testing.expect(std.mem.indexOf(u8, got, "dur_us=") != null);
 }
 
 test "serveOnce: GET /healthz -> 200" {

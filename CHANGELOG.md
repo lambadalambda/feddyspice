@@ -50,6 +50,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Fedbox E2E tests cover feddyspice federation (follow + post delivery).
 - Fedbox E2E test covers inbound signed `direct` messages and ensures they never leak into the public timeline.
 - Basic access logging plus optional file logs (`FEDDYSPICE_LOG_FILE`, `FEDDYSPICE_LOG_LEVEL`).
+- Access logs now record microsecond durations (`dur_us`) to avoid `dur_ms=0` for fast requests.
 - Prometheus-style metrics endpoint (`GET /metrics`).
 - `mise` loads local env from `.env` (gitignored) and provides `.env.example`.
 - Additional Mastodon API placeholder endpoints used by Elk/pl-fe (notifications, markers, preferences, search, etc.).
