@@ -307,7 +307,7 @@ test "media: create/lookup and attach to status" {
     defer arena.deinit();
     const a = arena.allocator();
 
-    const st = try @import("statuses.zig").create(&conn, a, user_id, "hello", "public");
+    const st = try @import("statuses.zig").create(&conn, a, user_id, "hello", "public", null);
     try std.testing.expect(try attachToStatus(&conn, st.id, meta.id, 0));
 
     const list = try listForStatus(&conn, std.testing.allocator, st.id);
@@ -388,7 +388,7 @@ test "media: pruneOrphansOlderThan deletes unattached only" {
     defer arena.deinit();
     const a = arena.allocator();
 
-    const st = try @import("statuses.zig").create(&conn, a, user_id, "hello", "public");
+    const st = try @import("statuses.zig").create(&conn, a, user_id, "hello", "public", null);
     try std.testing.expect(try attachToStatus(&conn, st.id, attached.id, 0));
 
     try std.testing.expectEqual(@as(i64, 1), try pruneOrphansOlderThan(&conn, 2000));

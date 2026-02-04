@@ -145,6 +145,8 @@ pub const StatusPayload = struct {
     reblogs_count: i64,
     favourites_count: i64,
     replies_count: i64,
+    in_reply_to_id: ?[]const u8 = null,
+    in_reply_to_account_id: ?[]const u8 = null,
     url: []const u8,
 };
 
@@ -319,6 +321,29 @@ pub fn makeStatusPayload(app_state: *app.App, allocator: std.mem.Allocator, user
         break :blk out;
     };
 
+    const in_reply_to_id: ?[]const u8 = if (st.in_reply_to_id) |rid| blk: {
+        const s = std.fmt.allocPrint(allocator, "{d}", .{rid}) catch break :blk null;
+        break :blk s;
+    } else null;
+
+    const in_reply_to_account_id: ?[]const u8 = if (st.in_reply_to_id) |rid| blk: {
+        if (rid < 0) {
+            const parent = remote_statuses.lookup(&app_state.conn, allocator, rid) catch break :blk null;
+            if (parent == null) break :blk null;
+
+            const actor = remote_actors.lookupById(&app_state.conn, allocator, parent.?.remote_actor_id) catch break :blk null;
+            if (actor == null) break :blk null;
+
+            break :blk util_ids.remoteAccountApiIdAlloc(app_state, allocator, actor.?.id);
+        }
+
+        const parent = statuses.lookup(&app_state.conn, allocator, rid) catch break :blk null;
+        if (parent == null) break :blk null;
+
+        const s = std.fmt.allocPrint(allocator, "{d}", .{parent.?.user_id}) catch break :blk null;
+        break :blk s;
+    } else null;
+
     return .{
         .id = id_str,
         .uri = uri,
@@ -336,6 +361,8 @@ pub fn makeStatusPayload(app_state: *app.App, allocator: std.mem.Allocator, user
         .reblogs_count = 0,
         .favourites_count = 0,
         .replies_count = 0,
+        .in_reply_to_id = in_reply_to_id,
+        .in_reply_to_account_id = in_reply_to_account_id,
         .url = uri,
     };
 }

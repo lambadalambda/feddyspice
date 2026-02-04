@@ -9,6 +9,7 @@ pub const Error = db.Error || std.mem.Allocator.Error || error{
 pub const Status = struct {
     id: i64,
     user_id: i64,
+    in_reply_to_id: ?i64,
     text: []const u8,
     visibility: []const u8,
     created_at: []const u8,
@@ -21,15 +22,21 @@ pub fn create(
     user_id: i64,
     text: []const u8,
     visibility: []const u8,
+    in_reply_to_id: ?i64,
 ) Error!Status {
     var stmt = try conn.prepareZ(
-        "INSERT INTO statuses(user_id, text, visibility, created_at) VALUES (?1, ?2, ?3, strftime('%Y-%m-%dT%H:%M:%fZ','now'));\x00",
+        "INSERT INTO statuses(user_id, text, visibility, created_at, in_reply_to_id) VALUES (?1, ?2, ?3, strftime('%Y-%m-%dT%H:%M:%fZ','now'), ?4);\x00",
     );
     defer stmt.finalize();
 
     try stmt.bindInt64(1, user_id);
     try stmt.bindText(2, text);
     try stmt.bindText(3, visibility);
+    if (in_reply_to_id) |rid| {
+        try stmt.bindInt64(4, rid);
+    } else {
+        try stmt.bindNull(4);
+    }
 
     switch (try stmt.step()) {
         .done => {},
@@ -42,7 +49,7 @@ pub fn create(
 
 pub fn lookup(conn: *db.Db, allocator: std.mem.Allocator, id: i64) Error!?Status {
     var stmt = try conn.prepareZ(
-        "SELECT id, user_id, text, visibility, created_at, deleted_at FROM statuses WHERE id = ?1 AND deleted_at IS NULL LIMIT 1;\x00",
+        "SELECT id, user_id, in_reply_to_id, text, visibility, created_at, deleted_at FROM statuses WHERE id = ?1 AND deleted_at IS NULL LIMIT 1;\x00",
     );
     defer stmt.finalize();
     try stmt.bindInt64(1, id);
@@ -55,16 +62,17 @@ pub fn lookup(conn: *db.Db, allocator: std.mem.Allocator, id: i64) Error!?Status
     return .{
         .id = stmt.columnInt64(0),
         .user_id = stmt.columnInt64(1),
-        .text = try allocator.dupe(u8, stmt.columnText(2)),
-        .visibility = try allocator.dupe(u8, stmt.columnText(3)),
-        .created_at = try allocator.dupe(u8, stmt.columnText(4)),
-        .deleted_at = if (stmt.columnType(5) == .null) null else try allocator.dupe(u8, stmt.columnText(5)),
+        .in_reply_to_id = if (stmt.columnType(2) == .null) null else stmt.columnInt64(2),
+        .text = try allocator.dupe(u8, stmt.columnText(3)),
+        .visibility = try allocator.dupe(u8, stmt.columnText(4)),
+        .created_at = try allocator.dupe(u8, stmt.columnText(5)),
+        .deleted_at = if (stmt.columnType(6) == .null) null else try allocator.dupe(u8, stmt.columnText(6)),
     };
 }
 
 pub fn lookupIncludingDeleted(conn: *db.Db, allocator: std.mem.Allocator, id: i64) Error!?Status {
     var stmt = try conn.prepareZ(
-        "SELECT id, user_id, text, visibility, created_at, deleted_at FROM statuses WHERE id = ?1 LIMIT 1;\x00",
+        "SELECT id, user_id, in_reply_to_id, text, visibility, created_at, deleted_at FROM statuses WHERE id = ?1 LIMIT 1;\x00",
     );
     defer stmt.finalize();
     try stmt.bindInt64(1, id);
@@ -77,10 +85,11 @@ pub fn lookupIncludingDeleted(conn: *db.Db, allocator: std.mem.Allocator, id: i6
     return .{
         .id = stmt.columnInt64(0),
         .user_id = stmt.columnInt64(1),
-        .text = try allocator.dupe(u8, stmt.columnText(2)),
-        .visibility = try allocator.dupe(u8, stmt.columnText(3)),
-        .created_at = try allocator.dupe(u8, stmt.columnText(4)),
-        .deleted_at = if (stmt.columnType(5) == .null) null else try allocator.dupe(u8, stmt.columnText(5)),
+        .in_reply_to_id = if (stmt.columnType(2) == .null) null else stmt.columnInt64(2),
+        .text = try allocator.dupe(u8, stmt.columnText(3)),
+        .visibility = try allocator.dupe(u8, stmt.columnText(4)),
+        .created_at = try allocator.dupe(u8, stmt.columnText(5)),
+        .deleted_at = if (stmt.columnType(6) == .null) null else try allocator.dupe(u8, stmt.columnText(6)),
     };
 }
 
@@ -95,7 +104,7 @@ pub fn listByUser(
     const lim: i64 = @intCast(@min(limit, 200));
 
     var stmt = try conn.prepareZ(
-        "SELECT id, user_id, text, visibility, created_at, deleted_at FROM statuses WHERE user_id = ?1 AND id < ?2 AND deleted_at IS NULL ORDER BY id DESC LIMIT ?3;\x00",
+        "SELECT id, user_id, in_reply_to_id, text, visibility, created_at, deleted_at FROM statuses WHERE user_id = ?1 AND id < ?2 AND deleted_at IS NULL ORDER BY id DESC LIMIT ?3;\x00",
     );
     defer stmt.finalize();
 
@@ -113,10 +122,11 @@ pub fn listByUser(
                 try out.append(allocator, .{
                     .id = stmt.columnInt64(0),
                     .user_id = stmt.columnInt64(1),
-                    .text = try allocator.dupe(u8, stmt.columnText(2)),
-                    .visibility = try allocator.dupe(u8, stmt.columnText(3)),
-                    .created_at = try allocator.dupe(u8, stmt.columnText(4)),
-                    .deleted_at = if (stmt.columnType(5) == .null) null else try allocator.dupe(u8, stmt.columnText(5)),
+                    .in_reply_to_id = if (stmt.columnType(2) == .null) null else stmt.columnInt64(2),
+                    .text = try allocator.dupe(u8, stmt.columnText(3)),
+                    .visibility = try allocator.dupe(u8, stmt.columnText(4)),
+                    .created_at = try allocator.dupe(u8, stmt.columnText(5)),
+                    .deleted_at = if (stmt.columnType(6) == .null) null else try allocator.dupe(u8, stmt.columnText(6)),
                 });
             },
         }
@@ -140,7 +150,7 @@ pub fn listByUserBeforeCreatedAt(
 
     if (before_created_at == null) {
         var stmt = try conn.prepareZ(
-            "SELECT id, user_id, text, visibility, created_at, deleted_at FROM statuses WHERE user_id = ?1 AND deleted_at IS NULL ORDER BY created_at DESC, id DESC LIMIT ?2;\x00",
+            "SELECT id, user_id, in_reply_to_id, text, visibility, created_at, deleted_at FROM statuses WHERE user_id = ?1 AND deleted_at IS NULL ORDER BY created_at DESC, id DESC LIMIT ?2;\x00",
         );
         defer stmt.finalize();
         try stmt.bindInt64(1, user_id);
@@ -153,10 +163,11 @@ pub fn listByUserBeforeCreatedAt(
                     try out.append(allocator, .{
                         .id = stmt.columnInt64(0),
                         .user_id = stmt.columnInt64(1),
-                        .text = try allocator.dupe(u8, stmt.columnText(2)),
-                        .visibility = try allocator.dupe(u8, stmt.columnText(3)),
-                        .created_at = try allocator.dupe(u8, stmt.columnText(4)),
-                        .deleted_at = if (stmt.columnType(5) == .null) null else try allocator.dupe(u8, stmt.columnText(5)),
+                        .in_reply_to_id = if (stmt.columnType(2) == .null) null else stmt.columnInt64(2),
+                        .text = try allocator.dupe(u8, stmt.columnText(3)),
+                        .visibility = try allocator.dupe(u8, stmt.columnText(4)),
+                        .created_at = try allocator.dupe(u8, stmt.columnText(5)),
+                        .deleted_at = if (stmt.columnType(6) == .null) null else try allocator.dupe(u8, stmt.columnText(6)),
                     });
                 },
             }
@@ -168,7 +179,7 @@ pub fn listByUserBeforeCreatedAt(
     const anchor_id = before_id orelse std.math.maxInt(i64);
 
     var stmt = try conn.prepareZ(
-        "SELECT id, user_id, text, visibility, created_at, deleted_at FROM statuses WHERE user_id = ?1 AND deleted_at IS NULL AND (created_at < ?2 OR (created_at = ?2 AND id < ?3)) ORDER BY created_at DESC, id DESC LIMIT ?4;\x00",
+        "SELECT id, user_id, in_reply_to_id, text, visibility, created_at, deleted_at FROM statuses WHERE user_id = ?1 AND deleted_at IS NULL AND (created_at < ?2 OR (created_at = ?2 AND id < ?3)) ORDER BY created_at DESC, id DESC LIMIT ?4;\x00",
     );
     defer stmt.finalize();
     try stmt.bindInt64(1, user_id);
@@ -183,10 +194,55 @@ pub fn listByUserBeforeCreatedAt(
                 try out.append(allocator, .{
                     .id = stmt.columnInt64(0),
                     .user_id = stmt.columnInt64(1),
-                    .text = try allocator.dupe(u8, stmt.columnText(2)),
-                    .visibility = try allocator.dupe(u8, stmt.columnText(3)),
-                    .created_at = try allocator.dupe(u8, stmt.columnText(4)),
-                    .deleted_at = if (stmt.columnType(5) == .null) null else try allocator.dupe(u8, stmt.columnText(5)),
+                    .in_reply_to_id = if (stmt.columnType(2) == .null) null else stmt.columnInt64(2),
+                    .text = try allocator.dupe(u8, stmt.columnText(3)),
+                    .visibility = try allocator.dupe(u8, stmt.columnText(4)),
+                    .created_at = try allocator.dupe(u8, stmt.columnText(5)),
+                    .deleted_at = if (stmt.columnType(6) == .null) null else try allocator.dupe(u8, stmt.columnText(6)),
+                });
+            },
+        }
+    }
+
+    return out.toOwnedSlice(allocator);
+}
+
+pub fn listDescendants(conn: *db.Db, allocator: std.mem.Allocator, root_id: i64, limit: usize) Error![]Status {
+    const lim: i64 = @intCast(@min(limit, 200));
+
+    var stmt = try conn.prepareZ(
+        \\WITH RECURSIVE descendants(id) AS (
+        \\  SELECT id FROM statuses WHERE in_reply_to_id = ?1 AND deleted_at IS NULL
+        \\  UNION ALL
+        \\  SELECT s.id FROM statuses s JOIN descendants d ON s.in_reply_to_id = d.id WHERE s.deleted_at IS NULL
+        \\)
+        \\SELECT id, user_id, in_reply_to_id, text, visibility, created_at, deleted_at
+        \\FROM statuses
+        \\WHERE id IN (SELECT id FROM descendants)
+        \\ORDER BY created_at ASC, id ASC
+        \\LIMIT ?2;
+    ++ "\x00",
+    );
+    defer stmt.finalize();
+
+    try stmt.bindInt64(1, root_id);
+    try stmt.bindInt64(2, lim);
+
+    var out: std.ArrayListUnmanaged(Status) = .empty;
+    errdefer out.deinit(allocator);
+
+    while (true) {
+        switch (try stmt.step()) {
+            .done => break,
+            .row => {
+                try out.append(allocator, .{
+                    .id = stmt.columnInt64(0),
+                    .user_id = stmt.columnInt64(1),
+                    .in_reply_to_id = if (stmt.columnType(2) == .null) null else stmt.columnInt64(2),
+                    .text = try allocator.dupe(u8, stmt.columnText(3)),
+                    .visibility = try allocator.dupe(u8, stmt.columnText(4)),
+                    .created_at = try allocator.dupe(u8, stmt.columnText(5)),
+                    .deleted_at = if (stmt.columnType(6) == .null) null else try allocator.dupe(u8, stmt.columnText(6)),
                 });
             },
         }
@@ -234,8 +290,8 @@ test "create + list + lookup" {
     defer arena.deinit();
     const a = arena.allocator();
 
-    const s1 = try create(&conn, a, user_id, "hello", "public");
-    const s2 = try create(&conn, a, user_id, "world", "public");
+    const s1 = try create(&conn, a, user_id, "hello", "public", null);
+    const s2 = try create(&conn, a, user_id, "world", "public", null);
 
     try std.testing.expect(s2.id > s1.id);
 

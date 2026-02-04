@@ -24,11 +24,35 @@ pub fn createStatus(app_state: *app.App, allocator: std.mem.Allocator, req: http
 
     var parsed = common.parseBodyParams(allocator, req) catch
         return .{ .status = .bad_request, .body = "invalid form\n" };
+    defer parsed.deinit(allocator);
 
     const text_opt = parsed.get("status");
     const text = text_opt orelse "";
     const visibility = parsed.get("visibility") orelse "public";
     const media_ids_raw = parsed.get("media_ids[]") orelse parsed.get("media_ids");
+    const in_reply_to_raw = parsed.get("in_reply_to_id");
+
+    const in_reply_to_id: ?i64 = blk: {
+        const raw = in_reply_to_raw orelse break :blk null;
+        const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+        if (trimmed.len == 0) break :blk null;
+
+        const rid = std.fmt.parseInt(i64, trimmed, 10) catch
+            return .{ .status = .unprocessable_entity, .body = "invalid in_reply_to_id\n" };
+        if (rid == 0) return .{ .status = .unprocessable_entity, .body = "invalid in_reply_to_id\n" };
+
+        if (rid < 0) {
+            const parent = remote_statuses.lookup(&app_state.conn, allocator, rid) catch
+                return .{ .status = .internal_server_error, .body = "internal server error\n" };
+            if (parent == null) return .{ .status = .unprocessable_entity, .body = "invalid in_reply_to_id\n" };
+        } else {
+            const parent = statuses.lookup(&app_state.conn, allocator, rid) catch
+                return .{ .status = .internal_server_error, .body = "internal server error\n" };
+            if (parent == null) return .{ .status = .unprocessable_entity, .body = "invalid in_reply_to_id\n" };
+        }
+
+        break :blk rid;
+    };
 
     const has_media = blk: {
         const raw = media_ids_raw orelse break :blk false;
@@ -51,7 +75,7 @@ pub fn createStatus(app_state: *app.App, allocator: std.mem.Allocator, req: http
         app_state.conn.execZ("ROLLBACK;\x00") catch {};
     };
 
-    const st = statuses.create(&app_state.conn, allocator, info.?.user_id, text, visibility) catch |err| switch (err) {
+    const st = statuses.create(&app_state.conn, allocator, info.?.user_id, text, visibility, in_reply_to_id) catch |err| switch (err) {
         error.InvalidText => return .{ .status = .unprocessable_entity, .body = "invalid status\n" },
         else => return .{ .status = .internal_server_error, .body = "internal server error\n" },
     };
@@ -151,9 +175,66 @@ pub fn statusContext(app_state: *app.App, allocator: std.mem.Allocator, req: htt
         if (st == null) return .{ .status = .not_found, .body = "not found\n" };
     }
 
+    const user = users.lookupUserById(&app_state.conn, allocator, info.?.user_id) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (user == null) return common.unauthorized(allocator);
+
+    var ancestors: std.ArrayListUnmanaged(StatusPayload) = .empty;
+    defer ancestors.deinit(allocator);
+
+    if (id >= 0) {
+        var cur_id: i64 = id;
+        var depth: usize = 0;
+        while (depth < 50) : (depth += 1) {
+            const cur = statuses.lookup(&app_state.conn, allocator, cur_id) catch
+                return .{ .status = .internal_server_error, .body = "internal server error\n" };
+            if (cur == null) break;
+
+            const parent_id = cur.?.in_reply_to_id orelse break;
+
+            if (parent_id < 0) {
+                const parent_st = remote_statuses.lookup(&app_state.conn, allocator, parent_id) catch
+                    return .{ .status = .internal_server_error, .body = "internal server error\n" };
+                if (parent_st == null) break;
+
+                const actor = remote_actors.lookupById(&app_state.conn, allocator, parent_st.?.remote_actor_id) catch
+                    return .{ .status = .internal_server_error, .body = "internal server error\n" };
+                if (actor == null) break;
+
+                ancestors.append(allocator, masto.makeRemoteStatusPayload(app_state, allocator, actor.?, parent_st.?)) catch
+                    return .{ .status = .internal_server_error, .body = "internal server error\n" };
+                break;
+            }
+
+            const parent_st = statuses.lookup(&app_state.conn, allocator, parent_id) catch
+                return .{ .status = .internal_server_error, .body = "internal server error\n" };
+            if (parent_st == null) break;
+
+            if (parent_st.?.user_id != info.?.user_id) break;
+            ancestors.append(allocator, masto.makeStatusPayload(app_state, allocator, user.?, parent_st.?)) catch
+                return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+            cur_id = parent_id;
+        }
+
+        std.mem.reverse(StatusPayload, ancestors.items);
+    }
+
+    const desc_list = statuses.listDescendants(&app_state.conn, allocator, id, 200) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    var descendants: std.ArrayListUnmanaged(StatusPayload) = .empty;
+    defer descendants.deinit(allocator);
+
+    for (desc_list) |st| {
+        if (st.user_id != info.?.user_id) continue;
+        descendants.append(allocator, masto.makeStatusPayload(app_state, allocator, user.?, st)) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    }
+
     return common.jsonOk(allocator, .{
-        .ancestors = [_]StatusPayload{},
-        .descendants = [_]StatusPayload{},
+        .ancestors = ancestors.items,
+        .descendants = descendants.items,
     });
 }
 

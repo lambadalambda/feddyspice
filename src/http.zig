@@ -1973,7 +1973,7 @@ test "POST /api/v1/statuses publishes streaming update" {
     try std.testing.expectEqualStrings(create_resp.body, env_json.value.object.get("payload").?.string);
 }
 
-test "statuses: context endpoint returns empty arrays" {
+test "statuses: context endpoint includes ancestors and descendants for replies" {
     var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
     defer app_state.deinit();
 
@@ -1995,37 +1995,76 @@ test "statuses: context endpoint returns empty arrays" {
     const token = try oauth.createAccessToken(&app_state.conn, a, app_creds.id, user_id, "read write");
     const auth_header = try std.fmt.allocPrint(a, "Bearer {s}", .{token});
 
-    const create_resp = handle(&app_state, a, .{
+    const root_resp = handle(&app_state, a, .{
         .method = .POST,
         .target = "/api/v1/statuses",
         .content_type = "application/x-www-form-urlencoded",
         .body = "status=hello&visibility=public",
         .authorization = auth_header,
     });
-    try std.testing.expectEqual(std.http.Status.ok, create_resp.status);
+    try std.testing.expectEqual(std.http.Status.ok, root_resp.status);
 
-    var create_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, create_resp.body, .{});
-    defer create_json.deinit();
-    const id = create_json.value.object.get("id").?.string;
+    var root_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, root_resp.body, .{});
+    defer root_json.deinit();
+    const root_id = root_json.value.object.get("id").?.string;
+    const root_account_id = root_json.value.object.get("account").?.object.get("id").?.string;
 
-    const ctx_target = try std.fmt.allocPrint(a, "/api/v1/statuses/{s}/context", .{id});
-    const ctx_resp = handle(&app_state, a, .{
-        .method = .GET,
-        .target = ctx_target,
+    const reply_body = try std.fmt.allocPrint(a, "status=reply&visibility=public&in_reply_to_id={s}", .{root_id});
+    const reply_resp = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/api/v1/statuses",
+        .content_type = "application/x-www-form-urlencoded",
+        .body = reply_body,
         .authorization = auth_header,
     });
-    try std.testing.expectEqual(std.http.Status.ok, ctx_resp.status);
+    try std.testing.expectEqual(std.http.Status.ok, reply_resp.status);
 
-    var ctx_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, ctx_resp.body, .{});
-    defer ctx_json.deinit();
+    var reply_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, reply_resp.body, .{});
+    defer reply_json.deinit();
+    const reply_id = reply_json.value.object.get("id").?.string;
 
-    try std.testing.expect(ctx_json.value == .object);
-    const ancestors = ctx_json.value.object.get("ancestors").?;
-    const descendants = ctx_json.value.object.get("descendants").?;
-    try std.testing.expect(ancestors == .array);
-    try std.testing.expect(descendants == .array);
-    try std.testing.expectEqual(@as(usize, 0), ancestors.array.items.len);
-    try std.testing.expectEqual(@as(usize, 0), descendants.array.items.len);
+    try std.testing.expectEqualStrings(root_id, reply_json.value.object.get("in_reply_to_id").?.string);
+    try std.testing.expectEqualStrings(root_account_id, reply_json.value.object.get("in_reply_to_account_id").?.string);
+
+    const root_ctx_target = try std.fmt.allocPrint(a, "/api/v1/statuses/{s}/context", .{root_id});
+    const root_ctx_resp = handle(&app_state, a, .{
+        .method = .GET,
+        .target = root_ctx_target,
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, root_ctx_resp.status);
+
+    var root_ctx_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, root_ctx_resp.body, .{});
+    defer root_ctx_json.deinit();
+
+    try std.testing.expect(root_ctx_json.value == .object);
+    const root_ancestors = root_ctx_json.value.object.get("ancestors").?;
+    const root_descendants = root_ctx_json.value.object.get("descendants").?;
+    try std.testing.expect(root_ancestors == .array);
+    try std.testing.expect(root_descendants == .array);
+    try std.testing.expectEqual(@as(usize, 0), root_ancestors.array.items.len);
+    try std.testing.expectEqual(@as(usize, 1), root_descendants.array.items.len);
+    try std.testing.expectEqualStrings(reply_id, root_descendants.array.items[0].object.get("id").?.string);
+
+    const reply_ctx_target = try std.fmt.allocPrint(a, "/api/v1/statuses/{s}/context", .{reply_id});
+    const reply_ctx_resp = handle(&app_state, a, .{
+        .method = .GET,
+        .target = reply_ctx_target,
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, reply_ctx_resp.status);
+
+    var reply_ctx_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, reply_ctx_resp.body, .{});
+    defer reply_ctx_json.deinit();
+
+    try std.testing.expect(reply_ctx_json.value == .object);
+    const reply_ancestors = reply_ctx_json.value.object.get("ancestors").?;
+    const reply_descendants = reply_ctx_json.value.object.get("descendants").?;
+    try std.testing.expect(reply_ancestors == .array);
+    try std.testing.expect(reply_descendants == .array);
+    try std.testing.expectEqual(@as(usize, 1), reply_ancestors.array.items.len);
+    try std.testing.expectEqualStrings(root_id, reply_ancestors.array.items[0].object.get("id").?.string);
+    try std.testing.expectEqual(@as(usize, 0), reply_descendants.array.items.len);
 }
 
 test "statuses: favourite/reblog/bookmark endpoints return status" {
@@ -2782,10 +2821,10 @@ test "timelines: public timeline excludes unlisted/private/direct statuses (loca
     defer arena.deinit();
     const a = arena.allocator();
 
-    _ = try statuses.create(&app_state.conn, a, user_id, "Lpub", "public");
-    _ = try statuses.create(&app_state.conn, a, user_id, "Lunl", "unlisted");
-    _ = try statuses.create(&app_state.conn, a, user_id, "Lpriv", "private");
-    _ = try statuses.create(&app_state.conn, a, user_id, "Ldm", "direct");
+    _ = try statuses.create(&app_state.conn, a, user_id, "Lpub", "public", null);
+    _ = try statuses.create(&app_state.conn, a, user_id, "Lunl", "unlisted", null);
+    _ = try statuses.create(&app_state.conn, a, user_id, "Lpriv", "private", null);
+    _ = try statuses.create(&app_state.conn, a, user_id, "Ldm", "direct", null);
 
     try remote_actors.upsert(&app_state.conn, .{
         .id = "https://remote.test/users/bob",
@@ -3737,8 +3776,8 @@ test "GET /users/:name/outbox and /users/:name/statuses/:id return ActivityPub o
     defer arena.deinit();
     const a = arena.allocator();
 
-    const s1 = try statuses.create(&app_state.conn, a, user_id, "hello", "public");
-    const s2 = try statuses.create(&app_state.conn, a, user_id, "world", "public");
+    const s1 = try statuses.create(&app_state.conn, a, user_id, "hello", "public", null);
+    const s2 = try statuses.create(&app_state.conn, a, user_id, "world", "public", null);
 
     const outbox_resp = handle(&app_state, a, .{
         .method = .GET,
@@ -3800,10 +3839,10 @@ test "ActivityPub visibility: outbox + note endpoints do not leak private/direct
     defer arena.deinit();
     const a = arena.allocator();
 
-    const public_st = try statuses.create(&app_state.conn, a, user_id, "pub", "public");
-    const unlisted_st = try statuses.create(&app_state.conn, a, user_id, "unlisted", "unlisted");
-    const private_st = try statuses.create(&app_state.conn, a, user_id, "priv", "private");
-    const direct_st = try statuses.create(&app_state.conn, a, user_id, "dm", "direct");
+    const public_st = try statuses.create(&app_state.conn, a, user_id, "pub", "public", null);
+    const unlisted_st = try statuses.create(&app_state.conn, a, user_id, "unlisted", "unlisted", null);
+    const private_st = try statuses.create(&app_state.conn, a, user_id, "priv", "private", null);
+    const direct_st = try statuses.create(&app_state.conn, a, user_id, "dm", "direct", null);
 
     const outbox_resp = handle(&app_state, a, .{
         .method = .GET,
@@ -4264,7 +4303,7 @@ test "DELETE /api/v1/statuses visibility=direct delivers Delete to mentioned rec
         .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
     });
 
-    const st = try statuses.create(&app_state.conn, a, user_id, "@bob@remote.test hi", "direct");
+    const st = try statuses.create(&app_state.conn, a, user_id, "@bob@remote.test hi", "direct", null);
 
     const app_creds = try oauth.createApp(&app_state.conn, a, "pl-fe", "urn:ietf:wg:oauth:2.0:oob", "read write", "");
     const token = try oauth.createAccessToken(&app_state.conn, a, app_creds.id, user_id, "read write");

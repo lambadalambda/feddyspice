@@ -63,6 +63,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Soft-delete support for local + remote statuses (`deleted_at`).
 - Delete local status endpoint (`DELETE /api/v1/statuses/:id`).
 - Status context endpoint (`GET /api/v1/statuses/:id/context`).
+- Replies: `POST /api/v1/statuses` supports `in_reply_to_id`, status payloads include `in_reply_to_id`/`in_reply_to_account_id`, and the context endpoint returns ancestors/descendants.
 - Status action endpoints (no-op compat): favourite/reblog/bookmark (`POST /api/v1/statuses/:id/{favourite,unfavourite,reblog,unreblog,bookmark,unbookmark}`).
 - Deleted local ActivityPub objects return Tombstones (`GET /users/:name/statuses/:id`).
 - ActivityPub `Delete` deliveries to followers when local statuses are deleted.

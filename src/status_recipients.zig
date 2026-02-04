@@ -55,7 +55,7 @@ test "status_recipients: add + listRemoteActorIds" {
     defer arena.deinit();
     const a = arena.allocator();
 
-    const st = try @import("statuses.zig").create(&conn, a, user_id, "hello", "direct");
+    const st = try @import("statuses.zig").create(&conn, a, user_id, "hello", "direct", null);
 
     try @import("remote_actors.zig").upsert(&conn, .{
         .id = "https://remote.test/users/bob",

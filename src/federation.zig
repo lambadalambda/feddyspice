@@ -1343,7 +1343,7 @@ test "deliverStatusToFollowers direct uses stored recipients without resolving h
     });
 
     const user = (try users.lookupUserById(&app_state.conn, a, user_id)).?;
-    const st = try statuses.create(&app_state.conn, a, user_id, "hello @bob@remote.test", "direct");
+    const st = try statuses.create(&app_state.conn, a, user_id, "hello @bob@remote.test", "direct", null);
     try status_recipients.add(&app_state.conn, st.id, remote_actor_id);
 
     try mock.pushExpected(.{ .method = .POST, .url = remote_inbox, .response_status = .accepted, .response_body = "" });
@@ -1388,7 +1388,7 @@ test "deliverStatusToFollowers includes stored recipients for non-direct statuse
     });
 
     const user = (try users.lookupUserById(&app_state.conn, a, user_id)).?;
-    const st = try statuses.create(&app_state.conn, a, user_id, "hello", "private");
+    const st = try statuses.create(&app_state.conn, a, user_id, "hello", "private", null);
     try status_recipients.add(&app_state.conn, st.id, remote_actor_id);
 
     try mock.pushExpected(.{ .method = .POST, .url = remote_inbox, .response_status = .accepted, .response_body = "" });
@@ -1435,7 +1435,7 @@ test "deliverDeleteToFollowers includes stored recipients for non-direct statuse
     });
 
     const user = (try users.lookupUserById(&app_state.conn, a, user_id)).?;
-    const created = try statuses.create(&app_state.conn, a, user_id, "hello", "private");
+    const created = try statuses.create(&app_state.conn, a, user_id, "hello", "private", null);
     try status_recipients.add(&app_state.conn, created.id, remote_actor_id);
     try std.testing.expect(try statuses.markDeleted(&app_state.conn, created.id, user_id));
     const st = (try statuses.lookupIncludingDeleted(&app_state.conn, a, created.id)).?;
