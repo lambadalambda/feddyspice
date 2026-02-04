@@ -92,6 +92,34 @@ pub fn lookupAppByClientId(
     };
 }
 
+pub fn lookupAppById(
+    conn: *db.Db,
+    allocator: std.mem.Allocator,
+    id: i64,
+) Error!?App {
+    var stmt = try conn.prepareZ(
+        "SELECT id, name, client_id, client_secret, redirect_uris, scopes, website FROM oauth_apps WHERE id = ?1 LIMIT 1;\x00",
+    );
+    defer stmt.finalize();
+
+    try stmt.bindInt64(1, id);
+
+    switch (try stmt.step()) {
+        .done => return null,
+        .row => {},
+    }
+
+    return .{
+        .id = stmt.columnInt64(0),
+        .name = try allocator.dupe(u8, stmt.columnText(1)),
+        .client_id = try allocator.dupe(u8, stmt.columnText(2)),
+        .client_secret = try allocator.dupe(u8, stmt.columnText(3)),
+        .redirect_uris = try allocator.dupe(u8, stmt.columnText(4)),
+        .scopes = try allocator.dupe(u8, stmt.columnText(5)),
+        .website = try allocator.dupe(u8, stmt.columnText(6)),
+    };
+}
+
 pub fn redirectUriAllowed(redirect_uris: []const u8, redirect_uri: []const u8) bool {
     var it = std.mem.tokenizeAny(u8, redirect_uris, " \t\r\n");
     while (it.next()) |uri| {

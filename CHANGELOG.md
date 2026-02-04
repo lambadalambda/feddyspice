@@ -18,6 +18,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - App wiring and basic Mastodon-compatible instance endpoint (`/api/v1/instance`).
 - Minimal HTML signup/login and session cookies.
 - OAuth 2.0 app registration and authorization-code flow (`/api/v1/apps`, `/oauth/authorize`, `/oauth/token`).
+- App introspection endpoint (`GET /api/v1/apps/verify_credentials`).
 - Bearer-token auth for `/api/v1/accounts/verify_credentials`.
 - Status posting and timelines (SQLite `statuses` table; `POST /api/v1/statuses`, `GET /api/v1/timelines/home`, `GET /api/v1/statuses/:id`).
 - Public timeline endpoint (`GET /api/v1/timelines/public`).

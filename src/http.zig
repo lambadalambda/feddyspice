@@ -235,6 +235,10 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
         return oauth_api.registerApp(app_state, allocator, req);
     }
 
+    if (req.method == .GET and std.mem.eql(u8, path, "/api/v1/apps/verify_credentials")) {
+        return oauth_api.verifyAppCredentials(app_state, allocator, req);
+    }
+
     if (req.method == .GET and std.mem.eql(u8, path, "/signup")) {
         return pages.signupGet(app_state, allocator);
     }
@@ -1024,6 +1028,48 @@ test "POST /api/v1/apps accepts json" {
     });
 
     try std.testing.expectEqual(std.http.Status.ok, resp.status);
+}
+
+test "GET /api/v1/apps/verify_credentials returns app details for bearer token" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const app_creds = try oauth.createApp(
+        &app_state.conn,
+        a,
+        "pl-fe",
+        "urn:ietf:wg:oauth:2.0:oob",
+        "read write",
+        "",
+    );
+    const access_token = try oauth.createAccessToken(&app_state.conn, a, app_creds.id, user_id, "read write");
+    const auth_header = try std.fmt.allocPrint(a, "Bearer {s}", .{access_token});
+
+    const resp = handle(&app_state, a, .{
+        .method = .GET,
+        .target = "/api/v1/apps/verify_credentials",
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, resp.status);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, resp.body, .{});
+    defer parsed.deinit();
+
+    const obj = parsed.value.object;
+    const id_str = try std.fmt.allocPrint(a, "{d}", .{app_creds.id});
+    try std.testing.expectEqualStrings(id_str, obj.get("id").?.string);
+    try std.testing.expectEqualStrings("pl-fe", obj.get("name").?.string);
+    try std.testing.expectEqualStrings("read write", obj.get("scopes").?.string);
+    try std.testing.expectEqualStrings("urn:ietf:wg:oauth:2.0:oob", obj.get("redirect_uris").?.string);
+    try std.testing.expectEqualStrings("urn:ietf:wg:oauth:2.0:oob", obj.get("redirect_uri").?.string);
+    try std.testing.expect(obj.get("vapid_key") != null);
 }
 
 test "oauth: authorization code flow (oob)" {

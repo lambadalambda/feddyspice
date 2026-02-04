@@ -49,6 +49,32 @@ pub fn registerApp(app_state: *app.App, allocator: std.mem.Allocator, req: http_
     };
 }
 
+pub fn verifyAppCredentials(app_state: *app.App, allocator: std.mem.Allocator, req: http_types.Request) http_types.Response {
+    const bearer = common.bearerToken(req.authorization) orelse return common.unauthorized(allocator);
+    const info = oauth.verifyAccessToken(&app_state.conn, allocator, bearer) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (info == null) return common.unauthorized(allocator);
+
+    const app_row = oauth.lookupAppById(&app_state.conn, allocator, info.?.app_id) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (app_row == null) return common.unauthorized(allocator);
+
+    const id_str = std.fmt.allocPrint(allocator, "{d}", .{app_row.?.id}) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+    const payload = .{
+        .id = id_str,
+        .name = app_row.?.name,
+        .website = app_row.?.website,
+        .scopes = app_row.?.scopes,
+        .redirect_uris = app_row.?.redirect_uris,
+        .vapid_key = "",
+        .redirect_uri = app_row.?.redirect_uris,
+    };
+
+    return common.jsonOk(allocator, payload);
+}
+
 pub fn authorizeGet(app_state: *app.App, allocator: std.mem.Allocator, req: http_types.Request) http_types.Response {
     const q = common.queryString(req.target);
     var query = form.parse(allocator, q) catch
