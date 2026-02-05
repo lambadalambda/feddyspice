@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const db = @import("db.zig");
+const util_url = @import("util/url.zig");
 
 pub const Error = db.Error || std.mem.Allocator.Error;
 
@@ -85,6 +86,37 @@ pub fn lookupById(conn: *db.Db, allocator: std.mem.Allocator, id: []const u8) Er
         .avatar_url = avatar_url,
         .header_url = header_url,
     };
+}
+
+pub fn lookupByIdAny(conn: *db.Db, allocator: std.mem.Allocator, id: []const u8) Error!?RemoteActor {
+    if (try lookupById(conn, allocator, id)) |actor| return actor;
+
+    const trimmed = util_url.trimTrailingSlash(id);
+    if (!std.mem.eql(u8, trimmed, id)) {
+        if (try lookupById(conn, allocator, trimmed)) |actor| return actor;
+    } else {
+        const with_slash = std.fmt.allocPrint(allocator, "{s}/", .{id}) catch "";
+        if (with_slash.len > 0) {
+            if (try lookupById(conn, allocator, with_slash)) |actor| return actor;
+        }
+    }
+
+    const stripped = util_url.stripQueryAndFragment(id);
+    if (!std.mem.eql(u8, stripped, id)) {
+        if (try lookupById(conn, allocator, stripped)) |actor| return actor;
+
+        const stripped_trimmed = util_url.trimTrailingSlash(stripped);
+        if (!std.mem.eql(u8, stripped_trimmed, stripped)) {
+            if (try lookupById(conn, allocator, stripped_trimmed)) |actor| return actor;
+        } else {
+            const with_slash = std.fmt.allocPrint(allocator, "{s}/", .{stripped}) catch "";
+            if (with_slash.len > 0) {
+                if (try lookupById(conn, allocator, with_slash)) |actor| return actor;
+            }
+        }
+    }
+
+    return null;
 }
 
 pub fn lookupRowIdById(conn: *db.Db, id: []const u8) db.Error!?i64 {
@@ -177,6 +209,45 @@ test "upsert + lookupById" {
 
     const got = (try lookupById(&conn, arena.allocator(), "https://remote.test/users/bob")).?;
     try std.testing.expectEqualStrings("bob", got.preferred_username);
+}
+
+test "lookupByIdAny handles slash and query/fragment variants" {
+    var conn = try db.Db.openZ(":memory:");
+    defer conn.close();
+
+    try @import("migrations.zig").migrate(&conn);
+
+    try upsert(&conn, .{
+        .id = "https://remote.test/users/bob",
+        .inbox = "https://remote.test/users/bob/inbox",
+        .shared_inbox = null,
+        .preferred_username = "bob",
+        .domain = "remote.test",
+        .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
+    });
+
+    try upsert(&conn, .{
+        .id = "https://remote.test/users/alice/",
+        .inbox = "https://remote.test/users/alice/inbox",
+        .shared_inbox = null,
+        .preferred_username = "alice",
+        .domain = "remote.test",
+        .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
+    });
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const bob1 = (try lookupByIdAny(&conn, a, "https://remote.test/users/bob/")).?;
+    try std.testing.expectEqualStrings("bob", bob1.preferred_username);
+    const bob2 = (try lookupByIdAny(&conn, a, "https://remote.test/users/bob?x=1")).?;
+    try std.testing.expectEqualStrings("bob", bob2.preferred_username);
+
+    const alice1 = (try lookupByIdAny(&conn, a, "https://remote.test/users/alice")).?;
+    try std.testing.expectEqualStrings("alice", alice1.preferred_username);
+    const alice2 = (try lookupByIdAny(&conn, a, "https://remote.test/users/alice#frag")).?;
+    try std.testing.expectEqualStrings("alice", alice2.preferred_username);
 }
 
 test "lookupRowIdById + lookupByRowId" {
