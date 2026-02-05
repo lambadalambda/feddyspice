@@ -139,7 +139,7 @@ pub fn serveOnce(app_state: *app.App, listener: *net.Server) !void {
 
         if (info == null) {
             const resp: routes.Response = .{ .status = .unauthorized, .body = "unauthorized\n" };
-            try writeResponse(alloc, &request, resp);
+            try writeResponse(app_state, alloc, &request, resp);
             logAccess(app_state, conn.address, remote_override, method, target, resp.status, start_us);
             return;
         }
@@ -158,7 +158,7 @@ pub fn serveOnce(app_state: *app.App, listener: *net.Server) !void {
 
         const sub = app_state.streaming.subscribe(info.?.user_id, streams) catch {
             const resp: routes.Response = .{ .status = .internal_server_error, .body = "internal server error\n" };
-            try writeResponse(alloc, &request, resp);
+            try writeResponse(app_state, alloc, &request, resp);
             logAccess(app_state, conn.address, remote_override, method, target, resp.status, start_us);
             return;
         };
@@ -199,7 +199,7 @@ pub fn serveOnce(app_state: *app.App, listener: *net.Server) !void {
                 .status = .payload_too_large,
                 .body = "payload too large\n",
             };
-            try writeResponse(alloc, &request, resp);
+            try writeResponse(app_state, alloc, &request, resp);
             logAccess(app_state, conn.address, remote_override, method, target, resp.status, start_us);
             return;
         }
@@ -224,7 +224,7 @@ pub fn serveOnce(app_state: *app.App, listener: *net.Server) !void {
         .authorization = authorization,
     });
 
-    try writeResponse(alloc, &request, resp);
+    try writeResponse(app_state, alloc, &request, resp);
     logAccess(app_state, conn.address, remote_override, method, target, resp.status, start_us);
 }
 
@@ -437,7 +437,7 @@ fn drainIncoming(stream: *net.Stream, writer: anytype, buf: []u8, used: *usize) 
     return false;
 }
 
-fn writeResponse(allocator: std.mem.Allocator, request: *http.Server.Request, resp: routes.Response) !void {
+fn writeResponse(app_state: *app.App, allocator: std.mem.Allocator, request: *http.Server.Request, resp: routes.Response) !void {
     const cors_headers = [_]http.Header{
         .{ .name = "access-control-allow-origin", .value = "*" },
         .{ .name = "access-control-allow-methods", .value = "GET, POST, PUT, PATCH, DELETE, OPTIONS" },
@@ -451,15 +451,12 @@ fn writeResponse(allocator: std.mem.Allocator, request: *http.Server.Request, re
         .{ .name = "referrer-policy", .value = "no-referrer" },
         .{ .name = "x-frame-options", .value = "deny" },
     };
-    const html_security_headers = [_]http.Header{
-        .{ .name = "content-security-policy", .value = "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'" },
-    };
 
     var stack_headers: [16]http.Header = undefined;
 
     const content_type = if (headerValueIsSafe(resp.content_type)) resp.content_type else "application/octet-stream";
     const include_csp = std.mem.startsWith(u8, content_type, "text/html");
-    const security_len: usize = base_security_headers.len + (if (include_csp) html_security_headers.len else 0);
+    const security_len: usize = base_security_headers.len + (if (include_csp) @as(usize, 1) else 0);
 
     const header_count: usize = 1 + cors_headers.len + security_len + resp.headers.len;
     const headers = if (header_count <= stack_headers.len)
@@ -477,10 +474,18 @@ fn writeResponse(allocator: std.mem.Allocator, request: *http.Server.Request, re
         used += 1;
     }
     if (include_csp) {
-        for (html_security_headers) |h| {
-            headers[used] = h;
-            used += 1;
-        }
+        const csp_value = blk: {
+            const scheme = @tagName(app_state.cfg.scheme);
+            const domain = app_state.cfg.domain;
+            if (!headerValueIsSafe(domain)) break :blk "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
+            break :blk std.fmt.allocPrint(
+                allocator,
+                "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self' {s}://{s}",
+                .{ scheme, domain },
+            ) catch "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
+        };
+        headers[used] = .{ .name = "content-security-policy", .value = csp_value };
+        used += 1;
     }
     for (resp.headers) |h| {
         if (!headerValueIsSafe(h.value)) continue;
@@ -765,6 +770,10 @@ test "serveOnce: GET /login includes CSP header" {
             c.ok = std.mem.startsWith(u8, resp, "HTTP/1.1 200") and
                 (std.mem.indexOf(u8, lower, "\r\ncontent-security-policy:") != null) and
                 (std.mem.indexOf(u8, lower, "frame-ancestors 'none'") != null);
+
+            // `form-action 'self'` breaks if the document has an opaque origin (Origin: null),
+            // so include the configured public origin explicitly.
+            c.ok = c.ok and (std.mem.indexOf(u8, lower, "form-action 'self' http://example.test") != null);
         }
     };
 
