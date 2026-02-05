@@ -19,6 +19,7 @@ const masto = @import("mastodon.zig");
 const notifications = @import("../notifications.zig");
 const notifications_api = @import("notifications_api.zig");
 const remote_actors = @import("../remote_actors.zig");
+const remote_note_ingest = @import("../remote_note_ingest.zig");
 const remote_statuses = @import("../remote_statuses.zig");
 const rate_limit = @import("../rate_limit.zig");
 const status_reactions = @import("../status_reactions.zig");
@@ -661,19 +662,8 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
         if (obj != .object) return .{ .status = .bad_request, .body = "invalid object\n" };
 
         const note_id_val = obj.object.get("id") orelse return .{ .status = .bad_request, .body = "missing id\n" };
-        const content_val = obj.object.get("content") orelse
-            return .{ .status = .bad_request, .body = "missing content\n" };
-
         if (note_id_val != .string) return .{ .status = .bad_request, .body = "invalid id\n" };
-        if (content_val != .string) return .{ .status = .bad_request, .body = "invalid content\n" };
         if (!util_url.isHttpOrHttpsUrl(note_id_val.string)) return .{ .status = .accepted, .body = "ignored\n" };
-
-        const created_at = blk: {
-            const p = obj.object.get("published") orelse break :blk "1970-01-01T00:00:00.000Z";
-            if (p != .string) break :blk "1970-01-01T00:00:00.000Z";
-            if (p.string.len == 0) break :blk "1970-01-01T00:00:00.000Z";
-            break :blk p.string;
-        };
 
         const received_at_ms: i64 = std.time.milliTimestamp();
         var dedupe_activity_id: ?[]const u8 = null;
@@ -710,102 +700,34 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
         const max_clock_skew_sec: i64 = @intCast(app_state.cfg.signature_max_clock_skew_sec);
         if (verifyInboxSignatureOrReject(allocator, req, remote_actor.?, now_sec, max_clock_skew_sec)) |resp| return resp;
 
-        const visibility: []const u8 = blk: {
-            const direct_message =
-                activitypub_json.truthiness(parsed.value.object.get("directMessage")) or
-                activitypub_json.truthiness(obj.object.get("directMessage"));
-            if (direct_message) break :blk "direct";
-
-            const has_recipients =
-                (parsed.value.object.get("to") != null) or
-                (parsed.value.object.get("cc") != null) or
-                (obj.object.get("to") != null) or
-                (obj.object.get("cc") != null);
-            if (!has_recipients) break :blk "public";
-
-            const public_iri = "https://www.w3.org/ns/activitystreams#Public";
-
-            const public_in_to =
-                activitypub_json.containsIri(parsed.value.object.get("to"), public_iri) or
-                activitypub_json.containsIri(obj.object.get("to"), public_iri);
-            if (public_in_to) break :blk "public";
-
-            const public_in_cc =
-                activitypub_json.containsIri(parsed.value.object.get("cc"), public_iri) or
-                activitypub_json.containsIri(obj.object.get("cc"), public_iri);
-            if (public_in_cc) break :blk "unlisted";
-
-            break :blk "direct";
-        };
-
-        const attachments_json = remoteAttachmentsJsonAlloc(allocator, obj.object) catch
-            return .{ .status = .internal_server_error, .body = "internal server error\n" };
-
-        const safe_content_html = util_html.safeHtmlFromRemoteHtmlAlloc(allocator, content_val.string) catch
-            return .{ .status = .internal_server_error, .body = "internal server error\n" };
-
-        const InReplyTo = struct { id: ?i64, uri: ?[]const u8 };
-
-        const in_reply_to: ?InReplyTo = blk: {
-            const raw = obj.object.get("inReplyTo") orelse break :blk null;
-
-            const uri_str: []const u8 = switch (raw) {
-                .string => |s| s,
-                .object => |o| blk2: {
-                    const id_val = o.get("id") orelse break :blk2 "";
-                    if (id_val != .string) break :blk2 "";
-                    break :blk2 id_val.string;
-                },
-                else => "",
-            };
-            if (uri_str.len == 0) break :blk null;
-
-            const trimmed = util_url.stripQueryAndFragment(util_url.trimTrailingSlash(uri_str));
-            if (!util_url.isHttpOrHttpsUrl(trimmed)) break :blk null;
-
-            if (util_local_iri.localStatusIdFromIri(app_state, trimmed)) |local_id| {
-                const parent = statuses.lookup(&app_state.conn, allocator, local_id) catch break :blk null;
-                if (parent != null) break :blk InReplyTo{ .id = local_id, .uri = null };
-                break :blk null;
-            }
-
-            const remote_parent = remote_statuses.lookupByUriAny(&app_state.conn, allocator, trimmed) catch break :blk null;
-            if (remote_parent) |p| break :blk InReplyTo{ .id = p.id, .uri = null };
-
-            break :blk InReplyTo{ .id = null, .uri = trimmed };
-        };
-        const in_reply_to_id: ?i64 = if (in_reply_to) |it| it.id else null;
-        const in_reply_to_uri: ?[]const u8 = if (in_reply_to) |it| it.uri else null;
-
-        const created = remote_statuses.createIfNotExists(
-            &app_state.conn,
+        const ingested = remote_note_ingest.ingestFromObjectMaps(
+            app_state,
             allocator,
-            note_id_val.string,
+            user.?.id,
+            parsed.value.object,
+            obj.object,
+            false,
             remote_actor.?.id,
-            in_reply_to_id,
-            safe_content_html,
-            attachments_json,
-            visibility,
-            created_at,
         ) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        if (ingested == null) return .{ .status = .accepted, .body = "ignored\n" };
 
-        if (created.in_reply_to_id == null) {
-            if (in_reply_to_uri) |uri| {
-                background.backfillThread(app_state, allocator, user.?.id, created.id, uri);
+        if (ingested.?.status.in_reply_to_id == null) {
+            if (ingested.?.missing_in_reply_to_uri) |uri| {
+                background.backfillThread(app_state, allocator, user.?.id, ingested.?.status.id, uri);
             }
         }
 
-        if (std.mem.eql(u8, visibility, "direct")) {
+        if (std.mem.eql(u8, ingested.?.status.visibility, "direct")) {
             conversations.upsertDirect(
                 &app_state.conn,
                 user.?.id,
-                remote_actor.?.id,
-                created.id,
+                ingested.?.actor.id,
+                ingested.?.status.id,
                 received_at_ms,
             ) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
         }
 
-        const st_resp = remoteStatusResponse(app_state, allocator, remote_actor.?, created);
+        const st_resp = remoteStatusResponse(app_state, allocator, ingested.?.actor, ingested.?.status);
         app_state.streaming.publishUpdate(user.?.id, st_resp.body);
 
         dedupe_keep = true;

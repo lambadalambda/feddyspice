@@ -16,7 +16,7 @@ This file tracks “good future refactors” and known risks. Add items whenever
 - [x] Remove duplicated “remote status by URI variants” logic in inbox handlers by using shared helpers (extend `remote_statuses.lookupByUriAny` with `IncludingDeletedAny` if needed).
 - [x] Extract shared ActivityPub JSON helpers (`jsonTruthiness`, `jsonContainsIri`, URL-first extraction) into a small module and use it in both inbox parsing and thread backfill.
 - [x] DRY `localStatusIdFromIri` / local-IRI parsing (currently duplicated across inbox + backfill codepaths).
-- [ ] Unify remote Note ingestion into a single entrypoint used by both inbox-ingested and fetch/backfill-ingested statuses (shared parsing, visibility, attachments, reply mapping).
+- [x] Unify remote Note ingestion into a single entrypoint used by both inbox-ingested and fetch/backfill-ingested statuses (shared parsing, visibility, attachments, reply mapping).
 
 ## Performance / robustness
 
