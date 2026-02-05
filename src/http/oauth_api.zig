@@ -137,6 +137,18 @@ pub fn authorizePost(app_state: *app.App, allocator: std.mem.Allocator, req: htt
         return .{ .status = .bad_request, .body = "invalid content-type\n" };
     }
     if (!common.isSameOrigin(req, @tagName(app_state.cfg.scheme), app_state.cfg.domain)) {
+        const path = common.targetPath(req.target);
+        app_state.logger.warn(
+            "sameOrigin: reject path={f} expected={s}://{f} host={f} origin={f} referer={f}",
+            .{
+                log.safe(path),
+                @tagName(app_state.cfg.scheme),
+                log.safe(app_state.cfg.domain),
+                log.safe(req.host orelse ""),
+                log.safe(req.origin orelse ""),
+                log.safe(req.referer orelse ""),
+            },
+        );
         return .{ .status = .forbidden, .body = "forbidden\n" };
     }
 

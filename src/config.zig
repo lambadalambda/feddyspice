@@ -28,10 +28,27 @@ pub const Config = struct {
     jobs_mode: jobs.Mode,
 
     pub fn load(allocator: std.mem.Allocator) !Config {
-        const domain_env = std.posix.getenv("FEDDYSPICE_DOMAIN") orelse "localhost";
-        const scheme_env = std.posix.getenv("FEDDYSPICE_SCHEME") orelse "http";
-        const listen_env = std.posix.getenv("FEDDYSPICE_LISTEN") orelse "0.0.0.0:8080";
-        const db_path_env = std.posix.getenv("FEDDYSPICE_DB_PATH") orelse "feddyspice.sqlite3";
+        const domain_env_raw = std.posix.getenv("FEDDYSPICE_DOMAIN") orelse "localhost";
+        const scheme_env_raw = std.posix.getenv("FEDDYSPICE_SCHEME") orelse "http";
+        const listen_env_raw = std.posix.getenv("FEDDYSPICE_LISTEN") orelse "0.0.0.0:8080";
+        const db_path_env_raw = std.posix.getenv("FEDDYSPICE_DB_PATH") orelse "feddyspice.sqlite3";
+
+        const domain_env = blk: {
+            const trimmed = std.mem.trim(u8, domain_env_raw, " \t\r\n");
+            break :blk if (trimmed.len == 0) "localhost" else trimmed;
+        };
+        const scheme_env = blk: {
+            const trimmed = std.mem.trim(u8, scheme_env_raw, " \t\r\n");
+            break :blk if (trimmed.len == 0) "http" else trimmed;
+        };
+        const listen_env = blk: {
+            const trimmed = std.mem.trim(u8, listen_env_raw, " \t\r\n");
+            break :blk if (trimmed.len == 0) "0.0.0.0:8080" else trimmed;
+        };
+        const db_path_env = blk: {
+            const trimmed = std.mem.trim(u8, db_path_env_raw, " \t\r\n");
+            break :blk if (trimmed.len == 0) "feddyspice.sqlite3" else trimmed;
+        };
         const ca_cert_env = std.posix.getenv("FEDDYSPICE_CACERTFILE");
         const allow_private_networks = envBool("FEDDYSPICE_ALLOW_PRIVATE_NETWORKS", false);
         const log_file_env = std.posix.getenv("FEDDYSPICE_LOG_FILE");
@@ -113,7 +130,7 @@ pub const Config = struct {
 
         const jobs_mode = jobs.modeFromString(jobs_mode_env);
 
-        const scheme: Scheme = if (std.mem.eql(u8, scheme_env, "https")) .https else .http;
+        const scheme: Scheme = if (std.ascii.eqlIgnoreCase(scheme_env, "https")) .https else .http;
         const listen_address = try std.net.Address.parseIpAndPort(listen_env);
 
         return .{

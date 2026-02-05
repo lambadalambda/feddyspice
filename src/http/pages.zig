@@ -4,6 +4,7 @@ const app = @import("../app.zig");
 const common = @import("common.zig");
 const form = @import("../form.zig");
 const http_types = @import("../http_types.zig");
+const log = @import("../log.zig");
 const rate_limit = @import("../rate_limit.zig");
 const sessions = @import("../sessions.zig");
 const session = @import("session.zig");
@@ -35,6 +36,18 @@ pub fn signupPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_t
         return .{ .status = .bad_request, .body = "invalid content-type\n" };
     }
     if (!common.isSameOrigin(req, @tagName(app_state.cfg.scheme), app_state.cfg.domain)) {
+        const path = common.targetPath(req.target);
+        app_state.logger.warn(
+            "sameOrigin: reject path={f} expected={s}://{f} host={f} origin={f} referer={f}",
+            .{
+                log.safe(path),
+                @tagName(app_state.cfg.scheme),
+                log.safe(app_state.cfg.domain),
+                log.safe(req.host orelse ""),
+                log.safe(req.origin orelse ""),
+                log.safe(req.referer orelse ""),
+            },
+        );
         return .{ .status = .forbidden, .body = "forbidden\n" };
     }
     const ok = rate_limit.allowNow(&app_state.conn, "signup_post", 60_000, 10) catch
@@ -106,6 +119,18 @@ pub fn loginPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
         return .{ .status = .bad_request, .body = "invalid content-type\n" };
     }
     if (!common.isSameOrigin(req, @tagName(app_state.cfg.scheme), app_state.cfg.domain)) {
+        const path = common.targetPath(req.target);
+        app_state.logger.warn(
+            "sameOrigin: reject path={f} expected={s}://{f} host={f} origin={f} referer={f}",
+            .{
+                log.safe(path),
+                @tagName(app_state.cfg.scheme),
+                log.safe(app_state.cfg.domain),
+                log.safe(req.host orelse ""),
+                log.safe(req.origin orelse ""),
+                log.safe(req.referer orelse ""),
+            },
+        );
         return .{ .status = .forbidden, .body = "forbidden\n" };
     }
     const ok = rate_limit.allowNow(&app_state.conn, "login_post", 60_000, 20) catch

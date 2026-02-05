@@ -37,6 +37,11 @@ pub fn queryString(target: []const u8) []const u8 {
     return target[idx + 1 ..];
 }
 
+pub fn targetPath(target: []const u8) []const u8 {
+    if (std.mem.indexOfScalar(u8, target, '?')) |idx| return target[0..idx];
+    return target;
+}
+
 pub fn parseQueryParam(
     allocator: std.mem.Allocator,
     query: []const u8,
