@@ -137,6 +137,37 @@ pub fn lookupByUriAny(conn: *db.Db, allocator: std.mem.Allocator, remote_uri: []
     return null;
 }
 
+pub fn lookupByUriIncludingDeletedAny(conn: *db.Db, allocator: std.mem.Allocator, remote_uri: []const u8) Error!?RemoteStatus {
+    if (try lookupByUriIncludingDeleted(conn, allocator, remote_uri)) |st| return st;
+
+    const trimmed = util_url.trimTrailingSlash(remote_uri);
+    if (!std.mem.eql(u8, trimmed, remote_uri)) {
+        if (try lookupByUriIncludingDeleted(conn, allocator, trimmed)) |st| return st;
+    } else {
+        const with_slash = std.fmt.allocPrint(allocator, "{s}/", .{remote_uri}) catch "";
+        if (with_slash.len > 0) {
+            if (try lookupByUriIncludingDeleted(conn, allocator, with_slash)) |st| return st;
+        }
+    }
+
+    const stripped = util_url.stripQueryAndFragment(remote_uri);
+    if (!std.mem.eql(u8, stripped, remote_uri)) {
+        if (try lookupByUriIncludingDeleted(conn, allocator, stripped)) |st| return st;
+
+        const stripped_trimmed = util_url.trimTrailingSlash(stripped);
+        if (!std.mem.eql(u8, stripped_trimmed, stripped)) {
+            if (try lookupByUriIncludingDeleted(conn, allocator, stripped_trimmed)) |st| return st;
+        } else {
+            const with_slash = std.fmt.allocPrint(allocator, "{s}/", .{stripped}) catch "";
+            if (with_slash.len > 0) {
+                if (try lookupByUriIncludingDeleted(conn, allocator, with_slash)) |st| return st;
+            }
+        }
+    }
+
+    return null;
+}
+
 pub fn lookupByUriIncludingDeleted(conn: *db.Db, allocator: std.mem.Allocator, remote_uri: []const u8) Error!?RemoteStatus {
     var stmt = try conn.prepareZ(
         "SELECT id, remote_uri, remote_actor_id, content_html, visibility, created_at, deleted_at, attachments_json, in_reply_to_id FROM remote_statuses WHERE remote_uri = ?1 LIMIT 1;\x00",
@@ -446,4 +477,36 @@ test "createIfNotExists assigns negative ids" {
     try std.testing.expect(try markDeletedByUri(&conn, "https://remote.test/notes/2", "2020-01-01T00:00:02.000Z"));
     try std.testing.expect((try lookupByUri(&conn, a, "https://remote.test/notes/2")) == null);
     try std.testing.expect((try lookupByUriIncludingDeleted(&conn, a, "https://remote.test/notes/2")).?.deleted_at != null);
+}
+
+test "lookupByUriIncludingDeletedAny handles slash and query/fragment variants" {
+    var conn = try db.Db.openZ(":memory:");
+    defer conn.close();
+
+    try @import("migrations.zig").migrate(&conn);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const uri = "https://remote.test/notes/1";
+    const created = try createIfNotExists(
+        &conn,
+        a,
+        uri,
+        "https://remote.test/users/bob",
+        null,
+        "<p>hi</p>",
+        null,
+        "public",
+        "2020-01-01T00:00:00.000Z",
+    );
+    _ = try markDeletedByUri(&conn, uri, "2020-01-01T00:00:01.000Z");
+
+    const st1 = (try lookupByUriIncludingDeletedAny(&conn, a, "https://remote.test/notes/1/")).?;
+    try std.testing.expectEqual(created.id, st1.id);
+    const st2 = (try lookupByUriIncludingDeletedAny(&conn, a, "https://remote.test/notes/1?x=1")).?;
+    try std.testing.expectEqual(created.id, st2.id);
+    const st3 = (try lookupByUriIncludingDeletedAny(&conn, a, "https://remote.test/notes/1#frag")).?;
+    try std.testing.expectEqual(created.id, st3.id);
 }

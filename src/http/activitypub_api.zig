@@ -1059,58 +1059,8 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
             const content_val = obj_val.object.get("content") orelse return .{ .status = .accepted, .body = "ignored\n" };
             if (content_val != .string) return .{ .status = .accepted, .body = "ignored\n" };
 
-            const remote_status = blk: {
-                if (remote_statuses.lookupByUri(&app_state.conn, allocator, obj_id_val.string) catch
-                    return .{ .status = .internal_server_error, .body = "internal server error\n" }) |found|
-                {
-                    break :blk found;
-                }
-
-                const trimmed = util_url.trimTrailingSlash(obj_id_val.string);
-                if (!std.mem.eql(u8, trimmed, obj_id_val.string)) {
-                    if (remote_statuses.lookupByUri(&app_state.conn, allocator, trimmed) catch
-                        return .{ .status = .internal_server_error, .body = "internal server error\n" }) |found|
-                    {
-                        break :blk found;
-                    }
-                } else {
-                    const with_slash = std.fmt.allocPrint(allocator, "{s}/", .{obj_id_val.string}) catch
-                        break :blk null;
-                    if (remote_statuses.lookupByUri(&app_state.conn, allocator, with_slash) catch
-                        return .{ .status = .internal_server_error, .body = "internal server error\n" }) |found|
-                    {
-                        break :blk found;
-                    }
-                }
-
-                const stripped = util_url.stripQueryAndFragment(obj_id_val.string);
-                if (!std.mem.eql(u8, stripped, obj_id_val.string)) {
-                    if (remote_statuses.lookupByUri(&app_state.conn, allocator, stripped) catch
-                        return .{ .status = .internal_server_error, .body = "internal server error\n" }) |found|
-                    {
-                        break :blk found;
-                    }
-
-                    const stripped_trimmed = util_url.trimTrailingSlash(stripped);
-                    if (!std.mem.eql(u8, stripped_trimmed, stripped)) {
-                        if (remote_statuses.lookupByUri(&app_state.conn, allocator, stripped_trimmed) catch
-                            return .{ .status = .internal_server_error, .body = "internal server error\n" }) |found|
-                        {
-                            break :blk found;
-                        }
-                    } else {
-                        const with_slash = std.fmt.allocPrint(allocator, "{s}/", .{stripped}) catch
-                            break :blk null;
-                        if (remote_statuses.lookupByUri(&app_state.conn, allocator, with_slash) catch
-                            return .{ .status = .internal_server_error, .body = "internal server error\n" }) |found|
-                        {
-                            break :blk found;
-                        }
-                    }
-                }
-
-                break :blk null;
-            };
+            const remote_status = remote_statuses.lookupByUriAny(&app_state.conn, allocator, obj_id_val.string) catch
+                return .{ .status = .internal_server_error, .body = "internal server error\n" };
             if (remote_status == null) return .{ .status = .accepted, .body = "ignored\n" };
             if (!std.mem.eql(u8, remote_status.?.remote_actor_id, remote_actor.?.id)) {
                 return .{ .status = .accepted, .body = "ignored\n" };
@@ -1326,32 +1276,8 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
             else => return .{ .status = .bad_request, .body = "invalid object\n" },
         }
 
-        const remote_status = blk: {
-            if (remote_statuses.lookupByUriIncludingDeleted(&app_state.conn, allocator, object_id) catch
-                return .{ .status = .internal_server_error, .body = "internal server error\n" }) |found|
-            {
-                break :blk found;
-            }
-
-            const trimmed = util_url.trimTrailingSlash(object_id);
-            if (!std.mem.eql(u8, trimmed, object_id)) {
-                if (remote_statuses.lookupByUriIncludingDeleted(&app_state.conn, allocator, trimmed) catch
-                    return .{ .status = .internal_server_error, .body = "internal server error\n" }) |found|
-                {
-                    break :blk found;
-                }
-            } else {
-                const with_slash = std.fmt.allocPrint(allocator, "{s}/", .{object_id}) catch
-                    break :blk null;
-                if (remote_statuses.lookupByUriIncludingDeleted(&app_state.conn, allocator, with_slash) catch
-                    return .{ .status = .internal_server_error, .body = "internal server error\n" }) |found|
-                {
-                    break :blk found;
-                }
-            }
-
-            break :blk null;
-        };
+        const remote_status = remote_statuses.lookupByUriIncludingDeletedAny(&app_state.conn, allocator, object_id) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
         if (remote_status == null) return .{ .status = .accepted, .body = "ignored\n" };
         if (!std.mem.eql(u8, remote_status.?.remote_actor_id, remote_actor.?.id)) {
             return .{ .status = .accepted, .body = "ignored\n" };
