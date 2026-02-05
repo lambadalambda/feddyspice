@@ -16,6 +16,23 @@ pub const RemoteStatus = struct {
     deleted_at: ?[]const u8,
 };
 
+fn trimTrailingSlash(s: []const u8) []const u8 {
+    if (s.len == 0) return s;
+    if (s[s.len - 1] == '/') return s[0 .. s.len - 1];
+    return s;
+}
+
+fn stripQueryAndFragment(s: []const u8) []const u8 {
+    const q = std.mem.indexOfScalar(u8, s, '?');
+    const h = std.mem.indexOfScalar(u8, s, '#');
+    const end = blk: {
+        if (q == null and h == null) break :blk s.len;
+        if (q != null and h != null) break :blk @min(q.?, h.?);
+        break :blk if (q) |qi| qi else h.?;
+    };
+    return s[0..end];
+}
+
 fn nextNegativeId(conn: *db.Db) db.Error!i64 {
     var stmt = try conn.prepareZ("SELECT MIN(id) FROM remote_statuses;\x00");
     defer stmt.finalize();
@@ -105,6 +122,37 @@ pub fn lookupByUri(conn: *db.Db, allocator: std.mem.Allocator, remote_uri: []con
     };
 }
 
+pub fn lookupByUriAny(conn: *db.Db, allocator: std.mem.Allocator, remote_uri: []const u8) Error!?RemoteStatus {
+    if (try lookupByUri(conn, allocator, remote_uri)) |st| return st;
+
+    const trimmed = trimTrailingSlash(remote_uri);
+    if (!std.mem.eql(u8, trimmed, remote_uri)) {
+        if (try lookupByUri(conn, allocator, trimmed)) |st| return st;
+    } else {
+        const with_slash = std.fmt.allocPrint(allocator, "{s}/", .{remote_uri}) catch "";
+        if (with_slash.len > 0) {
+            if (try lookupByUri(conn, allocator, with_slash)) |st| return st;
+        }
+    }
+
+    const stripped = stripQueryAndFragment(remote_uri);
+    if (!std.mem.eql(u8, stripped, remote_uri)) {
+        if (try lookupByUri(conn, allocator, stripped)) |st| return st;
+
+        const stripped_trimmed = trimTrailingSlash(stripped);
+        if (!std.mem.eql(u8, stripped_trimmed, stripped)) {
+            if (try lookupByUri(conn, allocator, stripped_trimmed)) |st| return st;
+        } else {
+            const with_slash = std.fmt.allocPrint(allocator, "{s}/", .{stripped}) catch "";
+            if (with_slash.len > 0) {
+                if (try lookupByUri(conn, allocator, with_slash)) |st| return st;
+            }
+        }
+    }
+
+    return null;
+}
+
 pub fn lookupByUriIncludingDeleted(conn: *db.Db, allocator: std.mem.Allocator, remote_uri: []const u8) Error!?RemoteStatus {
     var stmt = try conn.prepareZ(
         "SELECT id, remote_uri, remote_actor_id, content_html, visibility, created_at, deleted_at, attachments_json, in_reply_to_id FROM remote_statuses WHERE remote_uri = ?1 LIMIT 1;\x00",
@@ -128,6 +176,24 @@ pub fn lookupByUriIncludingDeleted(conn: *db.Db, allocator: std.mem.Allocator, r
         .created_at = try allocator.dupe(u8, stmt.columnText(5)),
         .deleted_at = if (stmt.columnType(6) == .null) null else try allocator.dupe(u8, stmt.columnText(6)),
     };
+}
+
+pub fn updateInReplyToId(conn: *db.Db, id: i64, in_reply_to_id: ?i64) db.Error!bool {
+    var stmt = try conn.prepareZ(
+        "UPDATE remote_statuses SET in_reply_to_id = ?2 WHERE id = ?1 AND deleted_at IS NULL;\x00",
+    );
+    defer stmt.finalize();
+    try stmt.bindInt64(1, id);
+    if (in_reply_to_id) |rid| {
+        try stmt.bindInt64(2, rid);
+    } else {
+        try stmt.bindNull(2);
+    }
+    switch (try stmt.step()) {
+        .done => {},
+        .row => return error.Sqlite,
+    }
+    return conn.changes() > 0;
 }
 
 pub fn markDeletedByUri(conn: *db.Db, remote_uri: []const u8, deleted_at: ?[]const u8) db.Error!bool {

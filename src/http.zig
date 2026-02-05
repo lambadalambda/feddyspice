@@ -2556,6 +2556,98 @@ test "statuses: context includes remote replies to local statuses" {
     try std.testing.expect(saw_local);
 }
 
+test "statuses: context backfills missing remote ancestors via inReplyTo fetch" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    var mock = transport.MockTransport.init(std.testing.allocator);
+    app_state.transport = mock.transport();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const app_creds = try oauth.createApp(
+        &app_state.conn,
+        a,
+        "pl-fe",
+        "urn:ietf:wg:oauth:2.0:oob",
+        "read write",
+        "",
+    );
+    const token = try oauth.createAccessToken(&app_state.conn, a, app_creds.id, user_id, "read write");
+    const auth_header = try std.fmt.allocPrint(a, "Bearer {s}", .{token});
+
+    const remote_actor_id = "http://remote.test/users/bob";
+    try remote_actors.upsert(&app_state.conn, .{
+        .id = remote_actor_id,
+        .inbox = "http://remote.test/users/bob/inbox",
+        .shared_inbox = null,
+        .preferred_username = "bob",
+        .domain = "remote.test",
+        .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
+    });
+
+    const child_uri = "http://remote.test/notes/child";
+    const parent_uri = "http://remote.test/notes/parent";
+
+    const child = try remote_statuses.createIfNotExists(
+        &app_state.conn,
+        a,
+        child_uri,
+        remote_actor_id,
+        null,
+        "<p>child</p>",
+        null,
+        "public",
+        "2020-01-01T00:00:00.000Z",
+    );
+
+    try mock.pushExpected(.{
+        .method = .GET,
+        .url = child_uri,
+        .response_status = .ok,
+        .response_body =
+        \\{"@context":"https://www.w3.org/ns/activitystreams","id":"http://remote.test/notes/child","type":"Note","attributedTo":"http://remote.test/users/bob","content":"<p>child</p>","published":"2020-01-01T00:00:00.000Z","inReplyTo":"http://remote.test/notes/parent","to":["https://www.w3.org/ns/activitystreams#Public"]}
+        ,
+    });
+    try mock.pushExpected(.{
+        .method = .GET,
+        .url = parent_uri,
+        .response_status = .ok,
+        .response_body =
+        \\{"@context":"https://www.w3.org/ns/activitystreams","id":"http://remote.test/notes/parent","type":"Note","attributedTo":"http://remote.test/users/bob","content":"<p>parent</p>","published":"2020-01-01T00:00:00.000Z","to":["https://www.w3.org/ns/activitystreams#Public"]}
+        ,
+    });
+
+    const ctx_target = try std.fmt.allocPrint(a, "/api/v1/statuses/{d}/context", .{child.id});
+    const ctx_resp = handle(&app_state, a, .{
+        .method = .GET,
+        .target = ctx_target,
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, ctx_resp.status);
+
+    var ctx_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, ctx_resp.body, .{});
+    defer ctx_json.deinit();
+
+    const ancestors = ctx_json.value.object.get("ancestors").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), ancestors.len);
+    try std.testing.expectEqualStrings(parent_uri, ancestors[0].object.get("uri").?.string);
+
+    const stored_parent = (try remote_statuses.lookupByUri(&app_state.conn, a, parent_uri)).?;
+    const stored_child = (try remote_statuses.lookupByUri(&app_state.conn, a, child_uri)).?;
+    try std.testing.expectEqual(stored_parent.id, stored_child.in_reply_to_id.?);
+
+    try std.testing.expectEqual(@as(usize, 3), mock.requests.items.len);
+    try std.testing.expectEqualStrings(child_uri, mock.requests.items[0].url);
+    try std.testing.expectEqualStrings(parent_uri, mock.requests.items[1].url);
+    try std.testing.expectEqualStrings(parent_uri, mock.requests.items[2].url);
+}
+
 test "statuses: action endpoints update relationship booleans" {
     var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
     defer app_state.deinit();

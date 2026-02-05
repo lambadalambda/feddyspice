@@ -4,6 +4,7 @@ const app = @import("../app.zig");
 const background = @import("../background.zig");
 const common = @import("common.zig");
 const db = @import("../db.zig");
+const federation = @import("../federation.zig");
 const http_types = @import("../http_types.zig");
 const masto = @import("mastodon.zig");
 const media = @import("../media.zig");
@@ -14,6 +15,9 @@ const status_interactions = @import("../status_interactions.zig");
 const status_reactions = @import("../status_reactions.zig");
 const statuses = @import("../statuses.zig");
 const util_ids = @import("../util/ids.zig");
+const util_html = @import("../util/html.zig");
+const util_json = @import("../util/json.zig");
+const util_url = @import("../util/url.zig");
 const users = @import("../users.zig");
 
 const StatusPayload = masto.StatusPayload;
@@ -117,6 +121,404 @@ fn listThreadDescendantIds(
     }
 
     return out.toOwnedSlice(allocator);
+}
+
+fn trimTrailingSlash(s: []const u8) []const u8 {
+    if (s.len == 0) return s;
+    if (s[s.len - 1] == '/') return s[0 .. s.len - 1];
+    return s;
+}
+
+fn stripQueryAndFragment(s: []const u8) []const u8 {
+    const q = std.mem.indexOfScalar(u8, s, '?');
+    const h = std.mem.indexOfScalar(u8, s, '#');
+    const end = blk: {
+        if (q == null and h == null) break :blk s.len;
+        if (q != null and h != null) break :blk @min(q.?, h.?);
+        break :blk if (q) |qi| qi else h.?;
+    };
+    return s[0..end];
+}
+
+fn stripLocalBase(app_state: *app.App, iri: []const u8) ?[]const u8 {
+    const prefix = switch (app_state.cfg.scheme) {
+        .http => "http://",
+        .https => "https://",
+    };
+    if (!std.mem.startsWith(u8, iri, prefix)) return null;
+    const rest = iri[prefix.len..];
+    if (!std.mem.startsWith(u8, rest, app_state.cfg.domain)) return null;
+    const after_domain = rest[app_state.cfg.domain.len..];
+    if (after_domain.len == 0) return "";
+    if (after_domain[0] == '/') return after_domain;
+    return null;
+}
+
+fn parseLeadingI64(s: []const u8) ?i64 {
+    if (s.len == 0) return null;
+    var end: usize = 0;
+    while (end < s.len and s[end] >= '0' and s[end] <= '9') : (end += 1) {}
+    if (end == 0) return null;
+    return std.fmt.parseInt(i64, s[0..end], 10) catch null;
+}
+
+fn localStatusIdFromIri(app_state: *app.App, iri: []const u8) ?i64 {
+    const path = stripLocalBase(app_state, iri) orelse return null;
+    if (path.len == 0) return null;
+
+    const api_prefix = "/api/v1/statuses/";
+    if (std.mem.startsWith(u8, path, api_prefix)) {
+        const rest = path[api_prefix.len..];
+        const id = parseLeadingI64(rest) orelse return null;
+        if (id <= 0) return null;
+        return id;
+    }
+
+    const users_prefix = "/users/";
+    if (!std.mem.startsWith(u8, path, users_prefix)) return null;
+    const rest = path[users_prefix.len..];
+    const marker = "/statuses/";
+    const idx = std.mem.indexOf(u8, rest, marker) orelse return null;
+    if (idx == 0) return null;
+    const after_marker = rest[idx + marker.len ..];
+    const id = parseLeadingI64(after_marker) orelse return null;
+    if (id <= 0) return null;
+    return id;
+}
+
+fn jsonTruthiness(v: ?std.json.Value) bool {
+    const val = v orelse return false;
+    return switch (val) {
+        .bool => |b| b,
+        else => false,
+    };
+}
+
+fn jsonContainsIri(v: ?std.json.Value, want: []const u8) bool {
+    const val = v orelse return false;
+    switch (val) {
+        .string => |s| return std.mem.eql(u8, trimTrailingSlash(s), want),
+        .object => |o| {
+            const id_val = o.get("id") orelse return false;
+            if (id_val != .string) return false;
+            return std.mem.eql(u8, trimTrailingSlash(id_val.string), want);
+        },
+        .array => |arr| {
+            for (arr.items) |item| {
+                switch (item) {
+                    .string => |s| if (std.mem.eql(u8, trimTrailingSlash(s), want)) return true,
+                    .object => |o| {
+                        const id_val = o.get("id") orelse continue;
+                        if (id_val != .string) continue;
+                        if (std.mem.eql(u8, trimTrailingSlash(id_val.string), want)) return true;
+                    },
+                    else => continue,
+                }
+            }
+            return false;
+        },
+        else => return false,
+    }
+}
+
+fn jsonFirstUrl(val: std.json.Value) ?[]const u8 {
+    switch (val) {
+        .string => |s| return if (s.len == 0) null else s,
+        .object => |o| {
+            if (o.get("url")) |u| {
+                if (jsonFirstUrl(u)) |s| return s;
+            }
+            if (o.get("href")) |h| {
+                if (h == .string and h.string.len > 0) return h.string;
+            }
+            return null;
+        },
+        .array => |arr| {
+            for (arr.items) |item| {
+                if (jsonFirstUrl(item)) |s| return s;
+            }
+            return null;
+        },
+        else => return null,
+    }
+}
+
+fn remoteAttachmentsJsonAlloc(allocator: std.mem.Allocator, note: std.json.ObjectMap) !?[]u8 {
+    const val = note.get("attachment") orelse return null;
+    const max_attachments: usize = 4;
+
+    const Attachment = struct {
+        url: []const u8,
+        kind: ?[]const u8 = null,
+        media_type: ?[]const u8 = null,
+        description: ?[]const u8 = null,
+        blurhash: ?[]const u8 = null,
+    };
+
+    var list: std.ArrayListUnmanaged(Attachment) = .empty;
+    defer list.deinit(allocator);
+
+    const helper = struct {
+        fn pushOne(
+            alloc: std.mem.Allocator,
+            out: *std.ArrayListUnmanaged(Attachment),
+            item: std.json.Value,
+        ) !void {
+            const url = jsonFirstUrl(item) orelse return;
+            if (!util_url.isHttpOrHttpsUrl(url)) return;
+
+            var kind: ?[]const u8 = null;
+            var media_type: ?[]const u8 = null;
+            var description: ?[]const u8 = null;
+            var blurhash: ?[]const u8 = null;
+
+            if (item == .object) {
+                if (item.object.get("type")) |t| {
+                    if (t == .string and t.string.len > 0) kind = t.string;
+                }
+                if (item.object.get("mediaType")) |t| {
+                    if (t == .string and t.string.len > 0) media_type = t.string;
+                }
+                if (item.object.get("name")) |t| {
+                    if (t == .string and t.string.len > 0) description = t.string;
+                }
+                if (item.object.get("blurhash")) |t| {
+                    if (t == .string and t.string.len > 0) blurhash = t.string;
+                }
+            }
+
+            try out.append(alloc, .{
+                .url = url,
+                .kind = kind,
+                .media_type = media_type,
+                .description = description,
+                .blurhash = blurhash,
+            });
+        }
+    };
+
+    switch (val) {
+        .array => |arr| {
+            for (arr.items) |item| {
+                if (list.items.len >= max_attachments) break;
+                try helper.pushOne(allocator, &list, item);
+            }
+        },
+        else => try helper.pushOne(allocator, &list, val),
+    }
+
+    if (list.items.len == 0) return null;
+    const json = try std.json.Stringify.valueAlloc(allocator, list.items, .{});
+    return json;
+}
+
+fn hostHeaderAllocForUri(allocator: std.mem.Allocator, uri: std.Uri) ![]u8 {
+    var host_buf: [std.Uri.host_name_max]u8 = undefined;
+    const host = uri.getHost(&host_buf) catch return error.InvalidHost;
+
+    const scheme = uri.scheme;
+    const default_port: u16 = if (std.ascii.eqlIgnoreCase(scheme, "http")) 80 else 443;
+
+    if (uri.port == null) return allocator.dupe(u8, host);
+    const port = uri.port.?;
+    if (port == default_port) return allocator.dupe(u8, host);
+
+    return std.fmt.allocPrint(allocator, "{s}:{d}", .{ host, port });
+}
+
+fn fetchActivityPubObjectBodyAlloc(app_state: *app.App, allocator: std.mem.Allocator, url_str: []const u8) ![]u8 {
+    const uri = try std.Uri.parse(url_str);
+    const host_header = try hostHeaderAllocForUri(allocator, uri);
+
+    const resp = try app_state.transport.fetch(allocator, .{
+        .url = url_str,
+        .method = .GET,
+        .headers = .{ .host = .{ .override = host_header }, .accept_encoding = .omit },
+        .extra_headers = &.{.{ .name = "accept", .value = "application/activity+json" }},
+    });
+    if (resp.status.class() != .success) {
+        allocator.free(resp.body);
+        return error.RemoteFetchFailed;
+    }
+    return resp.body;
+}
+
+fn noteFirstActorId(note: std.json.ObjectMap) ?[]const u8 {
+    const v = note.get("attributedTo") orelse note.get("actor") orelse return null;
+    return switch (v) {
+        .string => |s| if (s.len == 0) null else s,
+        .object => |o| blk: {
+            const id_val = o.get("id") orelse break :blk null;
+            if (id_val != .string) break :blk null;
+            if (id_val.string.len == 0) break :blk null;
+            break :blk id_val.string;
+        },
+        .array => |arr| blk: {
+            for (arr.items) |item| {
+                switch (item) {
+                    .string => |s| if (s.len > 0) break :blk s,
+                    .object => |o| {
+                        const id_val = o.get("id") orelse continue;
+                        if (id_val == .string and id_val.string.len > 0) break :blk id_val.string;
+                    },
+                    else => continue,
+                }
+            }
+            break :blk null;
+        },
+        else => null,
+    };
+}
+
+fn noteInReplyToUri(note: std.json.ObjectMap) ?[]const u8 {
+    const raw = note.get("inReplyTo") orelse return null;
+    return switch (raw) {
+        .string => |s| if (s.len == 0) null else s,
+        .object => |o| blk: {
+            const id_val = o.get("id") orelse break :blk null;
+            if (id_val != .string) break :blk null;
+            if (id_val.string.len == 0) break :blk null;
+            break :blk id_val.string;
+        },
+        else => null,
+    };
+}
+
+fn noteVisibility(note: std.json.ObjectMap) []const u8 {
+    const direct_message = jsonTruthiness(note.get("directMessage"));
+    if (direct_message) return "direct";
+
+    const has_recipients = (note.get("to") != null) or (note.get("cc") != null);
+    if (!has_recipients) return "public";
+
+    const public_iri = "https://www.w3.org/ns/activitystreams#Public";
+    if (jsonContainsIri(note.get("to"), public_iri)) return "public";
+    if (jsonContainsIri(note.get("cc"), public_iri)) return "unlisted";
+    return "direct";
+}
+
+fn ensureRemoteNoteStored(
+    app_state: *app.App,
+    allocator: std.mem.Allocator,
+    note_uri_raw: []const u8,
+) ?remote_statuses.RemoteStatus {
+    const note_uri = stripQueryAndFragment(trimTrailingSlash(note_uri_raw));
+    if (!util_url.isHttpOrHttpsUrl(note_uri)) return null;
+
+    if (remote_statuses.lookupByUriAny(&app_state.conn, allocator, note_uri) catch null) |existing| return existing;
+
+    const body = fetchActivityPubObjectBodyAlloc(app_state, allocator, note_uri) catch return null;
+
+    if (util_json.maxNestingDepth(body) > app_state.cfg.json_max_nesting_depth) return null;
+    if (util_json.structuralTokenCount(body) > app_state.cfg.json_max_tokens) return null;
+
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{}) catch return null;
+    defer parsed.deinit();
+
+    if (parsed.value != .object) return null;
+    const obj = parsed.value.object;
+
+    const type_val = obj.get("type") orelse return null;
+    if (type_val != .string) return null;
+    if (!std.mem.eql(u8, type_val.string, "Note") and !std.mem.eql(u8, type_val.string, "Article")) return null;
+
+    const id_val = obj.get("id") orelse return null;
+    if (id_val != .string or id_val.string.len == 0) return null;
+    const note_id = stripQueryAndFragment(trimTrailingSlash(id_val.string));
+    if (!util_url.isHttpOrHttpsUrl(note_id)) return null;
+
+    if (remote_statuses.lookupByUriAny(&app_state.conn, allocator, note_id) catch null) |existing2| return existing2;
+
+    const actor_id_raw = noteFirstActorId(obj) orelse return null;
+    const actor_id = stripQueryAndFragment(trimTrailingSlash(actor_id_raw));
+    if (!util_url.isHttpOrHttpsUrl(actor_id)) return null;
+
+    const actor = federation.ensureRemoteActorById(app_state, allocator, actor_id) catch return null;
+
+    const created_at = blk: {
+        const p = obj.get("published") orelse break :blk "1970-01-01T00:00:00.000Z";
+        if (p != .string) break :blk "1970-01-01T00:00:00.000Z";
+        if (p.string.len == 0) break :blk "1970-01-01T00:00:00.000Z";
+        break :blk p.string;
+    };
+
+    const content_html = blk: {
+        const c = obj.get("content") orelse break :blk "";
+        if (c != .string) break :blk "";
+        break :blk util_html.safeHtmlFromRemoteHtmlAlloc(allocator, c.string) catch "";
+    };
+
+    const attachments_json = remoteAttachmentsJsonAlloc(allocator, obj) catch null;
+    const visibility = noteVisibility(obj);
+
+    const in_reply_to_id: ?i64 = blk: {
+        const in_reply_to_raw = noteInReplyToUri(obj) orelse break :blk null;
+        const parent_uri = stripQueryAndFragment(trimTrailingSlash(in_reply_to_raw));
+        if (!util_url.isHttpOrHttpsUrl(parent_uri)) break :blk null;
+
+        if (localStatusIdFromIri(app_state, parent_uri)) |local_id| {
+            const parent = statuses.lookup(&app_state.conn, allocator, local_id) catch break :blk null;
+            if (parent != null) break :blk local_id;
+        }
+
+        const parent = remote_statuses.lookupByUriAny(&app_state.conn, allocator, parent_uri) catch break :blk null;
+        if (parent) |p| break :blk p.id;
+        break :blk null;
+    };
+
+    const stored = remote_statuses.createIfNotExists(
+        &app_state.conn,
+        allocator,
+        note_id,
+        actor.id,
+        in_reply_to_id,
+        content_html,
+        attachments_json,
+        visibility,
+        created_at,
+    ) catch return null;
+
+    return stored;
+}
+
+fn ensureRemoteInReplyToId(
+    app_state: *app.App,
+    allocator: std.mem.Allocator,
+    st: remote_statuses.RemoteStatus,
+) ?i64 {
+    if (st.in_reply_to_id) |pid| return pid;
+
+    const body = fetchActivityPubObjectBodyAlloc(app_state, allocator, st.remote_uri) catch return null;
+
+    if (util_json.maxNestingDepth(body) > app_state.cfg.json_max_nesting_depth) return null;
+    if (util_json.structuralTokenCount(body) > app_state.cfg.json_max_tokens) return null;
+
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{}) catch return null;
+    defer parsed.deinit();
+
+    if (parsed.value != .object) return null;
+    const obj = parsed.value.object;
+
+    const parent_raw = noteInReplyToUri(obj) orelse return null;
+    const parent_uri = stripQueryAndFragment(trimTrailingSlash(parent_raw));
+    if (!util_url.isHttpOrHttpsUrl(parent_uri)) return null;
+
+    const parent_id_opt: ?i64 = blk: {
+        if (localStatusIdFromIri(app_state, parent_uri)) |local_id| {
+            const parent = statuses.lookup(&app_state.conn, allocator, local_id) catch break :blk null;
+            if (parent != null) break :blk local_id;
+        }
+
+        if (remote_statuses.lookupByUriAny(&app_state.conn, allocator, parent_uri) catch null) |p| break :blk p.id;
+
+        const stored_parent = ensureRemoteNoteStored(app_state, allocator, parent_uri) orelse break :blk null;
+        break :blk stored_parent.id;
+    };
+
+    if (parent_id_opt == null) return null;
+
+    _ = remote_statuses.updateInReplyToId(&app_state.conn, st.id, parent_id_opt) catch {};
+    return parent_id_opt;
 }
 
 pub fn statusAccountsListEmpty(app_state: *app.App, allocator: std.mem.Allocator, req: http_types.Request, path: []const u8) http_types.Response {
@@ -396,80 +798,55 @@ pub fn statusContext(app_state: *app.App, allocator: std.mem.Allocator, req: htt
     var ancestors: std.ArrayListUnmanaged(StatusPayload) = .empty;
     defer ancestors.deinit(allocator);
 
-    if (id < 0) {
-        var cur_id: i64 = id;
-        var depth: usize = 0;
-        while (depth < 50) : (depth += 1) {
-            const cur = remote_statuses.lookup(&app_state.conn, allocator, cur_id) catch
-                return .{ .status = .internal_server_error, .body = "internal server error\n" };
-            if (cur == null) break;
-
-            const parent_id = cur.?.in_reply_to_id orelse break;
-
-            if (parent_id < 0) {
-                const parent_st = remote_statuses.lookup(&app_state.conn, allocator, parent_id) catch
+    var cur_id: i64 = id;
+    var depth: usize = 0;
+    while (depth < 50) : (depth += 1) {
+        const parent_id_opt: ?i64 = blk: {
+            if (cur_id < 0) {
+                const cur = remote_statuses.lookup(&app_state.conn, allocator, cur_id) catch
                     return .{ .status = .internal_server_error, .body = "internal server error\n" };
-                if (parent_st == null) break;
-
-                const actor = remote_actors.lookupById(&app_state.conn, allocator, parent_st.?.remote_actor_id) catch
-                    return .{ .status = .internal_server_error, .body = "internal server error\n" };
-                if (actor == null) break;
-
-                ancestors.append(allocator, masto.makeRemoteStatusPayloadForViewer(app_state, allocator, actor.?, parent_st.?, info.?.user_id)) catch
-                    return .{ .status = .internal_server_error, .body = "internal server error\n" };
-
-                cur_id = parent_id;
-                continue;
+                if (cur == null) break :blk null;
+                break :blk cur.?.in_reply_to_id orelse ensureRemoteInReplyToId(app_state, allocator, cur.?);
             }
 
-            const parent_st = statuses.lookup(&app_state.conn, allocator, parent_id) catch
-                return .{ .status = .internal_server_error, .body = "internal server error\n" };
-            if (parent_st == null) break;
-            if (parent_st.?.user_id != info.?.user_id) break;
-
-            ancestors.append(allocator, masto.makeStatusPayloadForViewer(app_state, allocator, user.?, parent_st.?, info.?.user_id)) catch
-                return .{ .status = .internal_server_error, .body = "internal server error\n" };
-            break;
-        }
-
-        std.mem.reverse(StatusPayload, ancestors.items);
-    } else {
-        var cur_id: i64 = id;
-        var depth: usize = 0;
-        while (depth < 50) : (depth += 1) {
             const cur = statuses.lookup(&app_state.conn, allocator, cur_id) catch
                 return .{ .status = .internal_server_error, .body = "internal server error\n" };
-            if (cur == null) break;
+            if (cur == null) break :blk null;
+            break :blk cur.?.in_reply_to_id;
+        };
 
-            const parent_id = cur.?.in_reply_to_id orelse break;
+        const parent_id = parent_id_opt orelse break;
 
-            if (parent_id < 0) {
-                const parent_st = remote_statuses.lookup(&app_state.conn, allocator, parent_id) catch
-                    return .{ .status = .internal_server_error, .body = "internal server error\n" };
-                if (parent_st == null) break;
-
-                const actor = remote_actors.lookupById(&app_state.conn, allocator, parent_st.?.remote_actor_id) catch
-                    return .{ .status = .internal_server_error, .body = "internal server error\n" };
-                if (actor == null) break;
-
-                ancestors.append(allocator, masto.makeRemoteStatusPayloadForViewer(app_state, allocator, actor.?, parent_st.?, info.?.user_id)) catch
-                    return .{ .status = .internal_server_error, .body = "internal server error\n" };
-                break;
-            }
-
-            const parent_st = statuses.lookup(&app_state.conn, allocator, parent_id) catch
+        if (parent_id < 0) {
+            const parent_st = remote_statuses.lookup(&app_state.conn, allocator, parent_id) catch
                 return .{ .status = .internal_server_error, .body = "internal server error\n" };
             if (parent_st == null) break;
 
-            if (parent_st.?.user_id != info.?.user_id) break;
-            ancestors.append(allocator, masto.makeStatusPayloadForViewer(app_state, allocator, user.?, parent_st.?, info.?.user_id)) catch
+            const actor = remote_actors.lookupById(&app_state.conn, allocator, parent_st.?.remote_actor_id) catch
                 return .{ .status = .internal_server_error, .body = "internal server error\n" };
+            if (actor == null) break;
+
+            ancestors.append(
+                allocator,
+                masto.makeRemoteStatusPayloadForViewer(app_state, allocator, actor.?, parent_st.?, info.?.user_id),
+            ) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
 
             cur_id = parent_id;
+            continue;
         }
 
-        std.mem.reverse(StatusPayload, ancestors.items);
+        const parent_st = statuses.lookup(&app_state.conn, allocator, parent_id) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        if (parent_st == null) break;
+        if (parent_st.?.user_id != info.?.user_id) break;
+
+        ancestors.append(allocator, masto.makeStatusPayloadForViewer(app_state, allocator, user.?, parent_st.?, info.?.user_id)) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+        cur_id = parent_id;
     }
+
+    std.mem.reverse(StatusPayload, ancestors.items);
 
     var descendants: std.ArrayListUnmanaged(StatusPayload) = .empty;
     defer descendants.deinit(allocator);
