@@ -514,27 +514,44 @@ fn directRecipientActorIdsAlloc(app_state: *app.App, allocator: std.mem.Allocato
 pub fn resolveRemoteActorByHandle(app_state: *app.App, allocator: std.mem.Allocator, handle: []const u8) Error!remote_actors.RemoteActor {
     const remote = try parseHandle(handle);
 
-    const host_header = try util_uri.hostHeaderAlloc(allocator, remote.host, remote.port, @tagName(app_state.cfg.scheme));
+    const allow_http = app_state.cfg.allow_private_networks;
+    var port_buf: [16]u8 = undefined;
+    const port_part: []const u8 = if (remote.port) |p| std.fmt.bufPrint(&port_buf, ":{d}", .{p}) catch "" else "";
 
-    const webfinger_url = std.fmt.allocPrint(
-        allocator,
-        "{s}://{s}{s}/.well-known/webfinger?resource=acct:{s}@{s}",
-        .{
-            @tagName(app_state.cfg.scheme),
-            remote.host,
-            if (remote.port) |p| try std.fmt.allocPrint(allocator, ":{d}", .{p}) else "",
-            remote.username,
-            remote.host,
-        },
-    ) catch return error.OutOfMemory;
+    const webfinger_body = blk: {
+        const webfinger_url = std.fmt.allocPrint(
+            allocator,
+            "https://{s}{s}/.well-known/webfinger?resource=acct:{s}@{s}",
+            .{ remote.host, port_part, remote.username, remote.host },
+        ) catch return error.OutOfMemory;
+        const host_header = try util_uri.hostHeaderAlloc(allocator, remote.host, remote.port, "https");
 
-    const webfinger_body = try fetchBodySuccessAlloc(app_state, allocator, .{
-        .url = webfinger_url,
-        .method = .GET,
-        .headers = .{ .host = .{ .override = host_header }, .accept_encoding = .omit },
-        .extra_headers = &.{.{ .name = "accept", .value = "application/jrd+json" }},
-        .payload = null,
-    });
+        const body = fetchBodySuccessAlloc(app_state, allocator, .{
+            .url = webfinger_url,
+            .method = .GET,
+            .headers = .{ .host = .{ .override = host_header }, .accept_encoding = .omit },
+            .extra_headers = &.{.{ .name = "accept", .value = "application/jrd+json" }},
+            .payload = null,
+        }) catch |https_err| {
+            if (!allow_http) return https_err;
+
+            const url_http = std.fmt.allocPrint(
+                allocator,
+                "http://{s}{s}/.well-known/webfinger?resource=acct:{s}@{s}",
+                .{ remote.host, port_part, remote.username, remote.host },
+            ) catch return error.OutOfMemory;
+            const host_header_http = try util_uri.hostHeaderAlloc(allocator, remote.host, remote.port, "http");
+
+            break :blk fetchBodySuccessAlloc(app_state, allocator, .{
+                .url = url_http,
+                .method = .GET,
+                .headers = .{ .host = .{ .override = host_header_http }, .accept_encoding = .omit },
+                .extra_headers = &.{.{ .name = "accept", .value = "application/jrd+json" }},
+                .payload = null,
+            }) catch return https_err;
+        };
+        break :blk body;
+    };
 
     const actor_id = try extractWebfingerSelfHref(allocator, webfinger_body);
 
@@ -1755,21 +1772,21 @@ test "followHandle sends signed Follow to remote inbox" {
 
     const keys = try actor_keys.ensureForUser(&app_state.conn, a, user_id);
 
-    const actor_id = "http://remote.test/users/bob";
-    const inbox_url = "http://remote.test/users/bob/inbox";
+    const actor_id = "https://remote.test/users/bob";
+    const inbox_url = "https://remote.test/users/bob/inbox";
 
     try mock.pushExpected(.{
         .method = .GET,
-        .url = "http://remote.test/.well-known/webfinger?resource=acct:bob@remote.test",
+        .url = "https://remote.test/.well-known/webfinger?resource=acct:bob@remote.test",
         .response_status = .ok,
-        .response_body = "{\"subject\":\"acct:bob@remote.test\",\"links\":[{\"rel\":\"self\",\"type\":\"application/activity+json\",\"href\":\"http://remote.test/users/bob\"}]}",
+        .response_body = "{\"subject\":\"acct:bob@remote.test\",\"links\":[{\"rel\":\"self\",\"type\":\"application/activity+json\",\"href\":\"https://remote.test/users/bob\"}]}",
     });
 
     try mock.pushExpected(.{
         .method = .GET,
         .url = actor_id,
         .response_status = .ok,
-        .response_body = "{\"@context\":\"https://www.w3.org/ns/activitystreams\",\"id\":\"http://remote.test/users/bob\",\"type\":\"Person\",\"preferredUsername\":\"bob\",\"inbox\":\"http://remote.test/users/bob/inbox\",\"publicKey\":{\"id\":\"http://remote.test/users/bob#main-key\",\"owner\":\"http://remote.test/users/bob\",\"publicKeyPem\":\"-----BEGIN PUBLIC KEY-----\\n...\\n-----END PUBLIC KEY-----\\n\"}}",
+        .response_body = "{\"@context\":\"https://www.w3.org/ns/activitystreams\",\"id\":\"https://remote.test/users/bob\",\"type\":\"Person\",\"preferredUsername\":\"bob\",\"inbox\":\"https://remote.test/users/bob/inbox\",\"publicKey\":{\"id\":\"https://remote.test/users/bob#main-key\",\"owner\":\"https://remote.test/users/bob\",\"publicKeyPem\":\"-----BEGIN PUBLIC KEY-----\\n...\\n-----END PUBLIC KEY-----\\n\"}}",
     });
 
     try mock.pushExpected(.{

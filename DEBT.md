@@ -46,6 +46,7 @@ This file tracks “good future refactors” and known risks. Add items whenever
 - [x] Add outbound fetch storm protections (per-domain concurrency/backoff).
 - [x] Add regression tests for visibility/data leakage (direct/private never exposed via public timelines or unauthenticated endpoints).
 - [x] Document/decide media exposure expectations for non-public posts (capability URLs vs auth-gated). Decision: capability URLs (`/media/:token`) with unguessable tokens; access logs redact tokens.
+- [x] Remote discovery should prefer HTTPS and not depend on local `FEDDYSPICE_SCHEME` (avoid MITM + “local http can’t follow https servers” corner cases). Allow HTTP fallback only in explicitly trusted/dev configs.
 
 ## Feature gaps (Mastodon/Pleroma parity)
 
@@ -70,3 +71,4 @@ This is a “rough backlog” based on Mastodon’s `config/routes/api.rb` and P
 - [x] Fill out `/api/v1/preferences` with Mastodon-shaped keys (currently `{}`) for clients that assume keys exist.
 - [x] Implement “interaction state” on statuses (instead of no-ops): favourites/boosts/bookmarks/pins/mutes + `Status` relationship booleans (`favourited`, `reblogged`, `bookmarked`, `pinned`, `muted`).
 - [x] Federation parity: outbound `Create(Note)` includes `inReplyTo` for replies and `tag` mention objects; inbound remote `inReplyTo` stored/mapped to improve threads.
+- [ ] Remote visibility mapping: treat followers-only ActivityPub deliveries as `private` (not `direct`), and keep `direct` statuses out of the home timeline (Mastodon/clients expect them in `/api/v1/timelines/direct`).

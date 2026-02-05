@@ -4466,15 +4466,15 @@ test "GET /api/v2/search resolves acct handle into an account" {
 
     try mock.pushExpected(.{
         .method = .GET,
-        .url = "http://remote.test/.well-known/webfinger?resource=acct:bob@remote.test",
+        .url = "https://remote.test/.well-known/webfinger?resource=acct:bob@remote.test",
         .response_status = .ok,
-        .response_body = "{\"subject\":\"acct:bob@remote.test\",\"links\":[{\"rel\":\"self\",\"type\":\"application/activity+json\",\"href\":\"http://remote.test/users/bob\"}]}",
+        .response_body = "{\"subject\":\"acct:bob@remote.test\",\"links\":[{\"rel\":\"self\",\"type\":\"application/activity+json\",\"href\":\"https://remote.test/users/bob\"}]}",
     });
     try mock.pushExpected(.{
         .method = .GET,
-        .url = "http://remote.test/users/bob",
+        .url = "https://remote.test/users/bob",
         .response_status = .ok,
-        .response_body = "{\"@context\":\"https://www.w3.org/ns/activitystreams\",\"id\":\"http://remote.test/users/bob\",\"type\":\"Person\",\"preferredUsername\":\"bob\",\"inbox\":\"http://remote.test/users/bob/inbox\",\"publicKey\":{\"id\":\"http://remote.test/users/bob#main-key\",\"owner\":\"http://remote.test/users/bob\",\"publicKeyPem\":\"-----BEGIN PUBLIC KEY-----\\n...\\n-----END PUBLIC KEY-----\\n\"}}",
+        .response_body = "{\"@context\":\"https://www.w3.org/ns/activitystreams\",\"id\":\"https://remote.test/users/bob\",\"type\":\"Person\",\"preferredUsername\":\"bob\",\"inbox\":\"https://remote.test/users/bob/inbox\",\"publicKey\":{\"id\":\"https://remote.test/users/bob#main-key\",\"owner\":\"https://remote.test/users/bob\",\"publicKeyPem\":\"-----BEGIN PUBLIC KEY-----\\n...\\n-----END PUBLIC KEY-----\\n\"}}",
     });
 
     const handle_str = "@bob@remote.test";
@@ -4490,7 +4490,7 @@ test "GET /api/v2/search resolves acct handle into an account" {
     const accounts = parsed.value.object.get("accounts").?.array.items;
     try std.testing.expectEqual(@as(usize, 1), accounts.len);
 
-    const actor_id = "http://remote.test/users/bob";
+    const actor_id = "https://remote.test/users/bob";
     const rowid = (try remote_actors.lookupRowIdById(&app_state.conn, actor_id)).?;
     const expected_id = try std.fmt.allocPrint(a, "{d}", .{remote_actor_id_base + rowid});
 
@@ -4706,15 +4706,15 @@ test "GET /api/v1/search resolves acct handle into an account" {
 
     try mock.pushExpected(.{
         .method = .GET,
-        .url = "http://remote.test/.well-known/webfinger?resource=acct:bob@remote.test",
+        .url = "https://remote.test/.well-known/webfinger?resource=acct:bob@remote.test",
         .response_status = .ok,
-        .response_body = "{\"subject\":\"acct:bob@remote.test\",\"links\":[{\"rel\":\"self\",\"type\":\"application/activity+json\",\"href\":\"http://remote.test/users/bob\"}]}",
+        .response_body = "{\"subject\":\"acct:bob@remote.test\",\"links\":[{\"rel\":\"self\",\"type\":\"application/activity+json\",\"href\":\"https://remote.test/users/bob\"}]}",
     });
     try mock.pushExpected(.{
         .method = .GET,
-        .url = "http://remote.test/users/bob",
+        .url = "https://remote.test/users/bob",
         .response_status = .ok,
-        .response_body = "{\"@context\":\"https://www.w3.org/ns/activitystreams\",\"id\":\"http://remote.test/users/bob\",\"type\":\"Person\",\"preferredUsername\":\"bob\",\"inbox\":\"http://remote.test/users/bob/inbox\",\"publicKey\":{\"id\":\"http://remote.test/users/bob#main-key\",\"owner\":\"http://remote.test/users/bob\",\"publicKeyPem\":\"-----BEGIN PUBLIC KEY-----\\n...\\n-----END PUBLIC KEY-----\\n\"}}",
+        .response_body = "{\"@context\":\"https://www.w3.org/ns/activitystreams\",\"id\":\"https://remote.test/users/bob\",\"type\":\"Person\",\"preferredUsername\":\"bob\",\"inbox\":\"https://remote.test/users/bob/inbox\",\"publicKey\":{\"id\":\"https://remote.test/users/bob#main-key\",\"owner\":\"https://remote.test/users/bob\",\"publicKeyPem\":\"-----BEGIN PUBLIC KEY-----\\n...\\n-----END PUBLIC KEY-----\\n\"}}",
     });
 
     const handle_str = "@bob@remote.test";
@@ -4730,7 +4730,7 @@ test "GET /api/v1/search resolves acct handle into an account" {
     const accounts = parsed.value.object.get("accounts").?.array.items;
     try std.testing.expectEqual(@as(usize, 1), accounts.len);
 
-    const actor_id = "http://remote.test/users/bob";
+    const actor_id = "https://remote.test/users/bob";
     const rowid = (try remote_actors.lookupRowIdById(&app_state.conn, actor_id)).?;
     const expected_id = try std.fmt.allocPrint(a, "{d}", .{remote_actor_id_base + rowid});
 
@@ -4777,15 +4777,15 @@ test "GET /api/v1/accounts/search resolves acct handle into an account array" {
 
     try mock.pushExpected(.{
         .method = .GET,
-        .url = "http://remote.test/.well-known/webfinger?resource=acct:bob@remote.test",
+        .url = "https://remote.test/.well-known/webfinger?resource=acct:bob@remote.test",
         .response_status = .ok,
-        .response_body = "{\"subject\":\"acct:bob@remote.test\",\"links\":[{\"rel\":\"self\",\"type\":\"application/activity+json\",\"href\":\"http://remote.test/users/bob\"}]}",
+        .response_body = "{\"subject\":\"acct:bob@remote.test\",\"links\":[{\"rel\":\"self\",\"type\":\"application/activity+json\",\"href\":\"https://remote.test/users/bob\"}]}",
     });
     try mock.pushExpected(.{
         .method = .GET,
-        .url = "http://remote.test/users/bob",
+        .url = "https://remote.test/users/bob",
         .response_status = .ok,
-        .response_body = "{\"@context\":\"https://www.w3.org/ns/activitystreams\",\"id\":\"http://remote.test/users/bob\",\"type\":\"Person\",\"preferredUsername\":\"bob\",\"inbox\":\"http://remote.test/users/bob/inbox\",\"publicKey\":{\"id\":\"http://remote.test/users/bob#main-key\",\"owner\":\"http://remote.test/users/bob\",\"publicKeyPem\":\"-----BEGIN PUBLIC KEY-----\\n...\\n-----END PUBLIC KEY-----\\n\"}}",
+        .response_body = "{\"@context\":\"https://www.w3.org/ns/activitystreams\",\"id\":\"https://remote.test/users/bob\",\"type\":\"Person\",\"preferredUsername\":\"bob\",\"inbox\":\"https://remote.test/users/bob/inbox\",\"publicKey\":{\"id\":\"https://remote.test/users/bob#main-key\",\"owner\":\"https://remote.test/users/bob\",\"publicKeyPem\":\"-----BEGIN PUBLIC KEY-----\\n...\\n-----END PUBLIC KEY-----\\n\"}}",
     });
 
     const handle_str = "@bob@remote.test";
@@ -4801,7 +4801,7 @@ test "GET /api/v1/accounts/search resolves acct handle into an account array" {
     const accounts = parsed.value.array.items;
     try std.testing.expectEqual(@as(usize, 1), accounts.len);
 
-    const actor_id = "http://remote.test/users/bob";
+    const actor_id = "https://remote.test/users/bob";
     const rowid = (try remote_actors.lookupRowIdById(&app_state.conn, actor_id)).?;
     const expected_id = try std.fmt.allocPrint(a, "{d}", .{remote_actor_id_base + rowid});
 
