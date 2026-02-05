@@ -2,7 +2,7 @@ import Config
 
 # Advertise the instance as HTTPS via the Caddy gateway.
 config :pleroma, Pleroma.Web.Endpoint,
-  url: [host: System.get_env("DOMAIN", "pleroma.test"), scheme: "https", port: 443]
+  url: [host: System.get_env("DOMAIN", "pleroma.fedbox.dev"), scheme: "https", port: 443]
 
 # Trust the fedbox Caddy internal CA so federation over HTTPS works inside the
 # docker network.
@@ -26,4 +26,3 @@ config :pleroma, :instance,
 
 # Disable CAPTCHA for fedbox user seeding / smoke tests.
 config :pleroma, Pleroma.Captcha, enabled: false
-

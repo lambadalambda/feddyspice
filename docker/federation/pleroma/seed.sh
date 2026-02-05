@@ -2,7 +2,7 @@
 set -eu
 
 for username in bob dave; do
-  if wget -qO- "http://pleroma_web:4000/.well-known/webfinger?resource=acct:${username}@pleroma.test" >/dev/null; then
+  if wget -qO- "http://pleroma_web:4000/.well-known/webfinger?resource=acct:${username}@pleroma.fedbox.dev" >/dev/null; then
     echo "[fedbox] pleroma: ${username} already exists"
   fi
 done
@@ -23,7 +23,7 @@ token="$(
 access_token="$(echo "$token" | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')"
 
 for username in bob dave; do
-  if wget -qO- "http://pleroma_web:4000/.well-known/webfinger?resource=acct:${username}@pleroma.test" >/dev/null; then
+  if wget -qO- "http://pleroma_web:4000/.well-known/webfinger?resource=acct:${username}@pleroma.fedbox.dev" >/dev/null; then
     echo "[fedbox] pleroma: ${username} already exists"
     continue
   fi
@@ -31,11 +31,11 @@ for username in bob dave; do
   wget -qO- \
     --header "Authorization: Bearer ${access_token}" \
     --header "Content-Type: application/json" \
-    --post-data "{\"username\":\"${username}\",\"email\":\"${username}@pleroma.test\",\"password\":\"password\",\"agreement\":true,\"locale\":\"en\"}" \
+    --post-data "{\"username\":\"${username}\",\"email\":\"${username}@pleroma.fedbox.dev\",\"password\":\"password\",\"agreement\":true,\"locale\":\"en\"}" \
     "http://pleroma_web:4000/api/v1/accounts" >/dev/null || true
 
   tries=0
-  until wget -qO- "http://pleroma_web:4000/.well-known/webfinger?resource=acct:${username}@pleroma.test" >/dev/null; do
+  until wget -qO- "http://pleroma_web:4000/.well-known/webfinger?resource=acct:${username}@pleroma.fedbox.dev" >/dev/null; do
     tries=$((tries + 1))
 
     if [ "$tries" -ge 30 ]; then
@@ -46,4 +46,3 @@ for username in bob dave; do
     sleep 1
   done
 done
-

@@ -2,30 +2,29 @@
   auto_https disable_redirects
 }
 
-http://feddyspice.test {
+http://feddyspice.fedbox.dev {
   reverse_proxy feddyspice_web:8080
 }
 
-https://feddyspice.test {
+https://feddyspice.fedbox.dev {
   tls internal
   reverse_proxy feddyspice_web:8080
 }
 
-http://pleroma.test {
+http://pleroma.fedbox.dev {
   reverse_proxy pleroma_web:4000
 }
 
-https://pleroma.test {
+https://pleroma.fedbox.dev {
   tls internal
   reverse_proxy pleroma_web:4000
 }
 
-http://mastodon.test {
+http://mastodon.fedbox.dev {
   reverse_proxy mastodon_web:3000
 }
 
-https://mastodon.test {
+https://mastodon.fedbox.dev {
   tls internal
   reverse_proxy mastodon_web:3000
 }
-

@@ -74,8 +74,8 @@ if [ "$rc" -ne 0 ]; then
   echo "=== feddyspice_web unauthorized access (last 200 matches) ==="
   compose --profile fedtest logs --no-color feddyspice_web | grep -E " status=401 " | tail -n 200
   echo ""
-  echo "=== pleroma_web logs mentioning feddyspice.test (last 200 matches) ==="
-  compose --profile fedtest logs --no-color pleroma_web | grep -F "feddyspice.test" | tail -n 200
+  echo "=== pleroma_web logs mentioning feddyspice.fedbox.dev (last 200 matches) ==="
+  compose --profile fedtest logs --no-color pleroma_web | grep -F "feddyspice.fedbox.dev" | tail -n 200
   echo ""
   echo "=== pleroma_web errors (last 200 matches) ==="
   compose --profile fedtest logs --no-color pleroma_web | grep -E "\\[error\\]|\\*\\* \\(.*\\)|Exception|ERROR" | tail -n 200

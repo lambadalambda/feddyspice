@@ -8,9 +8,9 @@ services:
     networks:
       federation:
         aliases:
-          - feddyspice.test
-          - pleroma.test
-          - mastodon.test
+          - feddyspice.fedbox.dev
+          - pleroma.fedbox.dev
+          - mastodon.fedbox.dev
 
   gateway_certs:
     image: caddy:2.8
@@ -45,7 +45,7 @@ services:
       gateway_certs:
         condition: service_completed_successfully
     environment:
-      FEDDYSPICE_DOMAIN: feddyspice.test
+      FEDDYSPICE_DOMAIN: feddyspice.fedbox.dev
       FEDDYSPICE_SCHEME: https
       FEDDYSPICE_LISTEN: 0.0.0.0:8080
       FEDDYSPICE_DB_PATH: /data/feddyspice.sqlite3
@@ -125,10 +125,10 @@ services:
       pleroma_db:
         condition: service_healthy
     environment:
-      DOMAIN: pleroma.test
+      DOMAIN: pleroma.fedbox.dev
       INSTANCE_NAME: Pleroma (fedbox)
-      ADMIN_EMAIL: admin@pleroma.test
-      NOTIFY_EMAIL: notify@pleroma.test
+      ADMIN_EMAIL: admin@pleroma.fedbox.dev
+      NOTIFY_EMAIL: notify@pleroma.fedbox.dev
       DB_HOST: pleroma_db
       DB_PORT: 5432
       DB_NAME: pleroma
@@ -159,7 +159,7 @@ services:
         condition: service_healthy
     entrypoint: []
     environment:
-      DOMAIN: pleroma.test
+      DOMAIN: pleroma.fedbox.dev
       DB_HOST: pleroma_db
       DB_PORT: 5432
       DB_NAME: pleroma
@@ -220,8 +220,8 @@ services:
       RAILS_ENV: production
       NODE_ENV: production
       PORT: 3000
-      LOCAL_DOMAIN: mastodon.test
-      WEB_DOMAIN: mastodon.test
+      LOCAL_DOMAIN: mastodon.fedbox.dev
+      WEB_DOMAIN: mastodon.fedbox.dev
       ANNOTATERB_SKIP_ON_DB_TASKS: "true"
       REDIS_HOST: mastodon_redis
       REDIS_PORT: 6379
@@ -247,10 +247,10 @@ services:
         bundle exec rails db:prepare
 
         # Create an initial user for federation smoke tests.
-        bin/tootctl accounts create carol --email carol@mastodon.test --confirmed --approve --role Owner || true
+        bin/tootctl accounts create carol --email carol@mastodon.fedbox.dev --confirmed --approve --role Owner || true
 
         # Ensure a stable password for the OAuth authorization code flow.
-        bundle exec rails runner 'u = User.find_by(email: "carol@mastodon.test"); raise "carol missing" unless u; u.mark_email_as_confirmed! unless u.confirmed?; u.approve! unless u.approved?; u.change_password!("password");'
+        bundle exec rails runner 'u = User.find_by(email: "carol@mastodon.fedbox.dev"); raise "carol missing" unless u; u.mark_email_as_confirmed! unless u.confirmed?; u.approve! unless u.approved?; u.change_password!("password");'
     volumes:
       - mastodon_fed_system:/mastodon/public/system
       - ./mastodon/initializers/00_letter_opener_web_stub.rb:/opt/mastodon/config/initializers/00_letter_opener_web_stub.rb:ro
@@ -319,9 +319,9 @@ services:
         condition: service_started
     environment:
       FEDTEST_SCHEME: https
-      FEDTEST_PLEROMA_HANDLE: "@bob@pleroma.test"
-      FEDTEST_MASTODON_HANDLE: "@carol@mastodon.test"
-      FEDTEST_FEDDYSPICE_HANDLE: "@alice@feddyspice.test"
+      FEDTEST_PLEROMA_HANDLE: "@bob@pleroma.fedbox.dev"
+      FEDTEST_MASTODON_HANDLE: "@carol@mastodon.fedbox.dev"
+      FEDTEST_FEDDYSPICE_HANDLE: "@alice@feddyspice.fedbox.dev"
       FEDTEST_PASSWORD: "password"
       FEDTEST_CACERTFILE: /caddy/pki/authorities/local/root.crt
     networks:

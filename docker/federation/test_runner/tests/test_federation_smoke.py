@@ -21,9 +21,9 @@ class FedboxConfig:
 def cfg() -> FedboxConfig:
     return FedboxConfig(
         scheme=os.getenv("FEDTEST_SCHEME", "https"),
-        pleroma_handle=os.getenv("FEDTEST_PLEROMA_HANDLE", "@bob@pleroma.test"),
-        mastodon_handle=os.getenv("FEDTEST_MASTODON_HANDLE", "@carol@mastodon.test"),
-        feddyspice_handle=os.getenv("FEDTEST_FEDDYSPICE_HANDLE", "@alice@feddyspice.test"),
+        pleroma_handle=os.getenv("FEDTEST_PLEROMA_HANDLE", "@bob@pleroma.fedbox.dev"),
+        mastodon_handle=os.getenv("FEDTEST_MASTODON_HANDLE", "@carol@mastodon.fedbox.dev"),
+        feddyspice_handle=os.getenv("FEDTEST_FEDDYSPICE_HANDLE", "@alice@feddyspice.fedbox.dev"),
         password=os.getenv("FEDTEST_PASSWORD", "password"),
         cacertfile=os.getenv("FEDTEST_CACERTFILE", "/caddy/pki/authorities/local/root.crt"),
     )
@@ -917,7 +917,14 @@ def test_pleroma_direct_to_feddyspice_is_received_and_not_public():
     )
 
     marker = f"[fedbox] pleroma direct -> feddyspice {time.time()}"
-    _ = pleroma_post_direct(pleroma_base_url, pleroma_token, c.feddyspice_handle, marker)
+    posted = pleroma_post_direct(pleroma_base_url, pleroma_token, c.feddyspice_handle, marker)
+
+    mentions = posted.get("mentions")
+    expected_acct = c.feddyspice_handle.lstrip("@")
+    assert isinstance(mentions, list), f"expected list mentions, got: {mentions!r}"
+    assert any(
+        isinstance(m, dict) and m.get("acct") == expected_acct for m in mentions
+    ), f"pleroma did not parse remote mention @{expected_acct} (mentions={mentions!r})"
 
     wait_until(
         lambda: any(
