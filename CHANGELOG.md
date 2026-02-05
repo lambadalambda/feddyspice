@@ -146,6 +146,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - Access logs no longer include query strings (prevents leaking `access_token` from streaming URLs), and redacts `/media/:token` paths.
 - Logs escape control characters when printing untrusted strings (prevents log forging via newlines in remote responses or OAuth params).
+- HTML auth CSRF checks (`Origin`/`Referer`) now trim surrounding whitespace to avoid false `403 forbidden` on proxied deployments.
 - Inbound ActivityPub `Create` treats `directMessage: true` as `visibility=direct` for compatibility with servers that send the extension.
 - Remote ActivityPub ingest now ignores non-`http(s)` Note IDs and attachment URLs; remote actor docs with mismatched IDs are rejected (hardens against URL-scheme injection and actor ID spoofing).
 - Outbound fetch SSRF checks now also validate the connected peer IP address (mitigates DNS-rebinding bypass of pre-connect DNS checks).

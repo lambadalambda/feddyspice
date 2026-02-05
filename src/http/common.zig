@@ -86,8 +86,16 @@ pub fn isSameOrigin(req: http_types.Request, expected_scheme: []const u8, expect
         .port = expected_host_port.port orelse defaultPortForScheme(expected_scheme),
     };
 
-    if (req.origin) |o| return uriHasSameOrigin(o, expected_scheme, expected);
-    if (req.referer) |r| return uriHasSameOrigin(r, expected_scheme, expected);
+    if (req.origin) |o_raw| {
+        const o = std.mem.trim(u8, o_raw, " \t\r\n");
+        if (o.len == 0) return false;
+        return uriHasSameOrigin(o, expected_scheme, expected);
+    }
+    if (req.referer) |r_raw| {
+        const r = std.mem.trim(u8, r_raw, " \t\r\n");
+        if (r.len == 0) return false;
+        return uriHasSameOrigin(r, expected_scheme, expected);
+    }
     return true;
 }
 
@@ -268,6 +276,21 @@ test "isSameOrigin uses configured origin, not Host header" {
     };
 
     try std.testing.expect(isSameOrigin(req, "https", "social.example.com"));
+}
+
+test "isSameOrigin trims OWS around Origin/Referer" {
+    const base: http_types.Request = .{
+        .method = .POST,
+        .target = "/login",
+    };
+
+    var req_origin = base;
+    req_origin.origin = "  https://example.test \r\n";
+    try std.testing.expect(isSameOrigin(req_origin, "https", "example.test"));
+
+    var req_referer = base;
+    req_referer.referer = " \t https://example.test/x \r\n";
+    try std.testing.expect(isSameOrigin(req_referer, "https", "example.test"));
 }
 
 pub fn isJson(content_type: ?[]const u8) bool {
