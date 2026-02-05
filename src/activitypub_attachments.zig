@@ -1,28 +1,7 @@
 const std = @import("std");
 
+const activitypub_json = @import("activitypub_json.zig");
 const util_url = @import("util/url.zig");
-
-fn jsonFirstUrl(val: std.json.Value) ?[]const u8 {
-    switch (val) {
-        .string => |s| return if (s.len == 0) null else s,
-        .object => |o| {
-            if (o.get("url")) |u| {
-                if (jsonFirstUrl(u)) |s| return s;
-            }
-            if (o.get("href")) |h| {
-                if (h == .string and h.string.len > 0) return h.string;
-            }
-            return null;
-        },
-        .array => |arr| {
-            for (arr.items) |item| {
-                if (jsonFirstUrl(item)) |s| return s;
-            }
-            return null;
-        },
-        else => return null,
-    }
-}
 
 pub fn remoteAttachmentsJsonAlloc(allocator: std.mem.Allocator, note: std.json.ObjectMap) !?[]u8 {
     const val = note.get("attachment") orelse return null;
@@ -45,7 +24,7 @@ pub fn remoteAttachmentsJsonAlloc(allocator: std.mem.Allocator, note: std.json.O
             out: *std.ArrayListUnmanaged(Attachment),
             item: std.json.Value,
         ) !void {
-            const url = jsonFirstUrl(item) orelse return;
+            const url = activitypub_json.firstUrlString(item) orelse return;
             if (!util_url.isHttpOrHttpsUrl(url)) return;
 
             var kind: ?[]const u8 = null;

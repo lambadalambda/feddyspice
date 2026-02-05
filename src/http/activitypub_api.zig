@@ -3,6 +3,7 @@ const std = @import("std");
 const app = @import("../app.zig");
 const actor_keys = @import("../actor_keys.zig");
 const activitypub_attachments = @import("../activitypub_attachments.zig");
+const activitypub_json = @import("../activitypub_json.zig");
 const background = @import("../background.zig");
 const common = @import("common.zig");
 const conversations = @import("../conversations.zig");
@@ -152,28 +153,6 @@ fn verifyInboxSignatureOrReject(
         error.Internal => return .{ .status = .internal_server_error, .body = "internal server error\n" },
     };
     return null;
-}
-
-fn jsonFirstUrlString(val: std.json.Value) ?[]const u8 {
-    switch (val) {
-        .string => |s| return if (s.len == 0) null else s,
-        .object => |o| {
-            if (o.get("url")) |u| {
-                if (jsonFirstUrlString(u)) |s| return s;
-            }
-            if (o.get("href")) |h| {
-                if (h == .string and h.string.len > 0) return h.string;
-            }
-            return null;
-        },
-        .array => |arr| {
-            for (arr.items) |item| {
-                if (jsonFirstUrlString(item)) |s| return s;
-            }
-            return null;
-        },
-        else => return null,
-    }
 }
 
 pub fn sharedInboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_types.Request) http_types.Response {
@@ -577,65 +556,6 @@ pub fn userStatusGet(app_state: *app.App, allocator: std.mem.Allocator, path: []
     };
 }
 
-fn jsonContainsIri(v: ?std.json.Value, needle: []const u8) bool {
-    const val = v orelse return false;
-    const want = util_url.trimTrailingSlash(needle);
-
-    switch (val) {
-        .string => |s| return std.mem.eql(u8, util_url.trimTrailingSlash(s), want),
-        .object => |o| {
-            const id_val = o.get("id") orelse return false;
-            if (id_val != .string) return false;
-            return std.mem.eql(u8, util_url.trimTrailingSlash(id_val.string), want);
-        },
-        .array => |arr| {
-            for (arr.items) |item| {
-                switch (item) {
-                    .string => |s| if (std.mem.eql(u8, util_url.trimTrailingSlash(s), want)) return true,
-                    .object => |o| {
-                        const id_val = o.get("id") orelse continue;
-                        if (id_val != .string) continue;
-                        if (std.mem.eql(u8, util_url.trimTrailingSlash(id_val.string), want)) return true;
-                    },
-                    else => continue,
-                }
-            }
-            return false;
-        },
-        else => return false,
-    }
-}
-
-fn jsonTruthiness(v: ?std.json.Value) bool {
-    const val = v orelse return false;
-    return switch (val) {
-        .bool => |b| b,
-        else => false,
-    };
-}
-
-fn jsonFirstUrl(val: std.json.Value) ?[]const u8 {
-    switch (val) {
-        .string => |s| return if (s.len == 0) null else s,
-        .object => |o| {
-            if (o.get("url")) |u| {
-                if (jsonFirstUrl(u)) |s| return s;
-            }
-            if (o.get("href")) |h| {
-                if (h == .string and h.string.len > 0) return h.string;
-            }
-            return null;
-        },
-        .array => |arr| {
-            for (arr.items) |item| {
-                if (jsonFirstUrl(item)) |s| return s;
-            }
-            return null;
-        },
-        else => return null,
-    }
-}
-
 fn remoteAttachmentsJsonAlloc(allocator: std.mem.Allocator, note: std.json.ObjectMap) !?[]u8 {
     return activitypub_attachments.remoteAttachmentsJsonAlloc(allocator, note);
 }
@@ -838,8 +758,8 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
 
         const visibility: []const u8 = blk: {
             const direct_message =
-                jsonTruthiness(parsed.value.object.get("directMessage")) or
-                jsonTruthiness(obj.object.get("directMessage"));
+                activitypub_json.truthiness(parsed.value.object.get("directMessage")) or
+                activitypub_json.truthiness(obj.object.get("directMessage"));
             if (direct_message) break :blk "direct";
 
             const has_recipients =
@@ -852,13 +772,13 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
             const public_iri = "https://www.w3.org/ns/activitystreams#Public";
 
             const public_in_to =
-                jsonContainsIri(parsed.value.object.get("to"), public_iri) or
-                jsonContainsIri(obj.object.get("to"), public_iri);
+                activitypub_json.containsIri(parsed.value.object.get("to"), public_iri) or
+                activitypub_json.containsIri(obj.object.get("to"), public_iri);
             if (public_in_to) break :blk "public";
 
             const public_in_cc =
-                jsonContainsIri(parsed.value.object.get("cc"), public_iri) or
-                jsonContainsIri(obj.object.get("cc"), public_iri);
+                activitypub_json.containsIri(parsed.value.object.get("cc"), public_iri) or
+                activitypub_json.containsIri(obj.object.get("cc"), public_iri);
             if (public_in_cc) break :blk "unlisted";
 
             break :blk "direct";
@@ -1026,14 +946,14 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
 
             var avatar_url: ?[]const u8 = remote_actor.?.avatar_url;
             if (obj_val.object.get("icon")) |icon_val| {
-                if (jsonFirstUrlString(icon_val)) |u| {
+                if (activitypub_json.firstUrlString(icon_val)) |u| {
                     if (util_url.isHttpOrHttpsUrl(u)) avatar_url = u;
                 }
             }
 
             var header_url: ?[]const u8 = remote_actor.?.header_url;
             if (obj_val.object.get("image")) |image_val| {
-                if (jsonFirstUrlString(image_val)) |u| {
+                if (activitypub_json.firstUrlString(image_val)) |u| {
                     if (util_url.isHttpOrHttpsUrl(u)) header_url = u;
                 }
             }
@@ -1086,13 +1006,13 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
                 const public_iri = "https://www.w3.org/ns/activitystreams#Public";
 
                 const public_in_to =
-                    jsonContainsIri(parsed.value.object.get("to"), public_iri) or
-                    jsonContainsIri(obj_val.object.get("to"), public_iri);
+                    activitypub_json.containsIri(parsed.value.object.get("to"), public_iri) or
+                    activitypub_json.containsIri(obj_val.object.get("to"), public_iri);
                 if (public_in_to) break :blk "public";
 
                 const public_in_cc =
-                    jsonContainsIri(parsed.value.object.get("cc"), public_iri) or
-                    jsonContainsIri(obj_val.object.get("cc"), public_iri);
+                    activitypub_json.containsIri(parsed.value.object.get("cc"), public_iri) or
+                    activitypub_json.containsIri(obj_val.object.get("cc"), public_iri);
                 if (public_in_cc) break :blk "unlisted";
 
                 break :blk "direct";

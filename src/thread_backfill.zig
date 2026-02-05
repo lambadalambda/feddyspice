@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const app = @import("app.zig");
+const activitypub_json = @import("activitypub_json.zig");
 const federation = @import("federation.zig");
 const remote_statuses = @import("remote_statuses.zig");
 const statuses = @import("statuses.zig");
@@ -63,41 +64,6 @@ fn localStatusIdFromIri(app_state: *app.App, iri: []const u8) ?i64 {
     return id;
 }
 
-fn jsonTruthiness(v: ?std.json.Value) bool {
-    const val = v orelse return false;
-    return switch (val) {
-        .bool => |b| b,
-        else => false,
-    };
-}
-
-fn jsonContainsIri(v: ?std.json.Value, want: []const u8) bool {
-    const val = v orelse return false;
-    switch (val) {
-        .string => |s| return std.mem.eql(u8, util_url.trimTrailingSlash(s), want),
-        .object => |o| {
-            const id_val = o.get("id") orelse return false;
-            if (id_val != .string) return false;
-            return std.mem.eql(u8, util_url.trimTrailingSlash(id_val.string), want);
-        },
-        .array => |arr| {
-            for (arr.items) |item| {
-                switch (item) {
-                    .string => |s| if (std.mem.eql(u8, util_url.trimTrailingSlash(s), want)) return true,
-                    .object => |o| {
-                        const id_val = o.get("id") orelse continue;
-                        if (id_val != .string) continue;
-                        if (std.mem.eql(u8, util_url.trimTrailingSlash(id_val.string), want)) return true;
-                    },
-                    else => continue,
-                }
-            }
-            return false;
-        },
-        else => return false,
-    }
-}
-
 fn noteFirstActorId(note: std.json.ObjectMap) ?[]const u8 {
     const v = note.get("attributedTo") orelse note.get("actor") orelse return null;
     return switch (v) {
@@ -140,14 +106,14 @@ fn noteInReplyToUri(note: std.json.ObjectMap) ?[]const u8 {
 }
 
 fn noteVisibility(note: std.json.ObjectMap) []const u8 {
-    if (jsonTruthiness(note.get("directMessage"))) return "direct";
+    if (activitypub_json.truthiness(note.get("directMessage"))) return "direct";
 
     const has_recipients = (note.get("to") != null) or (note.get("cc") != null);
     if (!has_recipients) return "public";
 
     const public_iri = "https://www.w3.org/ns/activitystreams#Public";
-    if (jsonContainsIri(note.get("to"), public_iri)) return "public";
-    if (jsonContainsIri(note.get("cc"), public_iri)) return "unlisted";
+    if (activitypub_json.containsIri(note.get("to"), public_iri)) return "public";
+    if (activitypub_json.containsIri(note.get("cc"), public_iri)) return "unlisted";
     return "direct";
 }
 
