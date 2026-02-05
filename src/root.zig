@@ -9,6 +9,7 @@ pub const federation = @import("federation.zig");
 pub const follows = @import("follows.zig");
 pub const followers = @import("followers.zig");
 pub const http = @import("http.zig");
+pub const csrf = @import("http/csrf.zig");
 pub const http_signatures = @import("http_signatures.zig");
 pub const log = @import("log.zig");
 pub const migrations = @import("migrations.zig");
