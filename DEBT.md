@@ -71,4 +71,4 @@ This is a “rough backlog” based on Mastodon’s `config/routes/api.rb` and P
 - [x] Fill out `/api/v1/preferences` with Mastodon-shaped keys (currently `{}`) for clients that assume keys exist.
 - [x] Implement “interaction state” on statuses (instead of no-ops): favourites/boosts/bookmarks/pins/mutes + `Status` relationship booleans (`favourited`, `reblogged`, `bookmarked`, `pinned`, `muted`).
 - [x] Federation parity: outbound `Create(Note)` includes `inReplyTo` for replies and `tag` mention objects; inbound remote `inReplyTo` stored/mapped to improve threads.
-- [ ] Remote visibility mapping: treat followers-only ActivityPub deliveries as `private` (not `direct`), and keep `direct` statuses out of the home timeline (Mastodon/clients expect them in `/api/v1/timelines/direct`).
+- [x] Remote visibility mapping: treat followers-only ActivityPub deliveries as `private` (not `direct`), and keep `direct` statuses out of the home timeline (Mastodon/clients expect them in `/api/v1/timelines/direct`).

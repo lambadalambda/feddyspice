@@ -26,6 +26,10 @@ fn isDirectTimelineVisibility(visibility: []const u8) bool {
     return std.mem.eql(u8, visibility, "direct");
 }
 
+fn isHomeTimelineVisibility(visibility: []const u8) bool {
+    return !std.mem.eql(u8, visibility, "direct");
+}
+
 const TimelineCursor = struct {
     created_at: []const u8,
     id: i64,
@@ -242,6 +246,7 @@ pub fn homeTimeline(app_state: *app.App, allocator: std.mem.Allocator, req: http
     defer payloads.deinit(allocator);
 
     for (local_list) |st| {
+        if (!isHomeTimelineVisibility(st.visibility)) continue;
         payloads.append(allocator, masto.makeStatusPayloadForViewer(app_state, allocator, user.?, st, info.?.user_id)) catch return .{
             .status = .internal_server_error,
             .body = "internal server error\n",
@@ -252,6 +257,7 @@ pub fn homeTimeline(app_state: *app.App, allocator: std.mem.Allocator, req: http
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
 
     for (remote_list) |st| {
+        if (!isHomeTimelineVisibility(st.visibility)) continue;
         const actor = remote_actors.lookupById(&app_state.conn, allocator, st.remote_actor_id) catch
             return .{ .status = .internal_server_error, .body = "internal server error\n" };
         if (actor == null) continue;

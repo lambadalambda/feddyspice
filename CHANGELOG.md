@@ -236,3 +236,4 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Orphan media pruning no longer deletes profile avatar/header media.
 - HTTP `HEAD` requests are treated like `GET` (but with an empty body), and trailing-slash paths are normalized for basic client/crawler compatibility.
 - Remote WebFinger discovery now prefers HTTPS and no longer depends on local `FEDDYSPICE_SCHEME`; HTTP discovery is only attempted when `FEDDYSPICE_ALLOW_PRIVATE_NETWORKS=true`.
+- Followers-only ActivityPub Notes are now stored as `visibility=private` (not `direct`), and the home timeline excludes `direct` statuses (clients expect DMs only in `/api/v1/timelines/direct`).

@@ -89,6 +89,17 @@ fn noteVisibility(activity_obj_opt: ?std.json.ObjectMap, note: std.json.ObjectMa
         (if (activity_obj_opt) |a| activitypub_json.containsIri(a.get("cc"), public_iri) else false);
     if (public_in_cc) return "unlisted";
 
+    const followers_in_recipients = blk: {
+        if (jsonContainsFollowersCollection(note.get("to"))) break :blk true;
+        if (jsonContainsFollowersCollection(note.get("cc"))) break :blk true;
+        if (activity_obj_opt) |a| {
+            if (jsonContainsFollowersCollection(a.get("to"))) break :blk true;
+            if (jsonContainsFollowersCollection(a.get("cc"))) break :blk true;
+        }
+        break :blk false;
+    };
+    if (followers_in_recipients) return "private";
+
     return "direct";
 }
 
@@ -101,6 +112,38 @@ const ParsedNote = struct {
     attachments_json: ?[]const u8,
     in_reply_to_uri: ?[]const u8,
 };
+
+fn jsonContainsFollowersCollection(v_opt: ?std.json.Value) bool {
+    const v = v_opt orelse return false;
+    switch (v) {
+        .string => |s| return isFollowersCollectionIri(s),
+        .object => |o| {
+            const id_val = o.get("id") orelse return false;
+            if (id_val != .string) return false;
+            return isFollowersCollectionIri(id_val.string);
+        },
+        .array => |arr| {
+            for (arr.items) |it| {
+                switch (it) {
+                    .string => |s| if (isFollowersCollectionIri(s)) return true,
+                    .object => |o| {
+                        const id_val = o.get("id") orelse continue;
+                        if (id_val != .string) continue;
+                        if (isFollowersCollectionIri(id_val.string)) return true;
+                    },
+                    else => continue,
+                }
+            }
+            return false;
+        },
+        else => return false,
+    }
+}
+
+fn isFollowersCollectionIri(raw: []const u8) bool {
+    const norm = util_url.stripQueryAndFragment(util_url.trimTrailingSlash(raw));
+    return std.mem.endsWith(u8, norm, "/followers");
+}
 
 fn parseNoteFromObjectMapsAlloc(
     allocator: std.mem.Allocator,
@@ -254,4 +297,31 @@ test "ingestFromObjectMaps ingests a public Note and is idempotent" {
     const second = (try ingestFromObjectMaps(&app_state, a, 1, null, parsed.value.object, true, null)).?;
     try std.testing.expect(!second.was_new);
     try std.testing.expectEqual(first.status.id, second.status.id);
+}
+
+test "ingestFromObjectMaps classifies followers-only Note as private" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    try remote_actors.upsert(&app_state.conn, .{
+        .id = "https://remote.test/users/bob",
+        .inbox = "https://remote.test/users/bob/inbox",
+        .shared_inbox = null,
+        .preferred_username = "bob",
+        .domain = "remote.test",
+        .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
+    });
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const body =
+        \\{"@context":"https://www.w3.org/ns/activitystreams","id":"https://remote.test/notes/priv1","type":"Note","attributedTo":"https://remote.test/users/bob","content":"<p>hi</p>","published":"2020-01-01T00:00:00.000Z","to":["https://remote.test/users/bob/followers"]}
+    ;
+    var parsed = try std.json.parseFromSlice(std.json.Value, a, body, .{});
+    defer parsed.deinit();
+
+    const ingested = (try ingestFromObjectMaps(&app_state, a, 1, null, parsed.value.object, false, null)).?;
+    try std.testing.expectEqualStrings("private", ingested.status.visibility);
 }

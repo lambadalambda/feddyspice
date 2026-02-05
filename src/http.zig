@@ -3849,6 +3849,103 @@ test "timelines: direct timeline returns direct statuses only" {
     try std.testing.expect(saw_rdm);
 }
 
+test "timelines: home timeline excludes direct statuses" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const app_creds = try oauth.createApp(
+        &app_state.conn,
+        a,
+        "pl-fe",
+        "urn:ietf:wg:oauth:2.0:oob",
+        "read write",
+        "",
+    );
+    const token = try oauth.createAccessToken(&app_state.conn, a, app_creds.id, user_id, "read write");
+    const auth_header = try std.fmt.allocPrint(a, "Bearer {s}", .{token});
+
+    _ = try statuses.create(&app_state.conn, a, user_id, "Lpub", "public", null);
+    _ = try statuses.create(&app_state.conn, a, user_id, "Ldm", "direct", null);
+
+    const remote_actor_id = "https://remote.test/users/bob";
+    try remote_actors.upsert(&app_state.conn, .{
+        .id = remote_actor_id,
+        .inbox = "https://remote.test/users/bob/inbox",
+        .shared_inbox = null,
+        .preferred_username = "bob",
+        .domain = "remote.test",
+        .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
+    });
+
+    _ = try remote_statuses.createIfNotExists(
+        &app_state.conn,
+        a,
+        "https://remote.test/notes/1",
+        remote_actor_id,
+        null,
+        "<p>Rpub</p>",
+        null,
+        "public",
+        "2020-01-01T00:00:00.000Z",
+    );
+    _ = try remote_statuses.createIfNotExists(
+        &app_state.conn,
+        a,
+        "https://remote.test/notes/2",
+        remote_actor_id,
+        null,
+        "<p>Rpriv</p>",
+        null,
+        "private",
+        "2020-01-01T00:00:01.000Z",
+    );
+    _ = try remote_statuses.createIfNotExists(
+        &app_state.conn,
+        a,
+        "https://remote.test/notes/3",
+        remote_actor_id,
+        null,
+        "<p>Rdm</p>",
+        null,
+        "direct",
+        "2020-01-01T00:00:02.000Z",
+    );
+
+    const tl_resp = handle(&app_state, a, .{
+        .method = .GET,
+        .target = "/api/v1/timelines/home",
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, tl_resp.status);
+
+    var tl_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, tl_resp.body, .{});
+    defer tl_json.deinit();
+    try std.testing.expect(tl_json.value == .array);
+
+    var saw_lpub: bool = false;
+    var saw_rpub: bool = false;
+    var saw_rpriv: bool = false;
+    for (tl_json.value.array.items) |it| {
+        const content = it.object.get("content").?.string;
+        if (std.mem.eql(u8, content, "<p>Lpub</p>")) saw_lpub = true;
+        if (std.mem.eql(u8, content, "<p>Rpub</p>")) saw_rpub = true;
+        if (std.mem.eql(u8, content, "<p>Rpriv</p>")) saw_rpriv = true;
+        try std.testing.expect(!std.mem.eql(u8, content, "<p>Ldm</p>"));
+        try std.testing.expect(!std.mem.eql(u8, content, "<p>Rdm</p>"));
+    }
+
+    try std.testing.expect(saw_lpub);
+    try std.testing.expect(saw_rpub);
+    try std.testing.expect(saw_rpriv);
+}
+
 test "timelines: list/link placeholders return empty arrays" {
     var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
     defer app_state.deinit();
