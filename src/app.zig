@@ -59,6 +59,17 @@ pub const App = struct {
         };
 
         app_state.transport = app_state.real_transport.transport();
+
+        logger.info(
+            "config public={s}://{f} listen={f} db={f} jobs={s}",
+            .{
+                @tagName(cfg.scheme),
+                log.safe(cfg.domain),
+                cfg.listen_address,
+                log.safe(cfg.db_path),
+                @tagName(cfg.jobs_mode),
+            },
+        );
         return app_state;
     }
 
