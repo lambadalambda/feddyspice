@@ -637,7 +637,12 @@ pub fn acceptInboundFollow(
 ) void {
     switch (app_state.jobs_mode) {
         .sync => {
-            federation.acceptInboundFollow(app_state, allocator, user_id, username, remote_actor_id, remote_follow_activity_id) catch {};
+            federation.acceptInboundFollow(app_state, allocator, user_id, username, remote_actor_id, remote_follow_activity_id) catch |err| {
+                app_state.logger.err(
+                    "acceptInboundFollow(sync): failed user_id={d} remote_actor_id={f} follow_activity_id={f} err={any}",
+                    .{ user_id, log.safe(remote_actor_id), log.safe(remote_follow_activity_id), err },
+                );
+            };
             return;
         },
         .disabled => {
@@ -714,7 +719,12 @@ pub fn deliverStatusToFollowers(
             if (user == null) return;
             const st = statuses.lookup(&app_state.conn, allocator, status_id) catch return;
             if (st == null) return;
-            federation.deliverStatusToFollowers(app_state, allocator, user.?, st.?) catch {};
+            federation.deliverStatusToFollowers(app_state, allocator, user.?, st.?) catch |err| {
+                app_state.logger.err(
+                    "deliverStatusToFollowers(sync): failed user_id={d} status_id={d} err={any}",
+                    .{ user_id, status_id, err },
+                );
+            };
             return;
         },
         .disabled => {
@@ -853,7 +863,9 @@ pub fn deliverActorUpdate(
         .sync => {
             const user = users.lookupUserById(&app_state.conn, allocator, user_id) catch return;
             if (user == null) return;
-            federation.deliverActorUpdate(app_state, allocator, user.?) catch {};
+            federation.deliverActorUpdate(app_state, allocator, user.?) catch |err| {
+                app_state.logger.err("deliverActorUpdate(sync): failed user_id={d} err={any}", .{ user_id, err });
+            };
             return;
         },
         .disabled => {
@@ -899,7 +911,12 @@ pub fn deliverDeleteToFollowers(
             const st = statuses.lookupIncludingDeleted(&app_state.conn, allocator, status_id) catch return;
             if (st == null) return;
             if (st.?.deleted_at == null) return;
-            federation.deliverDeleteToFollowers(app_state, allocator, user.?, st.?) catch {};
+            federation.deliverDeleteToFollowers(app_state, allocator, user.?, st.?) catch |err| {
+                app_state.logger.err(
+                    "deliverDeleteToFollowers(sync): failed user_id={d} status_id={d} err={any}",
+                    .{ user_id, status_id, err },
+                );
+            };
             return;
         },
         .disabled => {
@@ -1271,7 +1288,12 @@ const AcceptInboundFollowJob = struct {
             job.username,
             job.remote_actor_id,
             job.remote_follow_activity_id,
-        ) catch {};
+        ) catch |err| {
+            job.logger.err(
+                "AcceptInboundFollowJob: failed user_id={d} remote_actor_id={f} follow_activity_id={f} err={any}",
+                .{ job.user_id, log.safe(job.remote_actor_id), log.safe(job.remote_follow_activity_id), err },
+            );
+        };
     }
 };
 
@@ -1314,7 +1336,9 @@ const DeliverStatusJob = struct {
         const st = statuses.lookup(&thread_app.conn, a, job.status_id) catch null;
         if (st == null) return;
 
-        federation.deliverStatusToFollowers(&thread_app, a, user.?, st.?) catch {};
+        federation.deliverStatusToFollowers(&thread_app, a, user.?, st.?) catch |err| {
+            job.logger.err("DeliverStatusJob: failed user_id={d} status_id={d} err={any}", .{ job.user_id, job.status_id, err });
+        };
     }
 };
 
@@ -1358,7 +1382,9 @@ const DeliverDeleteJob = struct {
         if (st == null) return;
         if (st.?.deleted_at == null) return;
 
-        federation.deliverDeleteToFollowers(&thread_app, a, user.?, st.?) catch {};
+        federation.deliverDeleteToFollowers(&thread_app, a, user.?, st.?) catch |err| {
+            job.logger.err("DeliverDeleteJob: failed user_id={d} status_id={d} err={any}", .{ job.user_id, job.status_id, err });
+        };
     }
 };
 
@@ -1398,6 +1424,8 @@ const DeliverActorUpdateJob = struct {
         const user = users.lookupUserById(&thread_app.conn, a, job.user_id) catch null;
         if (user == null) return;
 
-        federation.deliverActorUpdate(&thread_app, a, user.?) catch {};
+        federation.deliverActorUpdate(&thread_app, a, user.?) catch |err| {
+            job.logger.err("DeliverActorUpdateJob: failed user_id={d} err={any}", .{ job.user_id, err });
+        };
     }
 };

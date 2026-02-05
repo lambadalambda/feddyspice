@@ -29,7 +29,7 @@ This file tracks “good future refactors” and known risks. Add items whenever
 - [x] Outbound fetches enforce a maximum response size (`FEDDYSPICE_HTTP_MAX_BODY_BYTES`) and allow per-request overrides (`FetchOptions.max_body_bytes`).
 - [x] Apply SQLite connection pragmas consistently for every connection (foreign keys, WAL where applicable) across app/job threads to reduce “half-applied” behavior under load.
 - [x] Stop swallowing request-body read errors in `src/server.zig` (empty body fallback can cause confusing “half working” behavior); return a clear 4xx/5xx.
-- [ ] Background `.sync` job execution should log errors instead of silent `catch {}` (makes federation/backfill failures diagnosable).
+- [x] Background `.sync` job execution should log errors instead of silent `catch {}` (makes federation/backfill failures diagnosable).
 
 ## Security
 
