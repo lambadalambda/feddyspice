@@ -1239,7 +1239,8 @@ test "POST /signup creates user and session cookie" {
         .method = .POST,
         .target = "/signup",
         .content_type = "application/x-www-form-urlencoded",
-        .body = "username=alice&password=password",
+        .body = "username=alice&password=password&csrf=abc",
+        .cookie = "feddyspice_csrf=abc",
     });
 
     try std.testing.expectEqual(std.http.Status.see_other, resp.status);
@@ -1269,7 +1270,8 @@ test "POST /login returns session cookie" {
         .method = .POST,
         .target = "/login",
         .content_type = "application/x-www-form-urlencoded",
-        .body = "username=alice&password=password",
+        .body = "username=alice&password=password&csrf=abc",
+        .cookie = "feddyspice_csrf=abc",
     });
 
     try std.testing.expectEqual(std.http.Status.see_other, resp.status);
@@ -1393,7 +1395,8 @@ test "oauth: authorization code flow (oob)" {
         .method = .POST,
         .target = "/signup",
         .content_type = "application/x-www-form-urlencoded",
-        .body = "username=alice&password=password",
+        .body = "username=alice&password=password&csrf=abc",
+        .cookie = "feddyspice_csrf=abc",
     });
     try std.testing.expectEqual(std.http.Status.see_other, signup_resp.status);
 
@@ -1404,7 +1407,7 @@ test "oauth: authorization code flow (oob)" {
     const token = sessions.parseCookie(set_cookie orelse return error.TestUnexpectedResult) orelse
         return error.TestUnexpectedResult;
 
-    const cookie_header = std.fmt.allocPrint(a, "{s}={s}", .{ sessions.CookieName, token }) catch
+    const cookie_header = std.fmt.allocPrint(a, "{s}={s}; feddyspice_csrf=abc", .{ sessions.CookieName, token }) catch
         return error.OutOfMemory;
 
     const auth_target = std.fmt.allocPrint(
@@ -1422,7 +1425,7 @@ test "oauth: authorization code flow (oob)" {
 
     const auth_post_body = std.fmt.allocPrint(
         a,
-        "response_type=code&client_id={s}&redirect_uri=urn%3Aietf%3Awg%3Aoauth%3A2.0%3Aoob&scope=read+write&state=xyz&approve=1",
+        "response_type=code&client_id={s}&redirect_uri=urn%3Aietf%3Awg%3Aoauth%3A2.0%3Aoob&scope=read+write&state=xyz&approve=1&csrf=abc",
         .{client_id},
     ) catch return error.OutOfMemory;
 
@@ -1494,7 +1497,8 @@ test "oauth: authorization code flow (redirect uri)" {
         .method = .POST,
         .target = "/signup",
         .content_type = "application/x-www-form-urlencoded",
-        .body = "username=alice&password=password",
+        .body = "username=alice&password=password&csrf=abc",
+        .cookie = "feddyspice_csrf=abc",
     });
     try std.testing.expectEqual(std.http.Status.see_other, signup_resp.status);
 
@@ -1505,12 +1509,12 @@ test "oauth: authorization code flow (redirect uri)" {
     const token = sessions.parseCookie(set_cookie orelse return error.TestUnexpectedResult) orelse
         return error.TestUnexpectedResult;
 
-    const cookie_header = std.fmt.allocPrint(a, "{s}={s}", .{ sessions.CookieName, token }) catch
+    const cookie_header = std.fmt.allocPrint(a, "{s}={s}; feddyspice_csrf=abc", .{ sessions.CookieName, token }) catch
         return error.OutOfMemory;
 
     const auth_post_body = std.fmt.allocPrint(
         a,
-        "response_type=code&client_id={s}&redirect_uri={s}&scope=read+write&state=xyz&approve=1",
+        "response_type=code&client_id={s}&redirect_uri={s}&scope=read+write&state=xyz&approve=1&csrf=abc",
         .{ client_id, redirect_uri_enc },
     ) catch return error.OutOfMemory;
 
@@ -1605,7 +1609,8 @@ test "oauth: token endpoint accepts json" {
         .method = .POST,
         .target = "/signup",
         .content_type = "application/x-www-form-urlencoded",
-        .body = "username=alice&password=password",
+        .body = "username=alice&password=password&csrf=abc",
+        .cookie = "feddyspice_csrf=abc",
     });
     try std.testing.expectEqual(std.http.Status.see_other, signup_resp.status);
 
@@ -1616,12 +1621,12 @@ test "oauth: token endpoint accepts json" {
     const token = sessions.parseCookie(set_cookie orelse return error.TestUnexpectedResult) orelse
         return error.TestUnexpectedResult;
 
-    const cookie_header = std.fmt.allocPrint(a, "{s}={s}", .{ sessions.CookieName, token }) catch
+    const cookie_header = std.fmt.allocPrint(a, "{s}={s}; feddyspice_csrf=abc", .{ sessions.CookieName, token }) catch
         return error.OutOfMemory;
 
     const auth_post_body = std.fmt.allocPrint(
         a,
-        "response_type=code&client_id={s}&redirect_uri=urn%3Aietf%3Awg%3Aoauth%3A2.0%3Aoob&scope=read+write&state=xyz&approve=1",
+        "response_type=code&client_id={s}&redirect_uri=urn%3Aietf%3Awg%3Aoauth%3A2.0%3Aoob&scope=read+write&state=xyz&approve=1&csrf=abc",
         .{client_id},
     ) catch return error.OutOfMemory;
 
@@ -1679,7 +1684,8 @@ test "oauth: token endpoint accepts multipart form-data" {
         .method = .POST,
         .target = "/signup",
         .content_type = "application/x-www-form-urlencoded",
-        .body = "username=alice&password=password",
+        .body = "username=alice&password=password&csrf=abc",
+        .cookie = "feddyspice_csrf=abc",
     });
     try std.testing.expectEqual(std.http.Status.see_other, signup_resp.status);
 
@@ -1690,12 +1696,12 @@ test "oauth: token endpoint accepts multipart form-data" {
     const token = sessions.parseCookie(set_cookie orelse return error.TestUnexpectedResult) orelse
         return error.TestUnexpectedResult;
 
-    const cookie_header = std.fmt.allocPrint(a, "{s}={s}", .{ sessions.CookieName, token }) catch
+    const cookie_header = std.fmt.allocPrint(a, "{s}={s}; feddyspice_csrf=abc", .{ sessions.CookieName, token }) catch
         return error.OutOfMemory;
 
     const auth_post_body = std.fmt.allocPrint(
         a,
-        "response_type=code&client_id={s}&redirect_uri=urn%3Aietf%3Awg%3Aoauth%3A2.0%3Aoob&scope=read+write&state=xyz&approve=1",
+        "response_type=code&client_id={s}&redirect_uri=urn%3Aietf%3Awg%3Aoauth%3A2.0%3Aoob&scope=read+write&state=xyz&approve=1&csrf=abc",
         .{client_id},
     ) catch return error.OutOfMemory;
 
@@ -1781,7 +1787,8 @@ test "GET /api/v1/accounts/verify_credentials works with bearer token" {
         .method = .POST,
         .target = "/signup",
         .content_type = "application/x-www-form-urlencoded",
-        .body = "username=alice&password=password",
+        .body = "username=alice&password=password&csrf=abc",
+        .cookie = "feddyspice_csrf=abc",
     });
     var set_cookie: ?[]const u8 = null;
     for (signup_resp.headers) |h| {
@@ -1790,12 +1797,12 @@ test "GET /api/v1/accounts/verify_credentials works with bearer token" {
     const session_token = sessions.parseCookie(set_cookie orelse return error.TestUnexpectedResult) orelse
         return error.TestUnexpectedResult;
 
-    const cookie_header = std.fmt.allocPrint(a, "{s}={s}", .{ sessions.CookieName, session_token }) catch
+    const cookie_header = std.fmt.allocPrint(a, "{s}={s}; feddyspice_csrf=abc", .{ sessions.CookieName, session_token }) catch
         return error.OutOfMemory;
 
     const auth_post_body = std.fmt.allocPrint(
         a,
-        "response_type=code&client_id={s}&redirect_uri=urn%3Aietf%3Awg%3Aoauth%3A2.0%3Aoob&scope=read+write&state=&approve=1",
+        "response_type=code&client_id={s}&redirect_uri=urn%3Aietf%3Awg%3Aoauth%3A2.0%3Aoob&scope=read+write&state=&approve=1&csrf=abc",
         .{client_id},
     ) catch return error.OutOfMemory;
 

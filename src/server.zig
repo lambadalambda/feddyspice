@@ -779,6 +779,127 @@ test "serveOnce: GET /login includes CSP header" {
     try std.testing.expect(ctx.ok);
 }
 
+test "serveOnce: signup uses CSRF token (no Origin/Referer required)" {
+    const listen_address = try net.Address.parseIp("127.0.0.1", 0);
+    var listener = try listen_address.listen(.{ .reuse_address = true });
+    defer listener.deinit();
+
+    const addr = listener.listen_address;
+
+    var ctx: struct {
+        addr: net.Address,
+        ok: bool = false,
+    } = .{ .addr = addr };
+
+    const Client = struct {
+        fn run(c: *@TypeOf(ctx)) !void {
+            var token_buf: [128]u8 = undefined;
+            var token_len: usize = 0;
+
+            // 1) Fetch signup page and extract CSRF cookie.
+            {
+                var stream = try net.tcpConnectToAddress(c.addr);
+                defer stream.close();
+
+                const req = "GET /signup HTTP/1.1\r\n" ++
+                    "Host: localhost\r\n" ++
+                    "Connection: close\r\n" ++
+                    "\r\n";
+
+                try writeAll(stream.handle, req);
+
+                var resp_buf: [8192]u8 = undefined;
+                var used: usize = 0;
+
+                while (used < resp_buf.len) {
+                    const n = try std.posix.read(stream.handle, resp_buf[used..]);
+                    if (n == 0) break;
+                    used += n;
+                }
+
+                const resp = resp_buf[0..used];
+                if (!std.mem.startsWith(u8, resp, "HTTP/1.1 200")) return;
+
+                var lower_buf: [8192]u8 = undefined;
+                const lower = std.ascii.lowerString(lower_buf[0..resp.len], resp);
+
+                const prefix = "\r\nset-cookie: feddyspice_csrf=";
+                const start = std.mem.indexOf(u8, lower, prefix) orelse return;
+                const token_start = start + prefix.len;
+                const token_end = std.mem.indexOfPos(u8, lower, token_start, ";") orelse return;
+
+                token_len = token_end - token_start;
+                if (token_len == 0 or token_len > token_buf.len) return;
+                @memcpy(token_buf[0..token_len], lower[token_start..token_end]);
+
+                const hidden_prefix = "name=\"csrf\" value=\"";
+                if (std.mem.indexOf(u8, lower, hidden_prefix) == null) return;
+            }
+
+            // 2) Post signup with Origin: null and no Referer.
+            {
+                var stream = try net.tcpConnectToAddress(c.addr);
+                defer stream.close();
+
+                const token = token_buf[0..token_len];
+
+                var body_buf: [512]u8 = undefined;
+                const body = std.fmt.bufPrint(
+                    &body_buf,
+                    "username=alice&password=pass&csrf={s}",
+                    .{token},
+                ) catch return;
+
+                var req_buf: [2048]u8 = undefined;
+                const req = std.fmt.bufPrint(
+                    &req_buf,
+                    "POST /signup HTTP/1.1\r\n" ++
+                        "Host: localhost\r\n" ++
+                        "Origin: null\r\n" ++
+                        "Content-Type: application/x-www-form-urlencoded\r\n" ++
+                        "Content-Length: {d}\r\n" ++
+                        "Cookie: feddyspice_csrf={s}\r\n" ++
+                        "Connection: close\r\n" ++
+                        "\r\n" ++
+                        "{s}",
+                    .{ body.len, token, body },
+                ) catch return;
+
+                try writeAll(stream.handle, req);
+
+                var resp_buf: [8192]u8 = undefined;
+                var used: usize = 0;
+
+                while (used < resp_buf.len) {
+                    const n = try std.posix.read(stream.handle, resp_buf[used..]);
+                    if (n == 0) break;
+                    used += n;
+                }
+
+                const resp = resp_buf[0..used];
+                if (!std.mem.startsWith(u8, resp, "HTTP/1.1 303")) return;
+
+                var lower_buf: [8192]u8 = undefined;
+                const lower = std.ascii.lowerString(lower_buf[0..resp.len], resp);
+                if (std.mem.indexOf(u8, lower, "\r\nset-cookie: feddyspice_session=") == null) return;
+            }
+
+            c.ok = true;
+        }
+    };
+
+    var t = try std.Thread.spawn(.{}, Client.run, .{&ctx});
+
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    try serveOnce(&app_state, &listener);
+    try serveOnce(&app_state, &listener);
+    t.join();
+
+    try std.testing.expect(ctx.ok);
+}
+
 test "serveOnce: WebSocket /api/v1/streaming upgrade receives update" {
     const listen_address = try net.Address.parseIp("127.0.0.1", 0);
     var listener = try listen_address.listen(.{ .reuse_address = true });

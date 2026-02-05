@@ -54,5 +54,5 @@ After the first deploy:
 
 - If `FEDDYSPICE_DOMAIN` doesn’t match the actual public hostname, federation will break (bad actor IDs, inbox URLs, signatures).
 - If you change domains later, you must update `FEDDYSPICE_DOMAIN` and expect remote instances to treat it as a different actor.
-- If `POST /signup` or `POST /login` returns `403 forbidden`, double-check `FEDDYSPICE_DOMAIN`/`FEDDYSPICE_SCHEME` match the public URL and that Coolify’s proxy forwards `Origin`/`Referer` headers.
+- If `POST /signup` or `POST /login` returns `403 forbidden`, ensure your browser accepts cookies from your instance (signup/login use a CSRF cookie) and double-check `FEDDYSPICE_DOMAIN`/`FEDDYSPICE_SCHEME` match the public URL.
 - Confirm the app sees the expected domain by checking `GET /api/v2/instance` (`domain` field). If it shows `localhost`, your env vars aren’t being applied to the running container.

@@ -2,6 +2,7 @@ const std = @import("std");
 
 const app = @import("../app.zig");
 const common = @import("common.zig");
+const csrf = @import("csrf.zig");
 const form = @import("../form.zig");
 const http_types = @import("../http_types.zig");
 const log = @import("../log.zig");
@@ -107,6 +108,11 @@ pub fn authorizeGet(app_state: *app.App, allocator: std.mem.Allocator, req: http
         return common.redirect(allocator, location);
     }
 
+    const csrf_token = csrf.issueTokenAlloc(allocator) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    const cookie = csrf.cookieValue(allocator, app_state.cfg.scheme == .https, csrf_token) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
     const app_name = common.htmlEscapeAlloc(allocator, app_row.?.name) catch app_row.?.name;
     const client_id_html = common.htmlEscapeAlloc(allocator, client_id) catch client_id;
     const redirect_uri_html = common.htmlEscapeAlloc(allocator, redirect_uri) catch redirect_uri;
@@ -117,6 +123,7 @@ pub fn authorizeGet(app_state: *app.App, allocator: std.mem.Allocator, req: http
         allocator,
         \\<p>Authorize <strong>{s}</strong>?</p>
         \\<form method="POST" action="/oauth/authorize">
+        \\  <input type="hidden" name="{s}" value="{s}">
         \\  <input type="hidden" name="response_type" value="code">
         \\  <input type="hidden" name="client_id" value="{s}">
         \\  <input type="hidden" name="redirect_uri" value="{s}">
@@ -126,30 +133,20 @@ pub fn authorizeGet(app_state: *app.App, allocator: std.mem.Allocator, req: http
         \\  <button type="submit" name="deny" value="1">Deny</button>
         \\</form>
     ,
-        .{ app_name, client_id_html, redirect_uri_html, scope_html, state_html },
+        .{ app_name, csrf.FormFieldName, csrf_token, client_id_html, redirect_uri_html, scope_html, state_html },
     ) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
 
-    return common.htmlPage(allocator, "Authorize", page);
+    var resp = common.htmlPage(allocator, "Authorize", page);
+    const headers = allocator.alloc(std.http.Header, 1) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    headers[0] = .{ .name = "set-cookie", .value = cookie };
+    resp.headers = headers;
+    return resp;
 }
 
 pub fn authorizePost(app_state: *app.App, allocator: std.mem.Allocator, req: http_types.Request) http_types.Response {
     if (!common.isForm(req.content_type)) {
         return .{ .status = .bad_request, .body = "invalid content-type\n" };
-    }
-    if (!common.isSameOrigin(req, @tagName(app_state.cfg.scheme), app_state.cfg.domain)) {
-        const path = common.targetPath(req.target);
-        app_state.logger.warn(
-            "sameOrigin: reject path={f} expected={s}://{f} host={f} origin={f} referer={f}",
-            .{
-                log.safe(path),
-                @tagName(app_state.cfg.scheme),
-                log.safe(app_state.cfg.domain),
-                log.safe(req.host orelse ""),
-                log.safe(req.origin orelse ""),
-                log.safe(req.referer orelse ""),
-            },
-        );
-        return .{ .status = .forbidden, .body = "forbidden\n" };
     }
 
     const user_id = session.currentUserId(app_state, req) catch null;
@@ -157,6 +154,24 @@ pub fn authorizePost(app_state: *app.App, allocator: std.mem.Allocator, req: htt
 
     var parsed = form.parse(allocator, req.body) catch
         return .{ .status = .bad_request, .body = "invalid form\n" };
+
+    if (!csrf.validate(req, parsed.get(csrf.FormFieldName))) {
+        const path = common.targetPath(req.target);
+        const has_cookie = req.cookie != null;
+        const has_csrf_cookie = if (req.cookie) |c| csrf.parseCookie(c) != null else false;
+        app_state.logger.warn(
+            "csrf: reject path={f} host={f} origin={f} referer={f} has_cookie={} has_csrf_cookie={}",
+            .{
+                log.safe(path),
+                log.safe(req.host orelse ""),
+                log.safe(req.origin orelse ""),
+                log.safe(req.referer orelse ""),
+                has_cookie,
+                has_csrf_cookie,
+            },
+        );
+        return .{ .status = .forbidden, .body = "forbidden\n" };
+    }
 
     const response_type = parsed.get("response_type") orelse "";
     if (!std.mem.eql(u8, response_type, "code")) {
