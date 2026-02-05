@@ -43,6 +43,41 @@ fn isPubliclyVisibleVisibility(visibility: []const u8) bool {
     return std.mem.eql(u8, visibility, "public") or std.mem.eql(u8, visibility, "unlisted");
 }
 
+fn containsAsciiIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len == 0) return true;
+    if (haystack.len < needle.len) return false;
+
+    var i: usize = 0;
+    while (i + needle.len <= haystack.len) : (i += 1) {
+        if (std.ascii.eqlIgnoreCase(haystack[i .. i + needle.len], needle)) return true;
+    }
+    return false;
+}
+
+fn parseLimit(query: *const form.Form, default_value: usize) usize {
+    const raw = query.get("limit") orelse return default_value;
+    const parsed = std.fmt.parseInt(usize, raw, 10) catch return default_value;
+    return @min(@max(parsed, 1), 40);
+}
+
+fn parseOffset(query: *const form.Form) usize {
+    const raw = query.get("offset") orelse return 0;
+    const parsed = std.fmt.parseInt(usize, raw, 10) catch return 0;
+    return parsed;
+}
+
+fn wantsType(query: *const form.Form, typ: []const u8) bool {
+    const raw = query.get("type") orelse return true;
+    if (raw.len == 0) return true;
+    return std.mem.eql(u8, raw, typ);
+}
+
+fn isResolveEnabled(query: *const form.Form) bool {
+    const raw = query.get("resolve") orelse return false;
+    if (raw.len == 0) return false;
+    return std.ascii.eqlIgnoreCase(raw, "true") or std.ascii.eqlIgnoreCase(raw, "1") or std.ascii.eqlIgnoreCase(raw, "yes");
+}
+
 pub fn verifyCredentials(app_state: *app.App, allocator: std.mem.Allocator, req: http_types.Request) http_types.Response {
     const token = common.bearerToken(req.authorization) orelse return common.unauthorized(allocator);
 
@@ -267,40 +302,178 @@ pub fn accountByUser(app_state: *app.App, allocator: std.mem.Allocator, user: us
 
 pub fn apiV2Search(app_state: *app.App, allocator: std.mem.Allocator, req: http_types.Request) http_types.Response {
     const q = common.queryString(req.target);
-    const q_param = common.parseQueryParam(allocator, q, "q") catch
+    var query = form.parse(allocator, q) catch
         return .{ .status = .bad_request, .body = "invalid query\n" };
+    defer query.deinit(allocator);
 
-    const query_raw = q_param orelse return common.jsonOk(allocator, .{
+    const query_raw = query.get("q") orelse return common.jsonOk(allocator, .{
         .accounts = [_]i32{},
         .statuses = [_]i32{},
         .hashtags = [_]i32{},
     });
 
     const query_trimmed = std.mem.trim(u8, query_raw, " \t\r\n");
+    const query_norm = if (query_trimmed.len > 0 and query_trimmed[0] == '@') query_trimmed[1..] else query_trimmed;
     if (query_trimmed.len == 0) return common.jsonOk(allocator, .{
         .accounts = [_]i32{},
         .statuses = [_]i32{},
         .hashtags = [_]i32{},
     });
 
-    var accounts: std.ArrayListUnmanaged(masto.AccountPayload) = .empty;
-    defer accounts.deinit(allocator);
+    const limit = parseLimit(&query, 20);
+    const offset = parseOffset(&query);
+    const resolve = isResolveEnabled(&query);
 
-    // Minimal: resolve acct handles like `@user@domain` / `user@domain`.
-    if (!std.mem.startsWith(u8, query_trimmed, "http://") and
-        !std.mem.startsWith(u8, query_trimmed, "https://") and
-        std.mem.indexOfScalar(u8, query_trimmed, '@') != null)
-    {
-        const actor = federation.resolveRemoteActorByHandle(app_state, allocator, query_trimmed) catch null;
-        if (actor) |a| {
-            const api_id = remoteAccountApiIdAlloc(app_state, allocator, a.id);
-            accounts.append(allocator, makeRemoteAccountPayload(app_state, allocator, api_id, a)) catch
-                return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    var accounts_all: std.ArrayListUnmanaged(AccountPayload) = .empty;
+    defer accounts_all.deinit(allocator);
+
+    if (wantsType(&query, "accounts")) {
+        const user = users.lookupFirstUser(&app_state.conn, allocator) catch null;
+        if (user) |u| {
+            var matches = containsAsciiIgnoreCase(u.username, query_norm) or
+                containsAsciiIgnoreCase(u.display_name, query_norm);
+
+            if (!matches) {
+                if (std.mem.indexOfScalar(u8, query_norm, '@')) |at| {
+                    const name = query_norm[0..at];
+                    const dom = query_norm[at + 1 ..];
+                    if (dom.len > 0 and std.ascii.eqlIgnoreCase(dom, app_state.cfg.domain)) {
+                        matches = containsAsciiIgnoreCase(u.username, name);
+                    }
+                }
+            }
+
+            if (matches) {
+                const user_url = urls.userUrlAlloc(app_state, allocator, u.username) catch "";
+                const avatar_url = urls.userAvatarUrlAlloc(app_state, allocator, u);
+                const header_url = urls.userHeaderUrlAlloc(app_state, allocator, u);
+                const note_html = util_html.textToHtmlAlloc(allocator, u.note) catch u.note;
+
+                const id_str = std.fmt.allocPrint(allocator, "{d}", .{u.id}) catch "0";
+                accounts_all.append(allocator, .{
+                    .id = id_str,
+                    .username = u.username,
+                    .acct = u.username,
+                    .display_name = u.display_name,
+                    .note = note_html,
+                    .url = user_url,
+                    .locked = false,
+                    .bot = false,
+                    .group = false,
+                    .discoverable = true,
+                    .created_at = u.created_at,
+                    .followers_count = 0,
+                    .following_count = 0,
+                    .statuses_count = 0,
+                    .avatar = avatar_url,
+                    .avatar_static = avatar_url,
+                    .header = header_url,
+                    .header_static = header_url,
+                }) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
+            }
         }
+
+        // If it looks like an acct handle and resolve is enabled (or a likely full domain), try WebFinger.
+        if (!std.mem.startsWith(u8, query_norm, "http://") and !std.mem.startsWith(u8, query_norm, "https://")) {
+            if (std.mem.indexOfScalar(u8, query_norm, '@')) |at| {
+                const name = query_norm[0..at];
+                const dom = query_norm[at + 1 ..];
+                if (name.len > 0 and dom.len > 0 and !std.ascii.eqlIgnoreCase(dom, app_state.cfg.domain)) {
+                    if (resolve or std.mem.indexOfScalar(u8, dom, '.') != null) {
+                        const actor = federation.resolveRemoteActorByHandle(app_state, allocator, query_norm) catch null;
+                        if (actor) |a| {
+                            const api_id = remoteAccountApiIdAlloc(app_state, allocator, a.id);
+                            accounts_all.append(allocator, makeRemoteAccountPayload(app_state, allocator, api_id, a)) catch
+                                return .{ .status = .internal_server_error, .body = "internal server error\n" };
+                        }
+                    }
+                }
+            }
+        }
+
+        // Partial search over known remote actors.
+        const max_fetch: i64 = @intCast(@min(offset + limit + 4, 200));
+        if (max_fetch > 0) {
+            const user_part: []const u8 = blk: {
+                if (std.mem.indexOfScalar(u8, query_norm, '@')) |at| break :blk query_norm[0..at];
+                break :blk query_norm;
+            };
+            const dom_part: ?[]const u8 = blk: {
+                if (std.mem.indexOfScalar(u8, query_norm, '@')) |at| {
+                    const rest = query_norm[at + 1 ..];
+                    if (rest.len > 0) break :blk rest;
+                }
+                break :blk null;
+            };
+
+            const p_user = std.fmt.allocPrint(allocator, "%{s}%", .{user_part}) catch "%";
+            const p_dom = if (dom_part) |d| std.fmt.allocPrint(allocator, "%{s}%", .{d}) catch "%" else null;
+
+            var stmt = blk: {
+                if (dom_part != null and user_part.len > 0) {
+                    break :blk app_state.conn.prepareZ(
+                        "SELECT id FROM remote_actors WHERE preferred_username LIKE ?1 AND domain LIKE ?2 ORDER BY preferred_username ASC, domain ASC LIMIT ?3;\x00",
+                    ) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
+                }
+                break :blk app_state.conn.prepareZ(
+                    "SELECT id FROM remote_actors WHERE preferred_username LIKE ?1 OR domain LIKE ?1 ORDER BY preferred_username ASC, domain ASC LIMIT ?2;\x00",
+                ) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
+            };
+            defer stmt.finalize();
+
+            if (dom_part != null and user_part.len > 0) {
+                stmt.bindText(1, p_user) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
+                stmt.bindText(2, p_dom.?) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
+                stmt.bindInt64(3, max_fetch) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
+            } else {
+                stmt.bindText(1, p_user) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
+                stmt.bindInt64(2, max_fetch) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
+            }
+
+            while (true) {
+                switch (stmt.step() catch return .{ .status = .internal_server_error, .body = "internal server error\n" }) {
+                    .done => break,
+                    .row => {
+                        const actor_id = stmt.columnText(0);
+                        var seen = false;
+                        for (accounts_all.items) |acct| {
+                            if (std.mem.eql(u8, acct.url, actor_id)) {
+                                seen = true;
+                                break;
+                            }
+                        }
+                        if (seen) continue;
+
+                        const actor = remote_actors.lookupById(&app_state.conn, allocator, actor_id) catch
+                            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+                        if (actor == null) continue;
+
+                        const api_id = remoteAccountApiIdAlloc(app_state, allocator, actor.?.id);
+                        accounts_all.append(allocator, makeRemoteAccountPayload(app_state, allocator, api_id, actor.?)) catch
+                            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+                    },
+                }
+            }
+        }
+
+        std.sort.block(AccountPayload, accounts_all.items, {}, struct {
+            fn lessThan(_: void, a: AccountPayload, b: AccountPayload) bool {
+                if (std.ascii.lessThanIgnoreCase(a.acct, b.acct)) return true;
+                if (std.ascii.lessThanIgnoreCase(b.acct, a.acct)) return false;
+                return std.ascii.lessThanIgnoreCase(a.id, b.id);
+            }
+        }.lessThan);
     }
 
+    const accounts_slice = blk: {
+        if (!wantsType(&query, "accounts")) break :blk accounts_all.items[0..0];
+        const start = @min(offset, accounts_all.items.len);
+        const end = @min(start + limit, accounts_all.items.len);
+        break :blk accounts_all.items[start..end];
+    };
+
     return common.jsonOk(allocator, .{
-        .accounts = accounts.items,
+        .accounts = accounts_slice,
         .statuses = [_]i32{},
         .hashtags = [_]i32{},
     });
@@ -312,29 +485,146 @@ pub fn apiV1Search(app_state: *app.App, allocator: std.mem.Allocator, req: http_
 
 pub fn apiV1AccountsSearch(app_state: *app.App, allocator: std.mem.Allocator, req: http_types.Request) http_types.Response {
     const q = common.queryString(req.target);
-    const q_param = common.parseQueryParam(allocator, q, "q") catch
+    var query = form.parse(allocator, q) catch
         return .{ .status = .bad_request, .body = "invalid query\n" };
+    defer query.deinit(allocator);
 
-    const query_raw = q_param orelse return common.jsonOk(allocator, [_]i32{});
+    const query_raw = query.get("q") orelse return common.jsonOk(allocator, [_]i32{});
     const query_trimmed = std.mem.trim(u8, query_raw, " \t\r\n");
     if (query_trimmed.len == 0) return common.jsonOk(allocator, [_]i32{});
 
-    var accounts: std.ArrayListUnmanaged(masto.AccountPayload) = .empty;
-    defer accounts.deinit(allocator);
+    const query_norm = if (query_trimmed.len > 0 and query_trimmed[0] == '@') query_trimmed[1..] else query_trimmed;
+    const limit = parseLimit(&query, 40);
+    const offset = parseOffset(&query);
+    const resolve = isResolveEnabled(&query);
 
-    if (!std.mem.startsWith(u8, query_trimmed, "http://") and
-        !std.mem.startsWith(u8, query_trimmed, "https://") and
-        std.mem.indexOfScalar(u8, query_trimmed, '@') != null)
-    {
-        const actor = federation.resolveRemoteActorByHandle(app_state, allocator, query_trimmed) catch null;
-        if (actor) |a| {
-            const api_id = remoteAccountApiIdAlloc(app_state, allocator, a.id);
-            accounts.append(allocator, makeRemoteAccountPayload(app_state, allocator, api_id, a)) catch
-                return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    var accounts_all: std.ArrayListUnmanaged(AccountPayload) = .empty;
+    defer accounts_all.deinit(allocator);
+
+    const user = users.lookupFirstUser(&app_state.conn, allocator) catch null;
+    if (user) |u| {
+        if (containsAsciiIgnoreCase(u.username, query_norm) or containsAsciiIgnoreCase(u.display_name, query_norm)) {
+            const user_url = urls.userUrlAlloc(app_state, allocator, u.username) catch "";
+            const avatar_url = urls.userAvatarUrlAlloc(app_state, allocator, u);
+            const header_url = urls.userHeaderUrlAlloc(app_state, allocator, u);
+            const note_html = util_html.textToHtmlAlloc(allocator, u.note) catch u.note;
+
+            const id_str = std.fmt.allocPrint(allocator, "{d}", .{u.id}) catch "0";
+            accounts_all.append(allocator, .{
+                .id = id_str,
+                .username = u.username,
+                .acct = u.username,
+                .display_name = u.display_name,
+                .note = note_html,
+                .url = user_url,
+                .locked = false,
+                .bot = false,
+                .group = false,
+                .discoverable = true,
+                .created_at = u.created_at,
+                .followers_count = 0,
+                .following_count = 0,
+                .statuses_count = 0,
+                .avatar = avatar_url,
+                .avatar_static = avatar_url,
+                .header = header_url,
+                .header_static = header_url,
+            }) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
         }
     }
 
-    return common.jsonOk(allocator, accounts.items);
+    if (!std.mem.startsWith(u8, query_norm, "http://") and !std.mem.startsWith(u8, query_norm, "https://")) {
+        if (std.mem.indexOfScalar(u8, query_norm, '@')) |at| {
+            const name = query_norm[0..at];
+            const dom = query_norm[at + 1 ..];
+            if (name.len > 0 and dom.len > 0 and !std.ascii.eqlIgnoreCase(dom, app_state.cfg.domain)) {
+                if (resolve or std.mem.indexOfScalar(u8, dom, '.') != null) {
+                    const actor = federation.resolveRemoteActorByHandle(app_state, allocator, query_norm) catch null;
+                    if (actor) |a| {
+                        const api_id = remoteAccountApiIdAlloc(app_state, allocator, a.id);
+                        accounts_all.append(allocator, makeRemoteAccountPayload(app_state, allocator, api_id, a)) catch
+                            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+                    }
+                }
+            }
+        }
+    }
+
+    const max_fetch: i64 = @intCast(@min(offset + limit + 4, 200));
+    if (max_fetch > 0) {
+        const user_part: []const u8 = blk: {
+            if (std.mem.indexOfScalar(u8, query_norm, '@')) |at| break :blk query_norm[0..at];
+            break :blk query_norm;
+        };
+        const dom_part: ?[]const u8 = blk: {
+            if (std.mem.indexOfScalar(u8, query_norm, '@')) |at| {
+                const rest = query_norm[at + 1 ..];
+                if (rest.len > 0) break :blk rest;
+            }
+            break :blk null;
+        };
+
+        const p_user = std.fmt.allocPrint(allocator, "%{s}%", .{user_part}) catch "%";
+        const p_dom = if (dom_part) |d| std.fmt.allocPrint(allocator, "%{s}%", .{d}) catch "%" else null;
+
+        var stmt = blk: {
+            if (dom_part != null and user_part.len > 0) {
+                break :blk app_state.conn.prepareZ(
+                    "SELECT id FROM remote_actors WHERE preferred_username LIKE ?1 AND domain LIKE ?2 ORDER BY preferred_username ASC, domain ASC LIMIT ?3;\x00",
+                ) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
+            }
+            break :blk app_state.conn.prepareZ(
+                "SELECT id FROM remote_actors WHERE preferred_username LIKE ?1 OR domain LIKE ?1 ORDER BY preferred_username ASC, domain ASC LIMIT ?2;\x00",
+            ) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        };
+        defer stmt.finalize();
+
+        if (dom_part != null and user_part.len > 0) {
+            stmt.bindText(1, p_user) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
+            stmt.bindText(2, p_dom.?) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
+            stmt.bindInt64(3, max_fetch) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        } else {
+            stmt.bindText(1, p_user) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
+            stmt.bindInt64(2, max_fetch) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        }
+
+        while (true) {
+            switch (stmt.step() catch return .{ .status = .internal_server_error, .body = "internal server error\n" }) {
+                .done => break,
+                .row => {
+                    const actor_id = stmt.columnText(0);
+                    var seen = false;
+                    for (accounts_all.items) |acct| {
+                        if (std.mem.eql(u8, acct.url, actor_id)) {
+                            seen = true;
+                            break;
+                        }
+                    }
+                    if (seen) continue;
+
+                    const actor = remote_actors.lookupById(&app_state.conn, allocator, actor_id) catch
+                        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+                    if (actor == null) continue;
+
+                    const api_id = remoteAccountApiIdAlloc(app_state, allocator, actor.?.id);
+                    accounts_all.append(allocator, makeRemoteAccountPayload(app_state, allocator, api_id, actor.?)) catch
+                        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+                },
+            }
+        }
+    }
+
+    std.sort.block(AccountPayload, accounts_all.items, {}, struct {
+        fn lessThan(_: void, a: AccountPayload, b: AccountPayload) bool {
+            if (std.ascii.lessThanIgnoreCase(a.acct, b.acct)) return true;
+            if (std.ascii.lessThanIgnoreCase(b.acct, a.acct)) return false;
+            return std.ascii.lessThanIgnoreCase(a.id, b.id);
+        }
+    }.lessThan);
+
+    const start = @min(offset, accounts_all.items.len);
+    const end = @min(start + limit, accounts_all.items.len);
+    return common.jsonOk(allocator, accounts_all.items[start..end]);
 }
 
 pub fn accountGet(app_state: *app.App, allocator: std.mem.Allocator, path: []const u8) http_types.Response {

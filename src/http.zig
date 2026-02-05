@@ -4403,6 +4403,79 @@ test "GET /api/v2/search resolves acct handle into an account" {
     try std.testing.expectEqualStrings(actor_id, accounts[0].object.get("url").?.string);
 }
 
+test "GET /api/v2/search finds local account by partial username" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    _ = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const resp = handle(&app_state, a, .{
+        .method = .GET,
+        .target = "/api/v2/search?q=ali&type=accounts&limit=5&offset=0",
+    });
+    try std.testing.expectEqual(std.http.Status.ok, resp.status);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, resp.body, .{});
+    defer parsed.deinit();
+
+    const accounts = parsed.value.object.get("accounts").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), accounts.len);
+    try std.testing.expectEqualStrings("alice", accounts[0].object.get("username").?.string);
+}
+
+test "GET /api/v2/search accounts supports offset" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    try remote_actors.upsert(&app_state.conn, .{
+        .id = "http://remote.test/users/bob",
+        .inbox = "http://remote.test/users/bob/inbox",
+        .shared_inbox = null,
+        .preferred_username = "bob",
+        .domain = "remote.test",
+        .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
+    });
+    try remote_actors.upsert(&app_state.conn, .{
+        .id = "http://remote.test/users/bobby",
+        .inbox = "http://remote.test/users/bobby/inbox",
+        .shared_inbox = null,
+        .preferred_username = "bobby",
+        .domain = "remote.test",
+        .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
+    });
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const resp0 = handle(&app_state, a, .{
+        .method = .GET,
+        .target = "/api/v2/search?q=bob&type=accounts&limit=1&offset=0",
+    });
+    try std.testing.expectEqual(std.http.Status.ok, resp0.status);
+    var parsed0 = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, resp0.body, .{});
+    defer parsed0.deinit();
+    const accounts0 = parsed0.value.object.get("accounts").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), accounts0.len);
+    try std.testing.expectEqualStrings("bob", accounts0[0].object.get("username").?.string);
+
+    const resp1 = handle(&app_state, a, .{
+        .method = .GET,
+        .target = "/api/v2/search?q=bob&type=accounts&limit=1&offset=1",
+    });
+    try std.testing.expectEqual(std.http.Status.ok, resp1.status);
+    var parsed1 = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, resp1.body, .{});
+    defer parsed1.deinit();
+    const accounts1 = parsed1.value.object.get("accounts").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), accounts1.len);
+    try std.testing.expectEqualStrings("bobby", accounts1[0].object.get("username").?.string);
+}
+
 test "GET /api/v1/search resolves acct handle into an account" {
     var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
     defer app_state.deinit();
@@ -4447,6 +4520,31 @@ test "GET /api/v1/search resolves acct handle into an account" {
     try std.testing.expectEqualStrings(expected_id, accounts[0].object.get("id").?.string);
     try std.testing.expectEqualStrings("bob@remote.test", accounts[0].object.get("acct").?.string);
     try std.testing.expectEqualStrings(actor_id, accounts[0].object.get("url").?.string);
+}
+
+test "GET /api/v1/accounts/search finds local account by partial username" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    _ = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const resp = handle(&app_state, a, .{
+        .method = .GET,
+        .target = "/api/v1/accounts/search?q=ali&limit=5&offset=0",
+    });
+    try std.testing.expectEqual(std.http.Status.ok, resp.status);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, resp.body, .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value == .array);
+    const accounts = parsed.value.array.items;
+    try std.testing.expectEqual(@as(usize, 1), accounts.len);
+    try std.testing.expectEqualStrings("alice", accounts[0].object.get("username").?.string);
 }
 
 test "GET /api/v1/accounts/search resolves acct handle into an account array" {
