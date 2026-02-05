@@ -824,32 +824,8 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
         if (!inserted) return .{ .status = .accepted, .body = "duplicate\n" };
         dedupe_activity_id = dedupe_id;
 
-        var remote_actor = blk: {
-            if (remote_actors.lookupById(&app_state.conn, allocator, actor_val.string) catch
-                return .{ .status = .internal_server_error, .body = "internal server error\n" }) |found|
-            {
-                break :blk found;
-            }
-
-            const trimmed = util_url.trimTrailingSlash(actor_val.string);
-            if (!std.mem.eql(u8, trimmed, actor_val.string)) {
-                if (remote_actors.lookupById(&app_state.conn, allocator, trimmed) catch
-                    return .{ .status = .internal_server_error, .body = "internal server error\n" }) |found|
-                {
-                    break :blk found;
-                }
-            } else {
-                const with_slash = std.fmt.allocPrint(allocator, "{s}/", .{actor_val.string}) catch
-                    break :blk null;
-                if (remote_actors.lookupById(&app_state.conn, allocator, with_slash) catch
-                    return .{ .status = .internal_server_error, .body = "internal server error\n" }) |found|
-                {
-                    break :blk found;
-                }
-            }
-
-            break :blk null;
-        };
+        var remote_actor = remote_actors.lookupByIdAny(&app_state.conn, allocator, actor_val.string) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
 
         if (remote_actor == null) {
             remote_actor = federation.ensureRemoteActorById(app_state, allocator, actor_val.string) catch null;
@@ -1325,32 +1301,8 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
         if (!inserted) return .{ .status = .accepted, .body = "duplicate\n" };
         dedupe_activity_id = dedupe_id;
 
-        const remote_actor = blk: {
-            if (remote_actors.lookupById(&app_state.conn, allocator, actor_val.string) catch
-                return .{ .status = .internal_server_error, .body = "internal server error\n" }) |found|
-            {
-                break :blk found;
-            }
-
-            const trimmed = util_url.trimTrailingSlash(actor_val.string);
-            if (!std.mem.eql(u8, trimmed, actor_val.string)) {
-                if (remote_actors.lookupById(&app_state.conn, allocator, trimmed) catch
-                    return .{ .status = .internal_server_error, .body = "internal server error\n" }) |found|
-                {
-                    break :blk found;
-                }
-            } else {
-                const with_slash = std.fmt.allocPrint(allocator, "{s}/", .{actor_val.string}) catch
-                    break :blk null;
-                if (remote_actors.lookupById(&app_state.conn, allocator, with_slash) catch
-                    return .{ .status = .internal_server_error, .body = "internal server error\n" }) |found|
-                {
-                    break :blk found;
-                }
-            }
-
-            break :blk null;
-        };
+        const remote_actor = remote_actors.lookupByIdAny(&app_state.conn, allocator, actor_val.string) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
         if (remote_actor == null) return .{ .status = .accepted, .body = "ignored\n" };
 
         const obj = parsed.value.object.get("object") orelse
