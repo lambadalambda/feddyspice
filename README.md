@@ -123,6 +123,7 @@ ngrok http 8080
 ## Deployment
 
 - Standalone Docker Compose (Caddy TLS reverse proxy): `docker/standalone/README.md`
+- Coolify: `docs/deploy/coolify.md`
 
 ## Federation-in-a-box (E2E)
 
