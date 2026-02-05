@@ -4476,6 +4476,127 @@ test "GET /api/v2/search accounts supports offset" {
     try std.testing.expectEqualStrings("bobby", accounts1[0].object.get("username").?.string);
 }
 
+test "GET /api/v2/search finds local status by substring" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, a, "alice", "password", params);
+
+    _ = try statuses.create(&app_state.conn, a, user_id, "hello world", "public", null);
+    const s2 = try statuses.create(&app_state.conn, a, user_id, "a second hello", "public", null);
+
+    const resp = handle(&app_state, a, .{
+        .method = .GET,
+        .target = "/api/v2/search?q=second&type=statuses&limit=5&offset=0",
+    });
+    try std.testing.expectEqual(std.http.Status.ok, resp.status);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, resp.body, .{});
+    defer parsed.deinit();
+
+    const statuses_json = parsed.value.object.get("statuses").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), statuses_json.len);
+
+    const expected_id = try std.fmt.allocPrint(a, "{d}", .{s2.id});
+    try std.testing.expectEqualStrings(expected_id, statuses_json[0].object.get("id").?.string);
+}
+
+test "GET /api/v2/search statuses supports offset" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, a, "alice", "password", params);
+
+    const s1 = try statuses.create(&app_state.conn, a, user_id, "bob 1", "public", null);
+    const s2 = try statuses.create(&app_state.conn, a, user_id, "bob 2", "public", null);
+
+    const resp0 = handle(&app_state, a, .{
+        .method = .GET,
+        .target = "/api/v2/search?q=bob&type=statuses&limit=1&offset=0",
+    });
+    try std.testing.expectEqual(std.http.Status.ok, resp0.status);
+
+    var parsed0 = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, resp0.body, .{});
+    defer parsed0.deinit();
+    const statuses0 = parsed0.value.object.get("statuses").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), statuses0.len);
+    const expected0 = try std.fmt.allocPrint(a, "{d}", .{s2.id});
+    try std.testing.expectEqualStrings(expected0, statuses0[0].object.get("id").?.string);
+
+    const resp1 = handle(&app_state, a, .{
+        .method = .GET,
+        .target = "/api/v2/search?q=bob&type=statuses&limit=1&offset=1",
+    });
+    try std.testing.expectEqual(std.http.Status.ok, resp1.status);
+
+    var parsed1 = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, resp1.body, .{});
+    defer parsed1.deinit();
+    const statuses1 = parsed1.value.object.get("statuses").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), statuses1.len);
+    const expected1 = try std.fmt.allocPrint(a, "{d}", .{s1.id});
+    try std.testing.expectEqualStrings(expected1, statuses1[0].object.get("id").?.string);
+}
+
+test "GET /api/v2/search does not leak direct statuses when unauthenticated" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, a, "alice", "password", params);
+
+    const dm = try statuses.create(&app_state.conn, a, user_id, "secret sauce", "direct", null);
+
+    const resp_anon = handle(&app_state, a, .{
+        .method = .GET,
+        .target = "/api/v2/search?q=secret&type=statuses&limit=5&offset=0",
+    });
+    try std.testing.expectEqual(std.http.Status.ok, resp_anon.status);
+
+    var parsed_anon = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, resp_anon.body, .{});
+    defer parsed_anon.deinit();
+    const statuses_anon = parsed_anon.value.object.get("statuses").?.array.items;
+    try std.testing.expectEqual(@as(usize, 0), statuses_anon.len);
+
+    const app_creds = try oauth.createApp(
+        &app_state.conn,
+        a,
+        "pl-fe",
+        "urn:ietf:wg:oauth:2.0:oob",
+        "read write follow",
+        "",
+    );
+    const token = try oauth.createAccessToken(&app_state.conn, a, app_creds.id, user_id, "read write follow");
+    const auth_header = try std.fmt.allocPrint(a, "Bearer {s}", .{token});
+
+    const resp_auth = handle(&app_state, a, .{
+        .method = .GET,
+        .target = "/api/v2/search?q=secret&type=statuses&limit=5&offset=0",
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, resp_auth.status);
+
+    var parsed_auth = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, resp_auth.body, .{});
+    defer parsed_auth.deinit();
+    const statuses_auth = parsed_auth.value.object.get("statuses").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), statuses_auth.len);
+    const expected = try std.fmt.allocPrint(a, "{d}", .{dm.id});
+    try std.testing.expectEqualStrings(expected, statuses_auth[0].object.get("id").?.string);
+}
+
 test "GET /api/v1/search resolves acct handle into an account" {
     var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
     defer app_state.deinit();

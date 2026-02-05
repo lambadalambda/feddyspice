@@ -12,6 +12,7 @@ const masto = @import("mastodon.zig");
 const media = @import("../media.zig");
 const oauth = @import("../oauth.zig");
 const remote_actors = @import("../remote_actors.zig");
+const remote_statuses = @import("../remote_statuses.zig");
 const status_interactions = @import("../status_interactions.zig");
 const statuses = @import("../statuses.zig");
 const urls = @import("urls.zig");
@@ -301,6 +302,15 @@ pub fn accountByUser(app_state: *app.App, allocator: std.mem.Allocator, user: us
 }
 
 pub fn apiV2Search(app_state: *app.App, allocator: std.mem.Allocator, req: http_types.Request) http_types.Response {
+    const viewer_user_id: ?i64 = blk: {
+        if (req.authorization == null) break :blk null;
+        const token = common.bearerToken(req.authorization) orelse return common.unauthorized(allocator);
+        const info = oauth.verifyAccessToken(&app_state.conn, allocator, token) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        if (info == null) return common.unauthorized(allocator);
+        break :blk info.?.user_id;
+    };
+
     const q = common.queryString(req.target);
     var query = form.parse(allocator, q) catch
         return .{ .status = .bad_request, .body = "invalid query\n" };
@@ -472,9 +482,141 @@ pub fn apiV2Search(app_state: *app.App, allocator: std.mem.Allocator, req: http_
         break :blk accounts_all.items[start..end];
     };
 
+    var statuses_all: std.ArrayListUnmanaged(StatusPayload) = .empty;
+    defer statuses_all.deinit(allocator);
+
+    if (wantsType(&query, "statuses")) {
+        const max_fetch: i64 = @intCast(@min(offset + limit + 4, 200));
+        if (max_fetch > 0) {
+            const user = blk: {
+                if (viewer_user_id) |uid| {
+                    const u = users.lookupUserById(&app_state.conn, allocator, uid) catch null;
+                    break :blk u;
+                }
+                break :blk users.lookupFirstUser(&app_state.conn, allocator) catch null;
+            };
+
+            if (user) |u| {
+                const pattern = std.fmt.allocPrint(allocator, "%{s}%", .{query_trimmed}) catch "%";
+
+                var stmt = blk: {
+                    if (viewer_user_id != null) {
+                        break :blk app_state.conn.prepareZ(
+                            "SELECT id, user_id, in_reply_to_id, text, visibility, created_at\n" ++
+                                "FROM statuses\n" ++
+                                "WHERE user_id = ?1 AND deleted_at IS NULL AND text LIKE ?2\n" ++
+                                "ORDER BY created_at DESC, id DESC\n" ++
+                                "LIMIT ?3;\x00",
+                        ) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
+                    }
+
+                    break :blk app_state.conn.prepareZ(
+                        "SELECT id, user_id, in_reply_to_id, text, visibility, created_at\n" ++
+                            "FROM statuses\n" ++
+                            "WHERE user_id = ?1 AND deleted_at IS NULL AND visibility = 'public' AND text LIKE ?2\n" ++
+                            "ORDER BY created_at DESC, id DESC\n" ++
+                            "LIMIT ?3;\x00",
+                    ) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
+                };
+                defer stmt.finalize();
+
+                stmt.bindInt64(1, u.id) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
+                stmt.bindText(2, pattern) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
+                stmt.bindInt64(3, max_fetch) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+                while (true) {
+                    switch (stmt.step() catch return .{ .status = .internal_server_error, .body = "internal server error\n" }) {
+                        .done => break,
+                        .row => {
+                            const st: statuses.Status = .{
+                                .id = stmt.columnInt64(0),
+                                .user_id = stmt.columnInt64(1),
+                                .in_reply_to_id = if (stmt.columnType(2) == .null) null else stmt.columnInt64(2),
+                                .text = allocator.dupe(u8, stmt.columnText(3)) catch "",
+                                .visibility = allocator.dupe(u8, stmt.columnText(4)) catch "public",
+                                .created_at = allocator.dupe(u8, stmt.columnText(5)) catch "1970-01-01T00:00:00.000Z",
+                                .deleted_at = null,
+                            };
+
+                            const p = if (viewer_user_id) |vid|
+                                masto.makeStatusPayloadForViewer(app_state, allocator, u, st, vid)
+                            else
+                                masto.makeStatusPayload(app_state, allocator, u, st);
+                            statuses_all.append(allocator, p) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
+                        },
+                    }
+                }
+            }
+
+            const pattern_html = std.fmt.allocPrint(allocator, "%{s}%", .{query_trimmed}) catch "%";
+
+            var stmt_remote = blk: {
+                if (viewer_user_id != null) {
+                    break :blk app_state.conn.prepareZ(
+                        "SELECT id, remote_uri, remote_actor_id, in_reply_to_id, content_html, attachments_json, visibility, created_at\n" ++
+                            "FROM remote_statuses\n" ++
+                            "WHERE deleted_at IS NULL AND content_html LIKE ?1\n" ++
+                            "ORDER BY created_at DESC, id DESC\n" ++
+                            "LIMIT ?2;\x00",
+                    ) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
+                }
+
+                break :blk app_state.conn.prepareZ(
+                    "SELECT id, remote_uri, remote_actor_id, in_reply_to_id, content_html, attachments_json, visibility, created_at\n" ++
+                        "FROM remote_statuses\n" ++
+                        "WHERE deleted_at IS NULL AND visibility = 'public' AND content_html LIKE ?1\n" ++
+                        "ORDER BY created_at DESC, id DESC\n" ++
+                        "LIMIT ?2;\x00",
+                ) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
+            };
+            defer stmt_remote.finalize();
+
+            stmt_remote.bindText(1, pattern_html) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
+            stmt_remote.bindInt64(2, max_fetch) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+            while (true) {
+                switch (stmt_remote.step() catch return .{ .status = .internal_server_error, .body = "internal server error\n" }) {
+                    .done => break,
+                    .row => {
+                        const st: remote_statuses.RemoteStatus = .{
+                            .id = stmt_remote.columnInt64(0),
+                            .remote_uri = allocator.dupe(u8, stmt_remote.columnText(1)) catch "",
+                            .remote_actor_id = allocator.dupe(u8, stmt_remote.columnText(2)) catch "",
+                            .in_reply_to_id = if (stmt_remote.columnType(3) == .null) null else stmt_remote.columnInt64(3),
+                            .content_html = allocator.dupe(u8, stmt_remote.columnText(4)) catch "",
+                            .attachments_json = if (stmt_remote.columnType(5) == .null) null else allocator.dupe(u8, stmt_remote.columnText(5)) catch null,
+                            .visibility = allocator.dupe(u8, stmt_remote.columnText(6)) catch "public",
+                            .created_at = allocator.dupe(u8, stmt_remote.columnText(7)) catch "1970-01-01T00:00:00.000Z",
+                            .deleted_at = null,
+                        };
+
+                        const actor = remote_actors.lookupById(&app_state.conn, allocator, st.remote_actor_id) catch
+                            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+                        if (actor == null) continue;
+
+                        const p = if (viewer_user_id) |vid|
+                            masto.makeRemoteStatusPayloadForViewer(app_state, allocator, actor.?, st, vid)
+                        else
+                            masto.makeRemoteStatusPayload(app_state, allocator, actor.?, st);
+                        statuses_all.append(allocator, p) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
+                    },
+                }
+            }
+        }
+
+        std.sort.block(StatusPayload, statuses_all.items, {}, masto.statusPayloadNewerFirst);
+    }
+
+    const statuses_slice = blk: {
+        if (!wantsType(&query, "statuses")) break :blk statuses_all.items[0..0];
+        const start = @min(offset, statuses_all.items.len);
+        const end = @min(start + limit, statuses_all.items.len);
+        break :blk statuses_all.items[start..end];
+    };
+
     return common.jsonOk(allocator, .{
         .accounts = accounts_slice,
-        .statuses = [_]i32{},
+        .statuses = statuses_slice,
         .hashtags = [_]i32{},
     });
 }
