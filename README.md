@@ -120,6 +120,10 @@ Then in another terminal:
 ngrok http 8080
 ```
 
+## Deployment
+
+- Standalone Docker Compose (Caddy TLS reverse proxy): `docker/standalone/README.md`
+
 ## Federation-in-a-box (E2E)
 
 This repo includes a Docker Compose “fedbox” that runs:

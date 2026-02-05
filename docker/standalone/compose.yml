@@ -1,0 +1,45 @@
+services:
+  feddyspice:
+    build:
+      context: ../..
+    image: feddyspice
+    restart: unless-stopped
+    environment:
+      FEDDYSPICE_DOMAIN: ${FEDDYSPICE_DOMAIN:?set in docker/standalone/.env}
+      FEDDYSPICE_SCHEME: ${FEDDYSPICE_SCHEME:-https}
+      FEDDYSPICE_LISTEN: 0.0.0.0:8080
+      FEDDYSPICE_DB_PATH: /data/feddyspice.sqlite3
+      FEDDYSPICE_LOG_LEVEL: ${FEDDYSPICE_LOG_LEVEL:-info}
+      FEDDYSPICE_LOG_FILE: ${FEDDYSPICE_LOG_FILE:-}
+      FEDDYSPICE_JOBS_MODE: ${FEDDYSPICE_JOBS_MODE:-spawn}
+    volumes:
+      - feddyspice_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/healthz >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  caddy:
+    image: caddy:2.8
+    restart: unless-stopped
+    depends_on:
+      feddyspice:
+        condition: service_healthy
+    environment:
+      FEDDYSPICE_DOMAIN: ${FEDDYSPICE_DOMAIN:?set in docker/standalone/.env}
+      CADDY_EMAIL: ${CADDY_EMAIL:-}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  feddyspice_data:
+  caddy_data:
+  caddy_config:
+

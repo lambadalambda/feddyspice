@@ -1,0 +1,9 @@
+{
+	email {$CADDY_EMAIL}
+}
+
+{$FEDDYSPICE_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy feddyspice:8080
+}
+
