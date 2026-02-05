@@ -44,6 +44,8 @@ pub fn serveOnce(app_state: *app.App, listener: *net.Server) !void {
 
     var host_hdr: ?[]const u8 = null;
     var xf_host_hdr: ?[]const u8 = null;
+    var xf_for_hdr: ?[]const u8 = null;
+    var x_real_ip_hdr: ?[]const u8 = null;
     var origin_hdr: ?[]const u8 = null;
     var referer_hdr: ?[]const u8 = null;
     var date_hdr: ?[]const u8 = null;
@@ -61,6 +63,8 @@ pub fn serveOnce(app_state: *app.App, listener: *net.Server) !void {
     while (it.next()) |h| {
         if (std.ascii.eqlIgnoreCase(h.name, "host")) host_hdr = h.value;
         if (std.ascii.eqlIgnoreCase(h.name, "x-forwarded-host")) xf_host_hdr = h.value;
+        if (std.ascii.eqlIgnoreCase(h.name, "x-forwarded-for")) xf_for_hdr = h.value;
+        if (std.ascii.eqlIgnoreCase(h.name, "x-real-ip")) x_real_ip_hdr = h.value;
         if (std.ascii.eqlIgnoreCase(h.name, "origin")) origin_hdr = h.value;
         if (std.ascii.eqlIgnoreCase(h.name, "referer")) referer_hdr = h.value;
         if (std.ascii.eqlIgnoreCase(h.name, "date")) date_hdr = h.value;
@@ -80,6 +84,17 @@ pub fn serveOnce(app_state: *app.App, listener: *net.Server) !void {
             if (hostHeaderMatchesDomain(xf, app_state.cfg.domain)) host_hdr = xf;
         }
     }
+
+    const remote_override: ?[]const u8 = blk: {
+        if (xf_for_hdr) |raw| {
+            if (forwardedForFirst(raw)) |xf| break :blk xf;
+        }
+        if (x_real_ip_hdr) |raw| {
+            const trimmed = std.mem.trim(u8, raw, " \t");
+            if (trimmed.len > 0 and std.mem.indexOfAny(u8, trimmed, "\r\n") == null) break :blk trimmed;
+        }
+        break :blk null;
+    };
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
@@ -125,7 +140,7 @@ pub fn serveOnce(app_state: *app.App, listener: *net.Server) !void {
         if (info == null) {
             const resp: routes.Response = .{ .status = .unauthorized, .body = "unauthorized\n" };
             try writeResponse(alloc, &request, resp);
-            logAccess(app_state, conn.address, method, target, resp.status, start_us);
+            logAccess(app_state, conn.address, remote_override, method, target, resp.status, start_us);
             return;
         }
 
@@ -144,13 +159,13 @@ pub fn serveOnce(app_state: *app.App, listener: *net.Server) !void {
         const sub = app_state.streaming.subscribe(info.?.user_id, streams) catch {
             const resp: routes.Response = .{ .status = .internal_server_error, .body = "internal server error\n" };
             try writeResponse(alloc, &request, resp);
-            logAccess(app_state, conn.address, method, target, resp.status, start_us);
+            logAccess(app_state, conn.address, remote_override, method, target, resp.status, start_us);
             return;
         };
         errdefer app_state.streaming.unsubscribe(sub);
 
         try writeWebSocketHandshake(conn.stream.handle, sec_ws_key.?, selected_protocol);
-        logAccess(app_state, conn.address, method, target, .switching_protocols, start_us);
+        logAccess(app_state, conn.address, remote_override, method, target, .switching_protocols, start_us);
 
         const handler = try std.heap.page_allocator.create(StreamingHandler);
         handler.* = .{
@@ -185,7 +200,7 @@ pub fn serveOnce(app_state: *app.App, listener: *net.Server) !void {
                 .body = "payload too large\n",
             };
             try writeResponse(alloc, &request, resp);
-            logAccess(app_state, conn.address, method, target, resp.status, start_us);
+            logAccess(app_state, conn.address, remote_override, method, target, resp.status, start_us);
             return;
         }
 
@@ -210,7 +225,7 @@ pub fn serveOnce(app_state: *app.App, listener: *net.Server) !void {
     });
 
     try writeResponse(alloc, &request, resp);
-    logAccess(app_state, conn.address, method, target, resp.status, start_us);
+    logAccess(app_state, conn.address, remote_override, method, target, resp.status, start_us);
 }
 
 fn targetPath(target: []const u8) []const u8 {
@@ -273,6 +288,15 @@ fn forwardedHostFirst(raw: []const u8) ?[]const u8 {
     const first = it.next() orelse return null;
     const trimmed = std.mem.trim(u8, first, " \t");
     if (trimmed.len == 0) return null;
+    return trimmed;
+}
+
+fn forwardedForFirst(raw: []const u8) ?[]const u8 {
+    var it = std.mem.splitScalar(u8, raw, ',');
+    const first = it.next() orelse return null;
+    const trimmed = std.mem.trim(u8, first, " \t");
+    if (trimmed.len == 0) return null;
+    if (std.mem.indexOfAny(u8, trimmed, "\r\n") != null) return null;
     return trimmed;
 }
 
@@ -481,6 +505,7 @@ fn headerValueIsSafe(value: []const u8) bool {
 fn logAccess(
     app_state: *app.App,
     remote_addr: net.Address,
+    remote_override: ?[]const u8,
     method: http.Method,
     target: []const u8,
     status: http.Status,
@@ -488,12 +513,28 @@ fn logAccess(
 ) void {
     const now_us: i64 = std.time.microTimestamp();
     const elapsed_us: i64 = if (now_us >= start_us) now_us - start_us else 0;
-    var addr_buf: [128]u8 = undefined;
-    const addr_str = std.fmt.bufPrint(&addr_buf, "{any}", .{remote_addr}) catch "unknown";
     const safe_target = sanitizeTargetForLog(target);
+
+    var sock_buf: [256]u8 = undefined;
+    const sock_str = std.fmt.bufPrint(&sock_buf, "{f}", .{remote_addr}) catch "unknown";
+    const remote_str = if (remote_override) |raw| blk: {
+        const trimmed = std.mem.trim(u8, raw, " \t");
+        if (trimmed.len == 0) break :blk sock_str;
+        if (std.mem.indexOfAny(u8, trimmed, "\r\n") != null) break :blk sock_str;
+        break :blk trimmed;
+    } else sock_str;
+
+    if (remote_override != null and !std.mem.eql(u8, remote_str, sock_str)) {
+        app_state.logger.info(
+            "access remote={f} sock={f} method={s} target={f} status={d} dur_us={d}",
+            .{ log.safe(remote_str), log.safe(sock_str), @tagName(method), log.safe(safe_target), @intFromEnum(status), elapsed_us },
+        );
+        return;
+    }
+
     app_state.logger.info(
-        "access remote={s} method={s} target={s} status={d} dur_us={d}",
-        .{ addr_str, @tagName(method), safe_target, @intFromEnum(status), elapsed_us },
+        "access remote={f} method={s} target={f} status={d} dur_us={d}",
+        .{ log.safe(remote_str), @tagName(method), log.safe(safe_target), @intFromEnum(status), elapsed_us },
     );
 }
 
@@ -560,6 +601,67 @@ test "serveOnce: access logs include dur_us" {
     defer std.testing.allocator.free(got);
 
     try std.testing.expect(std.mem.indexOf(u8, got, "dur_us=") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "remote=unknown") == null);
+}
+
+test "serveOnce: access logs prefer X-Forwarded-For" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var listener = try (try net.Address.parseIp("127.0.0.1", 0)).listen(.{ .reuse_address = true });
+    defer listener.deinit();
+
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const f = try tmp.dir.createFile("access.log", .{ .truncate = true });
+    app_state.logger.* = try log.Logger.initWithFile(f, .{ .to_stderr = false, .min_level = .debug });
+
+    var ctx: struct {
+        addr: net.Address,
+        ok: bool = false,
+    } = .{ .addr = listener.listen_address };
+
+    const Client = struct {
+        fn run(c: *@TypeOf(ctx)) !void {
+            var stream = try net.tcpConnectToAddress(c.addr);
+            defer stream.close();
+
+            const req = "GET /healthz HTTP/1.1\r\n" ++
+                "Host: localhost\r\n" ++
+                "X-Forwarded-For: 203.0.113.9\r\n" ++
+                "Connection: close\r\n" ++
+                "\r\n";
+
+            try writeAll(stream.handle, req);
+
+            var buf: [4096]u8 = undefined;
+            var used: usize = 0;
+
+            while (used < buf.len) {
+                const n = try std.posix.read(stream.handle, buf[used..]);
+                if (n == 0) break;
+                used += n;
+            }
+
+            c.ok = std.mem.startsWith(u8, buf[0..used], "HTTP/1.1 200");
+        }
+    };
+
+    var t = try std.Thread.spawn(.{}, Client.run, .{&ctx});
+    try serveOnce(&app_state, &listener);
+    t.join();
+
+    try std.testing.expect(ctx.ok);
+
+    const rf = try tmp.dir.openFile("access.log", .{});
+    defer rf.close();
+
+    const got = try rf.readToEndAlloc(std.testing.allocator, 64 * 1024);
+    defer std.testing.allocator.free(got);
+
+    try std.testing.expect(std.mem.indexOf(u8, got, "remote=203.0.113.9") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "sock=") != null);
 }
 
 test "serveOnce: GET /healthz -> 200" {
