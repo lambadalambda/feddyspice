@@ -27,6 +27,7 @@ const urls = @import("urls.zig");
 const users = @import("../users.zig");
 const util_html = @import("../util/html.zig");
 const util_json = @import("../util/json.zig");
+const util_local_iri = @import("../util/local_iri.zig");
 const util_url = @import("../util/url.zig");
 
 fn isPubliclyVisibleVisibility(visibility: []const u8) bool {
@@ -50,53 +51,6 @@ fn remoteStatusResponse(
 
 fn textToHtmlAlloc(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
     return util_html.textToHtmlAlloc(allocator, text);
-}
-
-fn stripLocalBase(app_state: *app.App, iri: []const u8) ?[]const u8 {
-    const domain = app_state.cfg.domain;
-
-    const schemes = [_][]const u8{ "http://", "https://" };
-    for (schemes) |scheme| {
-        if (!std.mem.startsWith(u8, iri, scheme)) continue;
-        const rest = iri[scheme.len..];
-        if (!std.mem.startsWith(u8, rest, domain)) continue;
-        const after_domain = rest[domain.len..];
-        if (after_domain.len == 0) return "";
-        if (after_domain[0] == '/') return after_domain;
-    }
-    return null;
-}
-
-fn parseLeadingI64(s: []const u8) ?i64 {
-    if (s.len == 0) return null;
-    var end: usize = 0;
-    while (end < s.len and s[end] >= '0' and s[end] <= '9') : (end += 1) {}
-    if (end == 0) return null;
-    return std.fmt.parseInt(i64, s[0..end], 10) catch null;
-}
-
-fn localStatusIdFromIri(app_state: *app.App, iri: []const u8) ?i64 {
-    const path = stripLocalBase(app_state, iri) orelse return null;
-    if (path.len == 0) return null;
-
-    const api_prefix = "/api/v1/statuses/";
-    if (std.mem.startsWith(u8, path, api_prefix)) {
-        const rest = path[api_prefix.len..];
-        const id = parseLeadingI64(rest) orelse return null;
-        if (id <= 0) return null;
-        return id;
-    }
-
-    const users_prefix = "/users/";
-    if (!std.mem.startsWith(u8, path, users_prefix)) return null;
-    const rest = path[users_prefix.len..];
-    const marker = "/statuses/";
-    const idx = std.mem.indexOf(u8, rest, marker) orelse return null;
-    if (idx == 0) return null;
-    const after_marker = rest[idx + marker.len ..];
-    const id = parseLeadingI64(after_marker) orelse return null;
-    if (id <= 0) return null;
-    return id;
 }
 
 const VerifyInboxError = error{ Unauthorized, Internal };
@@ -809,7 +763,7 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
             const trimmed = util_url.stripQueryAndFragment(util_url.trimTrailingSlash(uri_str));
             if (!util_url.isHttpOrHttpsUrl(trimmed)) break :blk null;
 
-            if (localStatusIdFromIri(app_state, trimmed)) |local_id| {
+            if (util_local_iri.localStatusIdFromIri(app_state, trimmed)) |local_id| {
                 const parent = statuses.lookup(&app_state.conn, allocator, local_id) catch break :blk null;
                 if (parent != null) break :blk InReplyTo{ .id = local_id, .uri = null };
                 break :blk null;
@@ -1102,7 +1056,7 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
         const trimmed = util_url.stripQueryAndFragment(util_url.trimTrailingSlash(object_iri));
         if (!util_url.isHttpOrHttpsUrl(trimmed)) return .{ .status = .accepted, .body = "ignored\n" };
 
-        const status_id_opt = localStatusIdFromIri(app_state, trimmed);
+        const status_id_opt = util_local_iri.localStatusIdFromIri(app_state, trimmed);
         if (status_id_opt == null) {
             const f = follows.lookupByUserAndRemoteActorId(&app_state.conn, allocator, user.?.id, remote_actor.?.id) catch
                 return .{ .status = .internal_server_error, .body = "internal server error\n" };
@@ -1395,7 +1349,7 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
                     const trimmed = util_url.stripQueryAndFragment(util_url.trimTrailingSlash(inner_object_iri));
                     if (!util_url.isHttpOrHttpsUrl(trimmed)) return .{ .status = .accepted, .body = "ignored\n" };
 
-                    const status_id = localStatusIdFromIri(app_state, trimmed) orelse return .{ .status = .accepted, .body = "ignored\n" };
+                    const status_id = util_local_iri.localStatusIdFromIri(app_state, trimmed) orelse return .{ .status = .accepted, .body = "ignored\n" };
                     const st = statuses.lookup(&app_state.conn, allocator, status_id) catch
                         return .{ .status = .internal_server_error, .body = "internal server error\n" };
                     if (st == null) return .{ .status = .accepted, .body = "ignored\n" };

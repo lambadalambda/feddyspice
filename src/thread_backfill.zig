@@ -9,6 +9,7 @@ const transport = @import("transport.zig");
 const activitypub_attachments = @import("activitypub_attachments.zig");
 const util_html = @import("util/html.zig");
 const util_json = @import("util/json.zig");
+const util_local_iri = @import("util/local_iri.zig");
 const util_url = @import("util/url.zig");
 
 pub const Error = federation.Error || statuses.Error;
@@ -17,52 +18,6 @@ pub const IngestResult = struct {
     status: remote_statuses.RemoteStatus,
     was_new: bool,
 };
-
-fn stripLocalBase(app_state: *app.App, iri: []const u8) ?[]const u8 {
-    const prefix = switch (app_state.cfg.scheme) {
-        .http => "http://",
-        .https => "https://",
-    };
-    if (!std.mem.startsWith(u8, iri, prefix)) return null;
-    const rest = iri[prefix.len..];
-    if (!std.mem.startsWith(u8, rest, app_state.cfg.domain)) return null;
-    const after_domain = rest[app_state.cfg.domain.len..];
-    if (after_domain.len == 0) return "";
-    if (after_domain[0] == '/') return after_domain;
-    return null;
-}
-
-fn parseLeadingI64(s: []const u8) ?i64 {
-    if (s.len == 0) return null;
-    var end: usize = 0;
-    while (end < s.len and s[end] >= '0' and s[end] <= '9') : (end += 1) {}
-    if (end == 0) return null;
-    return std.fmt.parseInt(i64, s[0..end], 10) catch null;
-}
-
-fn localStatusIdFromIri(app_state: *app.App, iri: []const u8) ?i64 {
-    const path = stripLocalBase(app_state, iri) orelse return null;
-    if (path.len == 0) return null;
-
-    const api_prefix = "/api/v1/statuses/";
-    if (std.mem.startsWith(u8, path, api_prefix)) {
-        const rest = path[api_prefix.len..];
-        const id = parseLeadingI64(rest) orelse return null;
-        if (id <= 0) return null;
-        return id;
-    }
-
-    const users_prefix = "/users/";
-    if (!std.mem.startsWith(u8, path, users_prefix)) return null;
-    const rest = path[users_prefix.len..];
-    const marker = "/statuses/";
-    const idx = std.mem.indexOf(u8, rest, marker) orelse return null;
-    if (idx == 0) return null;
-    const after_marker = rest[idx + marker.len ..];
-    const id = parseLeadingI64(after_marker) orelse return null;
-    if (id <= 0) return null;
-    return id;
-}
 
 fn noteFirstActorId(note: std.json.ObjectMap) ?[]const u8 {
     const v = note.get("attributedTo") orelse note.get("actor") orelse return null;
@@ -234,7 +189,7 @@ pub fn backfillRemoteAncestors(
         const next_uri_norm = util_url.stripQueryAndFragment(util_url.trimTrailingSlash(next_uri_opt.?));
         if (!util_url.isHttpOrHttpsUrl(next_uri_norm)) break;
 
-        if (localStatusIdFromIri(app_state, next_uri_norm)) |local_id| {
+        if (util_local_iri.localStatusIdFromIri(app_state, next_uri_norm)) |local_id| {
             const local = statuses.lookup(&app_state.conn, allocator, local_id) catch null;
             if (local != null) {
                 _ = remote_statuses.updateInReplyToId(&app_state.conn, cur_id, local_id) catch {};
@@ -297,7 +252,7 @@ pub fn ingestRemoteNoteByUri(
     const in_reply_to_id: ?i64 = blk: {
         const raw = note.in_reply_to_uri orelse break :blk null;
 
-        if (localStatusIdFromIri(app_state, raw)) |local_id| {
+        if (util_local_iri.localStatusIdFromIri(app_state, raw)) |local_id| {
             const local = statuses.lookup(&app_state.conn, allocator, local_id) catch break :blk null;
             if (local != null) break :blk local_id;
         }
