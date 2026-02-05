@@ -150,6 +150,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - Mastodon search endpoints now honor `offset` and support partial username matching for accounts (`/api/v2/search`, `/api/v1/accounts/search`).
 - Mastodon search now returns matching statuses and supports `offset` pagination (`/api/v2/search`, `/api/v1/search`), without leaking `direct` posts to unauthenticated clients.
+- Backfilled remote thread ancestors now preserve ActivityPub Note attachments (so `media_attachments` works consistently for fetched vs. inbox-ingested posts).
 - Access logs no longer include query strings (prevents leaking `access_token` from streaming URLs), and redacts `/media/:token` paths.
 - Logs escape control characters when printing untrusted strings (prevents log forging via newlines in remote responses or OAuth params).
 - Access logs now prefer `X-Forwarded-For`/`X-Real-IP` when present (reverse proxy deployments), and no longer emit `remote=unknown` for typical socket addresses.

@@ -114,6 +114,97 @@ fn jsonContainsIri(v: ?std.json.Value, want: []const u8) bool {
     }
 }
 
+fn jsonFirstUrl(val: std.json.Value) ?[]const u8 {
+    switch (val) {
+        .string => |s| return if (s.len == 0) null else s,
+        .object => |o| {
+            if (o.get("url")) |u| {
+                if (jsonFirstUrl(u)) |s| return s;
+            }
+            if (o.get("href")) |h| {
+                if (h == .string and h.string.len > 0) return h.string;
+            }
+            return null;
+        },
+        .array => |arr| {
+            for (arr.items) |item| {
+                if (jsonFirstUrl(item)) |s| return s;
+            }
+            return null;
+        },
+        else => return null,
+    }
+}
+
+fn remoteAttachmentsJsonAlloc(allocator: std.mem.Allocator, note: std.json.ObjectMap) !?[]u8 {
+    const val = note.get("attachment") orelse return null;
+    const max_attachments: usize = 4;
+
+    const Attachment = struct {
+        url: []const u8,
+        kind: ?[]const u8 = null,
+        media_type: ?[]const u8 = null,
+        description: ?[]const u8 = null,
+        blurhash: ?[]const u8 = null,
+    };
+
+    var list: std.ArrayListUnmanaged(Attachment) = .empty;
+    defer list.deinit(allocator);
+
+    const helper = struct {
+        fn pushOne(
+            alloc: std.mem.Allocator,
+            out: *std.ArrayListUnmanaged(Attachment),
+            item: std.json.Value,
+        ) !void {
+            const url = jsonFirstUrl(item) orelse return;
+            if (!util_url.isHttpOrHttpsUrl(url)) return;
+
+            var kind: ?[]const u8 = null;
+            var media_type: ?[]const u8 = null;
+            var description: ?[]const u8 = null;
+            var blurhash: ?[]const u8 = null;
+
+            if (item == .object) {
+                if (item.object.get("type")) |t| {
+                    if (t == .string and t.string.len > 0) kind = t.string;
+                }
+                if (item.object.get("mediaType")) |t| {
+                    if (t == .string and t.string.len > 0) media_type = t.string;
+                }
+                if (item.object.get("name")) |t| {
+                    if (t == .string and t.string.len > 0) description = t.string;
+                }
+                if (item.object.get("blurhash")) |t| {
+                    if (t == .string and t.string.len > 0) blurhash = t.string;
+                }
+            }
+
+            try out.append(alloc, .{
+                .url = url,
+                .kind = kind,
+                .media_type = media_type,
+                .description = description,
+                .blurhash = blurhash,
+            });
+        }
+    };
+
+    switch (val) {
+        .array => |arr| {
+            for (arr.items) |item| {
+                if (list.items.len >= max_attachments) break;
+                try helper.pushOne(allocator, &list, item);
+            }
+        },
+        else => try helper.pushOne(allocator, &list, val),
+    }
+
+    if (list.items.len == 0) return null;
+    const json = try std.json.Stringify.valueAlloc(allocator, list.items, .{});
+    return json;
+}
+
 fn noteFirstActorId(note: std.json.ObjectMap) ?[]const u8 {
     const v = note.get("attributedTo") orelse note.get("actor") orelse return null;
     return switch (v) {
@@ -203,6 +294,7 @@ const ParsedNote = struct {
     content_html: []const u8,
     created_at: []const u8,
     visibility: []const u8,
+    attachments_json: ?[]const u8,
     in_reply_to_uri: ?[]const u8,
 };
 
@@ -241,6 +333,8 @@ fn parseNoteDoc(allocator: std.mem.Allocator, body: []const u8) Error!?ParsedNot
         break :blk util_html.safeHtmlFromRemoteHtmlAlloc(allocator, c.string) catch "";
     };
 
+    const attachments_json = remoteAttachmentsJsonAlloc(allocator, obj) catch null;
+
     const in_reply_to_uri = blk: {
         const raw = noteInReplyToUri(obj) orelse break :blk null;
         const norm = stripQueryAndFragment(trimTrailingSlash(raw));
@@ -254,6 +348,7 @@ fn parseNoteDoc(allocator: std.mem.Allocator, body: []const u8) Error!?ParsedNot
         .content_html = content_html,
         .created_at = created_at,
         .visibility = noteVisibility(obj),
+        .attachments_json = attachments_json,
         .in_reply_to_uri = in_reply_to_uri,
     };
 }
@@ -303,7 +398,7 @@ pub fn backfillRemoteAncestors(
             actor.id,
             null,
             note.content_html,
-            null,
+            note.attachments_json,
             note.visibility,
             note.created_at,
         ) catch break;
@@ -361,7 +456,7 @@ pub fn ingestRemoteNoteByUri(
         actor.id,
         in_reply_to_id,
         note.content_html,
-        null,
+        note.attachments_json,
         note.visibility,
         note.created_at,
     ) catch return null;

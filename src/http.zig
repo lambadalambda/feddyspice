@@ -2601,7 +2601,7 @@ test "inbox: backfills missing remote ancestors on ingest" {
         .url = parent_uri,
         .response_status = .ok,
         .response_body =
-        \\{"@context":"https://www.w3.org/ns/activitystreams","id":"https://remote.test/notes/parent","type":"Note","attributedTo":"https://remote.test/users/bob","content":"<p>parent</p>","published":"2020-01-01T00:00:00.000Z","to":["https://www.w3.org/ns/activitystreams#Public"]}
+        \\{"@context":"https://www.w3.org/ns/activitystreams","id":"https://remote.test/notes/parent","type":"Note","attributedTo":"https://remote.test/users/bob","content":"<p>parent</p>","published":"2020-01-01T00:00:00.000Z","to":["https://www.w3.org/ns/activitystreams#Public"],"attachment":[{"type":"Image","mediaType":"image/png","url":"https://cdn.remote.test/a.png","name":"a"}]}
         ,
     });
 
@@ -2628,6 +2628,16 @@ test "inbox: backfills missing remote ancestors on ingest" {
     const stored_parent = (try remote_statuses.lookupByUri(&app_state.conn, a, parent_uri)).?;
     const stored_child = (try remote_statuses.lookupByUri(&app_state.conn, a, child_uri)).?;
     try std.testing.expectEqual(stored_parent.id, stored_child.in_reply_to_id.?);
+
+    try std.testing.expect(stored_parent.attachments_json != null);
+    var attachments = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, stored_parent.attachments_json.?, .{});
+    defer attachments.deinit();
+    try std.testing.expect(attachments.value == .array);
+    try std.testing.expectEqual(@as(usize, 1), attachments.value.array.items.len);
+    try std.testing.expectEqualStrings(
+        "https://cdn.remote.test/a.png",
+        attachments.value.array.items[0].object.get("url").?.string,
+    );
 
     const ctx_target = try std.fmt.allocPrint(a, "/api/v1/statuses/{d}/context", .{stored_child.id});
     const ctx_resp = handle(&app_state, a, .{
