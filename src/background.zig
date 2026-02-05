@@ -6,6 +6,8 @@ const db = @import("db.zig");
 const federation = @import("federation.zig");
 const jobs = @import("jobs.zig");
 const log = @import("log.zig");
+const masto = @import("http/mastodon.zig");
+const remote_actors = @import("remote_actors.zig");
 const statuses = @import("statuses.zig");
 const thread_backfill = @import("thread_backfill.zig");
 const users = @import("users.zig");
@@ -67,6 +69,17 @@ pub fn runJob(app_state: *app.App, allocator: std.mem.Allocator, job: jobs.Job) 
         },
         .backfill_thread => |j| {
             try thread_backfill.backfillRemoteAncestors(app_state, allocator, j.user_id, j.status_id, j.in_reply_to_uri);
+        },
+        .ingest_remote_note => |j| {
+            const res = try thread_backfill.ingestRemoteNoteByUri(app_state, allocator, j.user_id, j.note_uri, true);
+            if (res == null) return;
+            if (!res.?.was_new) return;
+
+            const actor = remote_actors.lookupById(&app_state.conn, allocator, res.?.status.remote_actor_id) catch return;
+            if (actor == null) return;
+            const payload = masto.makeRemoteStatusPayloadForViewer(app_state, allocator, actor.?, res.?.status, j.user_id);
+            const body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch return;
+            app_state.streaming.publishUpdate(j.user_id, body);
         },
     }
 }
@@ -200,6 +213,75 @@ pub fn backfillThread(
 
     var t = std.Thread.spawn(.{}, BackfillThreadJob.run, .{job}) catch |err| {
         app_state.logger.err("backfillThread: thread spawn failed err={any}", .{err});
+        return;
+    };
+    t.detach();
+}
+
+pub fn ingestRemoteNote(
+    app_state: *app.App,
+    allocator: std.mem.Allocator,
+    user_id: i64,
+    note_uri: []const u8,
+) void {
+    if (note_uri.len == 0) return;
+
+    switch (app_state.jobs_mode) {
+        .sync => {
+            const res = thread_backfill.ingestRemoteNoteByUri(app_state, allocator, user_id, note_uri, true) catch |err| {
+                app_state.logger.err("ingestRemoteNote: sync failed note_uri={s} err={any}", .{ note_uri, err });
+                return;
+            };
+            if (res == null or !res.?.was_new) return;
+
+            const actor = remote_actors.lookupById(&app_state.conn, allocator, res.?.status.remote_actor_id) catch return;
+            if (actor == null) return;
+            const payload = masto.makeRemoteStatusPayloadForViewer(app_state, allocator, actor.?, res.?.status, user_id);
+            const body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch return;
+            app_state.streaming.publishUpdate(user_id, body);
+            return;
+        },
+        .disabled => {
+            const uri_copy = app_state.allocator.dupe(u8, note_uri) catch return;
+            errdefer app_state.allocator.free(uri_copy);
+            app_state.jobs_queue.push(app_state.allocator, .{
+                .ingest_remote_note = .{
+                    .user_id = user_id,
+                    .note_uri = uri_copy,
+                },
+            }) catch {};
+            return;
+        },
+        .spawn => {},
+    }
+
+    if (jobs_db.enqueue(&app_state.conn, allocator, .{
+        .ingest_remote_note = .{
+            .user_id = user_id,
+            .note_uri = @constCast(note_uri),
+        },
+    }, .{})) |_| {
+        return;
+    } else |err| {
+        app_state.logger.err("ingestRemoteNote: enqueue failed note_uri={s} err={any}", .{ note_uri, err });
+        // Fallback to per-job thread execution.
+    }
+
+    const job = std.heap.page_allocator.create(IngestRemoteNoteJob) catch return;
+    errdefer std.heap.page_allocator.destroy(job);
+
+    const uri_copy = std.heap.page_allocator.dupe(u8, note_uri) catch return;
+    errdefer std.heap.page_allocator.free(uri_copy);
+
+    job.* = .{
+        .cfg = app_state.cfg,
+        .logger = app_state.logger,
+        .user_id = user_id,
+        .note_uri = uri_copy,
+    };
+
+    var t = std.Thread.spawn(.{}, IngestRemoteNoteJob.run, .{job}) catch |err| {
+        app_state.logger.err("ingestRemoteNote: thread spawn failed err={any}", .{err});
         return;
     };
     t.detach();
@@ -708,6 +790,57 @@ const BackfillThreadJob = struct {
             job.logger.err("BackfillThreadJob: failed status_id={d} err={any}", .{ job.status_id, err });
             return;
         };
+    }
+};
+
+const IngestRemoteNoteJob = struct {
+    cfg: config.Config,
+    logger: *log.Logger,
+    user_id: i64,
+    note_uri: []u8,
+
+    fn run(job: *@This()) void {
+        defer {
+            std.heap.page_allocator.free(job.note_uri);
+            std.heap.page_allocator.destroy(job);
+        }
+
+        var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+
+        var conn = db.Db.open(a, job.cfg.db_path) catch return;
+        defer conn.close();
+
+        var hub: streaming_hub.Hub = streaming_hub.Hub.init(std.heap.page_allocator);
+        defer hub.deinit();
+
+        var thread_app: app.App = .{
+            .allocator = a,
+            .cfg = job.cfg,
+            .conn = conn,
+            .logger = job.logger,
+            .jobs_mode = .sync,
+            .jobs_queue = .{},
+            .streaming = &hub,
+            .transport = undefined,
+            .null_transport = transport.NullTransport.init(),
+            .real_transport = transport.RealTransport.init(a, job.cfg) catch return,
+        };
+        thread_app.transport = thread_app.real_transport.transport();
+        defer thread_app.transport.deinit();
+
+        const res = thread_backfill.ingestRemoteNoteByUri(&thread_app, a, job.user_id, job.note_uri, true) catch |err| {
+            job.logger.err("IngestRemoteNoteJob: failed note_uri={s} err={any}", .{ job.note_uri, err });
+            return;
+        };
+        if (res == null or !res.?.was_new) return;
+
+        const actor = remote_actors.lookupById(&thread_app.conn, a, res.?.status.remote_actor_id) catch return;
+        if (actor == null) return;
+        const payload = masto.makeRemoteStatusPayloadForViewer(&thread_app, a, actor.?, res.?.status, job.user_id);
+        const body = std.json.Stringify.valueAlloc(a, payload, .{}) catch return;
+        thread_app.streaming.publishUpdate(job.user_id, body);
     }
 };
 

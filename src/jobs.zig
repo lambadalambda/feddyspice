@@ -30,6 +30,7 @@ pub const Job = union(enum) {
     deliver_status: DeliverStatus,
     deliver_delete: DeliverDelete,
     backfill_thread: BackfillThread,
+    ingest_remote_note: IngestRemoteNote,
 
     pub fn deinit(job: *Job, allocator: std.mem.Allocator) void {
         switch (job.*) {
@@ -44,6 +45,7 @@ pub const Job = union(enum) {
             .deliver_status => {},
             .deliver_delete => {},
             .backfill_thread => |*j| j.deinit(allocator),
+            .ingest_remote_note => |*j| j.deinit(allocator),
         }
         job.* = undefined;
     }
@@ -156,6 +158,16 @@ pub const BackfillThread = struct {
 
     pub fn deinit(self: *BackfillThread, allocator: std.mem.Allocator) void {
         allocator.free(self.in_reply_to_uri);
+        self.* = undefined;
+    }
+};
+
+pub const IngestRemoteNote = struct {
+    user_id: i64,
+    note_uri: []u8,
+
+    pub fn deinit(self: *IngestRemoteNote, allocator: std.mem.Allocator) void {
+        allocator.free(self.note_uri);
         self.* = undefined;
     }
 };

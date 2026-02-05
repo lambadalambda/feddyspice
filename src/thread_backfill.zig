@@ -11,6 +11,11 @@ const util_url = @import("util/url.zig");
 
 pub const Error = federation.Error || statuses.Error;
 
+pub const IngestResult = struct {
+    status: remote_statuses.RemoteStatus,
+    was_new: bool,
+};
+
 fn trimTrailingSlash(s: []const u8) []const u8 {
     if (s.len == 0) return s;
     if (s[s.len - 1] == '/') return s[0 .. s.len - 1];
@@ -308,6 +313,66 @@ pub fn backfillRemoteAncestors(
         cur_id = parent.id;
         next_uri_opt = note.in_reply_to_uri;
     }
+}
+
+pub fn ingestRemoteNoteByUri(
+    app_state: *app.App,
+    allocator: std.mem.Allocator,
+    user_id: i64,
+    note_uri_raw: []const u8,
+    require_public: bool,
+) Error!?IngestResult {
+    const note_uri_norm = stripQueryAndFragment(trimTrailingSlash(note_uri_raw));
+    if (!util_url.isHttpOrHttpsUrl(note_uri_norm)) return null;
+
+    if (remote_statuses.lookupByUriAny(&app_state.conn, allocator, note_uri_norm) catch null) |existing| {
+        return .{ .status = existing, .was_new = false };
+    }
+
+    const body = fetchActivityPubObjectBodyAlloc(app_state, allocator, note_uri_norm) catch return null;
+    if (util_json.maxNestingDepth(body) > app_state.cfg.json_max_nesting_depth) return null;
+    if (util_json.structuralTokenCount(body) > app_state.cfg.json_max_tokens) return null;
+
+    const note = (try parseNoteDoc(allocator, body)) orelse return null;
+    if (require_public and !(std.mem.eql(u8, note.visibility, "public") or std.mem.eql(u8, note.visibility, "unlisted"))) {
+        return null;
+    }
+
+    const actor = federation.ensureRemoteActorById(app_state, allocator, note.actor_id) catch return null;
+
+    const in_reply_to_id: ?i64 = blk: {
+        const raw = note.in_reply_to_uri orelse break :blk null;
+
+        if (localStatusIdFromIri(app_state, raw)) |local_id| {
+            const local = statuses.lookup(&app_state.conn, allocator, local_id) catch break :blk null;
+            if (local != null) break :blk local_id;
+        }
+
+        const remote = remote_statuses.lookupByUriAny(&app_state.conn, allocator, raw) catch break :blk null;
+        if (remote) |p| break :blk p.id;
+
+        break :blk null;
+    };
+
+    const created = remote_statuses.createIfNotExists(
+        &app_state.conn,
+        allocator,
+        note.id,
+        actor.id,
+        in_reply_to_id,
+        note.content_html,
+        null,
+        note.visibility,
+        note.created_at,
+    ) catch return null;
+
+    if (created.in_reply_to_id == null) {
+        if (note.in_reply_to_uri) |puri| {
+            try backfillRemoteAncestors(app_state, allocator, user_id, created.id, puri);
+        }
+    }
+
+    return .{ .status = created, .was_new = true };
 }
 
 test "parseNoteDoc extracts id, actor, and inReplyTo" {

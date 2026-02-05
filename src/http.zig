@@ -6972,6 +6972,95 @@ test "POST /users/:name/inbox Like shows up in GET /api/v1/statuses/:id/favourit
     try std.testing.expectEqualStrings("bob", acct0.get("username").?.string);
 }
 
+test "POST /users/:name/inbox Like of remote status from followed actor ingests the status and backfills its parent" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    var mock = transport.MockTransport.init(std.testing.allocator);
+    app_state.transport = mock.transport();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const remote_kp = try @import("crypto_rsa.zig").generateRsaKeyPairPem(a, 512);
+    const remote_key_id = "https://remote.test/users/bob#main-key";
+    const remote_actor_id = "https://remote.test/users/bob";
+
+    try remote_actors.upsert(&app_state.conn, .{
+        .id = remote_actor_id,
+        .inbox = "https://remote.test/users/bob/inbox",
+        .shared_inbox = null,
+        .preferred_username = "bob",
+        .domain = "remote.test",
+        .public_key_pem = remote_kp.public_key_pem,
+    });
+
+    _ = try follows.createPending(&app_state.conn, user_id, remote_actor_id, "https://remote.test/follows/1");
+    try std.testing.expect(try follows.markAcceptedByActivityId(&app_state.conn, "https://remote.test/follows/1"));
+
+    const author_actor_id = "https://other.test/users/carol";
+    try remote_actors.upsert(&app_state.conn, .{
+        .id = author_actor_id,
+        .inbox = "https://other.test/users/carol/inbox",
+        .shared_inbox = null,
+        .preferred_username = "carol",
+        .domain = "other.test",
+        .public_key_pem = remote_kp.public_key_pem,
+    });
+
+    const child_uri = "https://other.test/notes/child";
+    const parent_uri = "https://other.test/notes/parent";
+
+    try mock.pushExpected(.{
+        .method = .GET,
+        .url = child_uri,
+        .response_status = .ok,
+        .response_body =
+        \\{"@context":"https://www.w3.org/ns/activitystreams","id":"https://other.test/notes/child","type":"Note","attributedTo":"https://other.test/users/carol","content":"<p>child</p>","published":"2020-01-01T00:00:00.000Z","inReplyTo":"https://other.test/notes/parent","to":["https://www.w3.org/ns/activitystreams#Public"]}
+        ,
+    });
+    try mock.pushExpected(.{
+        .method = .GET,
+        .url = parent_uri,
+        .response_status = .ok,
+        .response_body =
+        \\{"@context":"https://www.w3.org/ns/activitystreams","id":"https://other.test/notes/parent","type":"Note","attributedTo":"https://other.test/users/carol","content":"<p>parent</p>","published":"2020-01-01T00:00:00.000Z","to":["https://www.w3.org/ns/activitystreams#Public"]}
+        ,
+    });
+
+    const like_body = try std.fmt.allocPrint(
+        a,
+        \\{{"@context":"https://www.w3.org/ns/activitystreams","id":"https://remote.test/likes/1","type":"Like","actor":"{s}","object":"{s}"}}
+    ,
+        .{ remote_actor_id, child_uri },
+    );
+
+    const inbox_req = try signedInboxRequest(
+        a,
+        "example.test",
+        "/users/alice/inbox",
+        like_body,
+        remote_key_id,
+        remote_kp.private_key_pem,
+    );
+    const inbox_resp = handle(&app_state, a, inbox_req);
+    try std.testing.expectEqual(std.http.Status.accepted, inbox_resp.status);
+
+    try background.runQueued(&app_state, a);
+
+    const stored_parent = (try remote_statuses.lookupByUri(&app_state.conn, a, parent_uri)).?;
+    const stored_child = (try remote_statuses.lookupByUri(&app_state.conn, a, child_uri)).?;
+    try std.testing.expectEqual(stored_parent.id, stored_child.in_reply_to_id.?);
+
+    try std.testing.expectEqual(@as(usize, 2), mock.requests.items.len);
+    try std.testing.expectEqualStrings(child_uri, mock.requests.items[0].url);
+    try std.testing.expectEqualStrings(parent_uri, mock.requests.items[1].url);
+}
+
 test "POST /users/:name/inbox Announce shows up in GET /api/v1/statuses/:id/reblogged_by" {
     var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
     defer app_state.deinit();

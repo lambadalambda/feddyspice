@@ -291,6 +291,14 @@ fn encodeJob(allocator: std.mem.Allocator, job: jobs.Job) Error!EncodedJob {
                 .dedupe_key = try std.fmt.allocPrint(allocator, "backfill_thread:{d}", .{j.status_id}),
             };
         },
+        .ingest_remote_note => |j| {
+            const payload = .{ .user_id = j.user_id, .note_uri = j.note_uri };
+            return .{
+                .job_type = "ingest_remote_note",
+                .payload_json = try std.json.Stringify.valueAlloc(allocator, payload, .{}),
+                .dedupe_key = try std.fmt.allocPrint(allocator, "ingest_remote_note:{s}", .{j.note_uri}),
+            };
+        },
     }
 }
 
@@ -463,6 +471,20 @@ fn decodeJob(allocator: std.mem.Allocator, job_type: []const u8, payload_json: [
                 .user_id = user_id_val.integer,
                 .status_id = status_id_val.integer,
                 .in_reply_to_uri = try allocator.dupe(u8, in_reply_to_uri_val.string),
+            },
+        };
+    }
+
+    if (std.mem.eql(u8, job_type, "ingest_remote_note")) {
+        const user_id_val = o.get("user_id") orelse return error.InvalidPayload;
+        const note_uri_val = o.get("note_uri") orelse return error.InvalidPayload;
+        if (user_id_val != .integer) return error.InvalidPayload;
+        if (note_uri_val != .string) return error.InvalidPayload;
+
+        return .{
+            .ingest_remote_note = .{
+                .user_id = user_id_val.integer,
+                .note_uri = try allocator.dupe(u8, note_uri_val.string),
             },
         };
     }

@@ -1338,7 +1338,18 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
         const trimmed = stripQueryAndFragment(trimTrailingSlash(object_iri));
         if (!util_url.isHttpOrHttpsUrl(trimmed)) return .{ .status = .accepted, .body = "ignored\n" };
 
-        const status_id = localStatusIdFromIri(app_state, trimmed) orelse return .{ .status = .accepted, .body = "ignored\n" };
+        const status_id_opt = localStatusIdFromIri(app_state, trimmed);
+        if (status_id_opt == null) {
+            const f = follows.lookupByUserAndRemoteActorId(&app_state.conn, allocator, user.?.id, remote_actor.?.id) catch
+                return .{ .status = .internal_server_error, .body = "internal server error\n" };
+            if (f == null or f.?.state != .accepted) return .{ .status = .accepted, .body = "ignored\n" };
+
+            background.ingestRemoteNote(app_state, allocator, user.?.id, trimmed);
+            dedupe_keep = true;
+            return .{ .status = .accepted, .body = "ok\n" };
+        }
+
+        const status_id = status_id_opt.?;
 
         const st = statuses.lookup(&app_state.conn, allocator, status_id) catch
             return .{ .status = .internal_server_error, .body = "internal server error\n" };
