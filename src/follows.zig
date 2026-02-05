@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const db = @import("db.zig");
+const util_url = @import("util/url.zig");
 
 pub const Error = db.Error || std.mem.Allocator.Error;
 
@@ -134,6 +135,35 @@ pub fn markAcceptedByActivityId(conn: *db.Db, follow_activity_id: []const u8) db
     return conn.changes() > 0;
 }
 
+pub fn markAcceptedByActivityIdAny(conn: *db.Db, allocator: std.mem.Allocator, follow_activity_id: []const u8) Error!bool {
+    if (try markAcceptedByActivityId(conn, follow_activity_id)) return true;
+
+    const trimmed = util_url.trimTrailingSlash(follow_activity_id);
+    if (!std.mem.eql(u8, trimmed, follow_activity_id)) {
+        if (try markAcceptedByActivityId(conn, trimmed)) return true;
+    } else {
+        const with_slash = try std.fmt.allocPrint(allocator, "{s}/", .{follow_activity_id});
+        defer allocator.free(with_slash);
+        if (try markAcceptedByActivityId(conn, with_slash)) return true;
+    }
+
+    const stripped = util_url.stripQueryAndFragment(follow_activity_id);
+    if (!std.mem.eql(u8, stripped, follow_activity_id)) {
+        if (try markAcceptedByActivityId(conn, stripped)) return true;
+
+        const stripped_trimmed = util_url.trimTrailingSlash(stripped);
+        if (!std.mem.eql(u8, stripped_trimmed, stripped)) {
+            if (try markAcceptedByActivityId(conn, stripped_trimmed)) return true;
+        } else {
+            const with_slash = try std.fmt.allocPrint(allocator, "{s}/", .{stripped});
+            defer allocator.free(with_slash);
+            if (try markAcceptedByActivityId(conn, with_slash)) return true;
+        }
+    }
+
+    return false;
+}
+
 pub fn countAccepted(conn: *db.Db, user_id: i64) db.Error!i64 {
     var stmt = try conn.prepareZ("SELECT COUNT(*) FROM follows WHERE user_id = ?1 AND state = 'accepted';\x00");
     defer stmt.finalize();
@@ -214,6 +244,55 @@ test "createPending + markAcceptedByActivityId" {
     const ids = try listAcceptedRemoteActorIds(&conn, arena.allocator(), user_id, 10);
     try std.testing.expectEqual(@as(usize, 1), ids.len);
     try std.testing.expectEqualStrings("https://remote.test/users/bob", ids[0]);
+}
+
+test "markAcceptedByActivityIdAny handles slash and query/fragment variants" {
+    var conn = try db.Db.openZ(":memory:");
+    defer conn.close();
+
+    try @import("migrations.zig").migrate(&conn);
+
+    const params: @import("password.zig").Params = .{ .t = 1, .m = 8, .p = 1 };
+    const user_id = try @import("users.zig").create(&conn, std.testing.allocator, "alice", "password", params);
+
+    try @import("remote_actors.zig").upsert(&conn, .{
+        .id = "https://remote.test/users/bob",
+        .inbox = "https://remote.test/users/bob/inbox",
+        .shared_inbox = null,
+        .preferred_username = "bob",
+        .domain = "remote.test",
+        .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
+    });
+    try @import("remote_actors.zig").upsert(&conn, .{
+        .id = "https://remote.test/users/carol",
+        .inbox = "https://remote.test/users/carol/inbox",
+        .shared_inbox = null,
+        .preferred_username = "carol",
+        .domain = "remote.test",
+        .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
+    });
+    try @import("remote_actors.zig").upsert(&conn, .{
+        .id = "https://remote.test/users/dan",
+        .inbox = "https://remote.test/users/dan/inbox",
+        .shared_inbox = null,
+        .preferred_username = "dan",
+        .domain = "remote.test",
+        .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
+    });
+
+    _ = try createPending(&conn, user_id, "https://remote.test/users/bob", "http://example.test/follows/1");
+    _ = try createPending(&conn, user_id, "https://remote.test/users/carol", "http://example.test/follows/2/");
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    try std.testing.expect(try markAcceptedByActivityIdAny(&conn, a, "http://example.test/follows/1/"));
+    try std.testing.expect(try markAcceptedByActivityIdAny(&conn, a, "http://example.test/follows/2"));
+    try std.testing.expect(!try markAcceptedByActivityIdAny(&conn, a, "http://example.test/follows/404"));
+
+    _ = try createPending(&conn, user_id, "https://remote.test/users/dan", "http://example.test/follows/3");
+    try std.testing.expect(try markAcceptedByActivityIdAny(&conn, a, "http://example.test/follows/3?x=1#y"));
 }
 
 test "lookupByUserAndRemoteActorId + deleteByUserAndRemoteActorId" {

@@ -1356,21 +1356,8 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
             else => return .{ .status = .bad_request, .body = "invalid object\n" },
         }
 
-        const changed = follows.markAcceptedByActivityId(&app_state.conn, follow_activity_id) catch
+        _ = follows.markAcceptedByActivityIdAny(&app_state.conn, allocator, follow_activity_id) catch
             return .{ .status = .internal_server_error, .body = "internal server error\n" };
-        if (!changed) {
-            const trimmed = util_url.trimTrailingSlash(follow_activity_id);
-            if (!std.mem.eql(u8, trimmed, follow_activity_id)) {
-                _ = follows.markAcceptedByActivityId(&app_state.conn, trimmed) catch
-                    return .{ .status = .internal_server_error, .body = "internal server error\n" };
-            } else {
-                const with_slash = std.fmt.allocPrint(allocator, "{s}/", .{follow_activity_id}) catch null;
-                if (with_slash) |alt_id| {
-                    _ = follows.markAcceptedByActivityId(&app_state.conn, alt_id) catch
-                        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-                }
-            }
-        }
 
         dedupe_keep = true;
         return .{ .status = .accepted, .body = "ok\n" };
