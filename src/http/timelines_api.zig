@@ -253,7 +253,14 @@ pub fn homeTimeline(app_state: *app.App, allocator: std.mem.Allocator, req: http
         };
     }
 
-    const remote_list = remote_statuses.listLatestBeforeCreatedAt(&app_state.conn, allocator, limit, before_created_at, before_id) catch
+    const remote_list = remote_statuses.listLatestBeforeCreatedAtFromAcceptedFollows(
+        &app_state.conn,
+        allocator,
+        info.?.user_id,
+        limit,
+        before_created_at,
+        before_id,
+    ) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
 
     for (remote_list) |st| {

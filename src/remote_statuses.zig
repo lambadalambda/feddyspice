@@ -424,6 +424,90 @@ pub fn listLatestBeforeCreatedAt(
     return out.toOwnedSlice(allocator);
 }
 
+pub fn listLatestBeforeCreatedAtFromAcceptedFollows(
+    conn: *db.Db,
+    allocator: std.mem.Allocator,
+    user_id: i64,
+    limit: usize,
+    before_created_at: ?[]const u8,
+    before_id: ?i64,
+) Error![]RemoteStatus {
+    const lim: i64 = @intCast(@min(limit, 200));
+
+    var out: std.ArrayListUnmanaged(RemoteStatus) = .empty;
+    errdefer out.deinit(allocator);
+
+    if (before_created_at == null) {
+        var stmt = try conn.prepareZ(
+            "SELECT rs.id, rs.remote_uri, rs.remote_actor_id, rs.content_html, rs.visibility, rs.created_at, rs.deleted_at, rs.attachments_json, rs.in_reply_to_id\n" ++
+                "FROM remote_statuses rs\n" ++
+                "JOIN follows f ON f.remote_actor_id = rs.remote_actor_id\n" ++
+                "WHERE rs.deleted_at IS NULL AND f.user_id = ?1 AND f.state = 'accepted'\n" ++
+                "ORDER BY rs.created_at DESC, rs.id DESC LIMIT ?2;\x00",
+        );
+        defer stmt.finalize();
+        try stmt.bindInt64(1, user_id);
+        try stmt.bindInt64(2, lim);
+
+        while (true) {
+            switch (try stmt.step()) {
+                .done => break,
+                .row => {
+                    try out.append(allocator, .{
+                        .id = stmt.columnInt64(0),
+                        .remote_uri = try allocator.dupe(u8, stmt.columnText(1)),
+                        .remote_actor_id = try allocator.dupe(u8, stmt.columnText(2)),
+                        .in_reply_to_id = if (stmt.columnType(8) == .null) null else stmt.columnInt64(8),
+                        .content_html = try allocator.dupe(u8, stmt.columnText(3)),
+                        .attachments_json = if (stmt.columnType(7) == .null) null else try allocator.dupe(u8, stmt.columnText(7)),
+                        .visibility = try allocator.dupe(u8, stmt.columnText(4)),
+                        .created_at = try allocator.dupe(u8, stmt.columnText(5)),
+                        .deleted_at = if (stmt.columnType(6) == .null) null else try allocator.dupe(u8, stmt.columnText(6)),
+                    });
+                },
+            }
+        }
+
+        return out.toOwnedSlice(allocator);
+    }
+
+    const anchor_id = before_id orelse std.math.maxInt(i64);
+
+    var stmt = try conn.prepareZ(
+        "SELECT rs.id, rs.remote_uri, rs.remote_actor_id, rs.content_html, rs.visibility, rs.created_at, rs.deleted_at, rs.attachments_json, rs.in_reply_to_id\n" ++
+            "FROM remote_statuses rs\n" ++
+            "JOIN follows f ON f.remote_actor_id = rs.remote_actor_id\n" ++
+            "WHERE rs.deleted_at IS NULL AND f.user_id = ?1 AND f.state = 'accepted' AND (rs.created_at < ?2 OR (rs.created_at = ?2 AND rs.id < ?3))\n" ++
+            "ORDER BY rs.created_at DESC, rs.id DESC LIMIT ?4;\x00",
+    );
+    defer stmt.finalize();
+    try stmt.bindInt64(1, user_id);
+    try stmt.bindText(2, before_created_at.?);
+    try stmt.bindInt64(3, anchor_id);
+    try stmt.bindInt64(4, lim);
+
+    while (true) {
+        switch (try stmt.step()) {
+            .done => break,
+            .row => {
+                try out.append(allocator, .{
+                    .id = stmt.columnInt64(0),
+                    .remote_uri = try allocator.dupe(u8, stmt.columnText(1)),
+                    .remote_actor_id = try allocator.dupe(u8, stmt.columnText(2)),
+                    .in_reply_to_id = if (stmt.columnType(8) == .null) null else stmt.columnInt64(8),
+                    .content_html = try allocator.dupe(u8, stmt.columnText(3)),
+                    .attachments_json = if (stmt.columnType(7) == .null) null else try allocator.dupe(u8, stmt.columnText(7)),
+                    .visibility = try allocator.dupe(u8, stmt.columnText(4)),
+                    .created_at = try allocator.dupe(u8, stmt.columnText(5)),
+                    .deleted_at = if (stmt.columnType(6) == .null) null else try allocator.dupe(u8, stmt.columnText(6)),
+                });
+            },
+        }
+    }
+
+    return out.toOwnedSlice(allocator);
+}
+
 test "createIfNotExists assigns negative ids" {
     var conn = try db.Db.openZ(":memory:");
     defer conn.close();

@@ -3884,6 +3884,9 @@ test "timelines: home timeline excludes direct statuses" {
         .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
     });
 
+    _ = try follows.createPending(&app_state.conn, user_id, remote_actor_id, "http://example.test/follows/1");
+    try std.testing.expect(try follows.markAcceptedByActivityId(&app_state.conn, "http://example.test/follows/1"));
+
     _ = try remote_statuses.createIfNotExists(
         &app_state.conn,
         a,
@@ -3944,6 +3947,118 @@ test "timelines: home timeline excludes direct statuses" {
     try std.testing.expect(saw_lpub);
     try std.testing.expect(saw_rpub);
     try std.testing.expect(saw_rpriv);
+}
+
+test "timelines: home timeline remote statuses are limited to follows; public timeline is not" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const app_creds = try oauth.createApp(
+        &app_state.conn,
+        a,
+        "pl-fe",
+        "urn:ietf:wg:oauth:2.0:oob",
+        "read write",
+        "",
+    );
+    const token = try oauth.createAccessToken(&app_state.conn, a, app_creds.id, user_id, "read write");
+    const auth_header = try std.fmt.allocPrint(a, "Bearer {s}", .{token});
+
+    _ = try statuses.create(&app_state.conn, a, user_id, "Lpub", "public", null);
+
+    const bob_id = "https://remote.test/users/bob";
+    const charlie_id = "https://remote2.test/users/charlie";
+
+    try remote_actors.upsert(&app_state.conn, .{
+        .id = bob_id,
+        .inbox = "https://remote.test/users/bob/inbox",
+        .shared_inbox = null,
+        .preferred_username = "bob",
+        .domain = "remote.test",
+        .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
+    });
+    try remote_actors.upsert(&app_state.conn, .{
+        .id = charlie_id,
+        .inbox = "https://remote2.test/users/charlie/inbox",
+        .shared_inbox = null,
+        .preferred_username = "charlie",
+        .domain = "remote2.test",
+        .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
+    });
+
+    _ = try follows.createPending(&app_state.conn, user_id, bob_id, "http://example.test/follows/1");
+    try std.testing.expect(try follows.markAcceptedByActivityId(&app_state.conn, "http://example.test/follows/1"));
+
+    _ = try remote_statuses.createIfNotExists(
+        &app_state.conn,
+        a,
+        "https://remote.test/notes/1",
+        bob_id,
+        null,
+        "<p>Bob</p>",
+        null,
+        "public",
+        "2999-01-01T00:00:00.000Z",
+    );
+    _ = try remote_statuses.createIfNotExists(
+        &app_state.conn,
+        a,
+        "https://remote2.test/notes/1",
+        charlie_id,
+        null,
+        "<p>Charlie</p>",
+        null,
+        "public",
+        "2999-01-01T00:00:01.000Z",
+    );
+
+    const home_resp = handle(&app_state, a, .{
+        .method = .GET,
+        .target = "/api/v1/timelines/home",
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, home_resp.status);
+
+    var home_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, home_resp.body, .{});
+    defer home_json.deinit();
+    try std.testing.expect(home_json.value == .array);
+
+    var saw_bob: bool = false;
+    var saw_charlie: bool = false;
+    for (home_json.value.array.items) |it| {
+        const content = it.object.get("content").?.string;
+        if (std.mem.eql(u8, content, "<p>Bob</p>")) saw_bob = true;
+        if (std.mem.eql(u8, content, "<p>Charlie</p>")) saw_charlie = true;
+    }
+    try std.testing.expect(saw_bob);
+    try std.testing.expect(!saw_charlie);
+
+    const public_resp = handle(&app_state, a, .{
+        .method = .GET,
+        .target = "/api/v1/timelines/public",
+    });
+    try std.testing.expectEqual(std.http.Status.ok, public_resp.status);
+
+    var public_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, public_resp.body, .{});
+    defer public_json.deinit();
+    try std.testing.expect(public_json.value == .array);
+
+    saw_bob = false;
+    saw_charlie = false;
+    for (public_json.value.array.items) |it| {
+        const content = it.object.get("content").?.string;
+        if (std.mem.eql(u8, content, "<p>Bob</p>")) saw_bob = true;
+        if (std.mem.eql(u8, content, "<p>Charlie</p>")) saw_charlie = true;
+    }
+    try std.testing.expect(saw_bob);
+    try std.testing.expect(saw_charlie);
 }
 
 test "timelines: list/link placeholders return empty arrays" {
@@ -4457,6 +4572,9 @@ test "remote statuses: appear in home timeline and can be fetched" {
         .domain = "remote.test",
         .public_key_pem = remote_kp.public_key_pem,
     });
+
+    _ = try follows.createPending(&app_state.conn, user_id, "https://remote.test/users/bob", "http://example.test/follows/1");
+    try std.testing.expect(try follows.markAcceptedByActivityId(&app_state.conn, "http://example.test/follows/1"));
 
     const inbox_body =
         \\{"@context":"https://www.w3.org/ns/activitystreams","type":"Create","actor":"https://remote.test/users/bob","object":{"id":"https://remote.test/notes/1","type":"Note","content":"<p>Remote</p>","published":"2999-01-01T00:00:00.000Z"}}
