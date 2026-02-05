@@ -6,6 +6,7 @@ const net = std.net;
 const routes = @import("http.zig");
 const app = @import("app.zig");
 const form = @import("form.zig");
+const common = @import("http/common.zig");
 const log = @import("log.zig");
 const oauth = @import("oauth.zig");
 const streaming_hub = @import("streaming_hub.zig");
@@ -39,7 +40,7 @@ pub fn serveOnce(app_state: *app.App, listener: *net.Server) !void {
 
     const method = request.head.method;
     const target = request.head.target;
-    const path = targetPath(target);
+    const path = common.targetPath(target);
     const content_type = request.head.content_type;
 
     var host_hdr: ?[]const u8 = null;
@@ -101,7 +102,7 @@ pub fn serveOnce(app_state: *app.App, listener: *net.Server) !void {
     const alloc = arena.allocator();
 
     if (isStreamingWebSocketRequest(method, path, upgrade_hdr, connection_hdr, sec_ws_key, sec_ws_version)) {
-        const q = targetQuery(target);
+        const q = common.queryString(target);
         var params = form.parse(alloc, q) catch form.Form{ .map = .empty };
         const stream_raw = params.get("stream") orelse "user";
 
@@ -115,7 +116,7 @@ pub fn serveOnce(app_state: *app.App, listener: *net.Server) !void {
         }
 
         if (info == null) {
-            if (bearerToken(authorization)) |token_auth| {
+            if (common.bearerToken(authorization)) |token_auth| {
                 if (token_auth.len > 0) info = oauth.verifyAccessToken(&app_state.conn, alloc, token_auth) catch null;
             }
         }
@@ -252,28 +253,10 @@ pub fn serveOnce(app_state: *app.App, listener: *net.Server) !void {
     logAccess(app_state, conn.address, remote_override, method, target, resp.status, start_us);
 }
 
-fn targetPath(target: []const u8) []const u8 {
-    if (std.mem.indexOfScalar(u8, target, '?')) |idx| return target[0..idx];
-    return target;
-}
-
 fn sanitizeTargetForLog(target: []const u8) []const u8 {
-    const path = targetPath(target);
+    const path = common.targetPath(target);
     if (std.mem.startsWith(u8, path, "/media/")) return "/media/<token>";
     return path;
-}
-
-fn targetQuery(target: []const u8) []const u8 {
-    const idx = std.mem.indexOfScalar(u8, target, '?') orelse return "";
-    return target[idx + 1 ..];
-}
-
-fn bearerToken(authorization: ?[]const u8) ?[]const u8 {
-    const hdr = authorization orelse return null;
-    const prefix = "Bearer ";
-    if (hdr.len < prefix.len) return null;
-    if (!std.ascii.eqlIgnoreCase(hdr[0..prefix.len], prefix)) return null;
-    return std.mem.trim(u8, hdr[prefix.len..], " \t");
 }
 
 fn isStreamingWebSocketRequest(

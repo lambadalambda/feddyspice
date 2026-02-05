@@ -153,6 +153,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - SQLite: all connections now enable foreign keys, and file-backed DBs attempt to use WAL (`journal_mode=WAL`, `synchronous=NORMAL`) for better concurrency.
 - Server: request bodies are now read even when `Content-Length` is missing (chunked), and body read failures return clear 4xx/5xx instead of silently becoming empty.
 - Background: `.sync` job execution now logs federation delivery failures instead of silently ignoring them.
+- DRY: `src/server.zig` now reuses `src/http/common.zig` helpers for parsing request targets and bearer tokens.
 
 ### Fixed
 

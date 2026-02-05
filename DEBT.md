@@ -21,7 +21,7 @@ This file tracks “good future refactors” and known risks. Add items whenever
 - [ ] DRY multipart parsing: extract shared multipart iterator used by `parseMultipart`, `parseMultipartWithFile`, `parseMultipartWithFiles` (avoid subtle behavior drift).
 - [x] Inbox DRY: factor out a shared `trimTrailingSlash`/`stripQueryAndFragment` comparison helper (remove local `trimSlash` copies in `src/http/activitypub_api.zig`).
 - [x] Inbox DRY: add `follows.markAcceptedByActivityIdAny` (slash/query/fragment variants) to replace manual “try trimmed / with slash” logic.
-- [ ] Server DRY: unify `bearerToken`/`targetPath` helpers between `src/server.zig` and `src/http/common.zig` (avoid divergent behavior).
+- [x] Server DRY: unify `bearerToken`/`targetPath` helpers between `src/server.zig` and `src/http/common.zig` (avoid divergent behavior).
 
 ## Performance / robustness
 
