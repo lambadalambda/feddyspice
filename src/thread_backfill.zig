@@ -7,6 +7,7 @@ const statuses = @import("statuses.zig");
 const transport = @import("transport.zig");
 const util_json = @import("util/json.zig");
 const util_local_iri = @import("util/local_iri.zig");
+const util_uri = @import("util/uri.zig");
 const util_url = @import("util/url.zig");
 
 pub const Error = remote_note_ingest.Error;
@@ -16,22 +17,9 @@ pub const IngestResult = struct {
     was_new: bool,
 };
 
-fn hostHeaderAllocForUri(allocator: std.mem.Allocator, uri: std.Uri) ![]u8 {
-    var host_buf: [std.Uri.host_name_max]u8 = undefined;
-    const host = uri.getHost(&host_buf) catch return error.RemoteFetchFailed;
-
-    const default_port: u16 = if (std.ascii.eqlIgnoreCase(uri.scheme, "http")) 80 else 443;
-
-    if (uri.port == null) return allocator.dupe(u8, host);
-    const port = uri.port.?;
-    if (port == default_port) return allocator.dupe(u8, host);
-
-    return std.fmt.allocPrint(allocator, "{s}:{d}", .{ host, port });
-}
-
 fn fetchActivityPubObjectBodyAlloc(app_state: *app.App, allocator: std.mem.Allocator, url_str: []const u8) Error![]u8 {
     const uri = try std.Uri.parse(url_str);
-    const host_header = try hostHeaderAllocForUri(allocator, uri);
+    const host_header = util_uri.hostHeaderAllocForUri(allocator, uri) catch return error.RemoteFetchFailed;
 
     const resp = try app_state.transport.fetch(allocator, .{
         .url = url_str,

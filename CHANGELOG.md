@@ -148,6 +148,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - DRY: centralized URL normalization helpers (`trimTrailingSlash`, `stripQueryAndFragment`) in `src/util/url.zig`.
 - DRY: unified remote ActivityPub Note ingestion across inbox and backfill via `src/remote_note_ingest.zig` (shared parsing, visibility, attachments, reply mapping).
 - Inbox: use `src/util/url.zig` `trimTrailingSlash` for all trailing-slash comparisons (remove local `trimSlash` helpers).
+- DRY: centralize outbound Host header generation for remote fetches in `src/util/uri.zig` (federation + thread backfill).
 
 ### Fixed
 

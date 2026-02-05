@@ -16,6 +16,7 @@ const remote_statuses = @import("remote_statuses.zig");
 const statuses = @import("statuses.zig");
 const status_recipients = @import("status_recipients.zig");
 const transport = @import("transport.zig");
+const util_uri = @import("util/uri.zig");
 const url = @import("util/url.zig");
 const users = @import("users.zig");
 
@@ -24,6 +25,7 @@ pub const Error =
     transport.Error ||
     std.json.ParseError(std.json.Scanner) ||
     std.Uri.ParseError ||
+    util_uri.Error ||
     actor_keys.Error ||
     follows.Error ||
     followers.Error ||
@@ -96,15 +98,6 @@ fn parseHandle(handle: []const u8) Error!ParsedHandle {
     }
 
     return .{ .username = username, .host = host_port, .port = null };
-}
-
-fn hostHeaderAlloc(allocator: std.mem.Allocator, host: []const u8, port: ?u16, scheme: config.Scheme) ![]u8 {
-    const default_port: u16 = switch (scheme) {
-        .http => 80,
-        .https => 443,
-    };
-    if (port == null or port.? == default_port) return allocator.dupe(u8, host);
-    return std.fmt.allocPrint(allocator, "{s}:{d}", .{ host, port.? });
 }
 
 fn baseUrlAlloc(app_state: *app.App, allocator: std.mem.Allocator) ![]u8 {
@@ -183,7 +176,6 @@ const SignedDelivery = struct {
 };
 
 fn signInboxPost(
-    app_state: *app.App,
     allocator: std.mem.Allocator,
     private_key_pem: []const u8,
     key_id: []const u8,
@@ -195,7 +187,7 @@ fn signInboxPost(
 
     const inbox_host_part = inbox_uri.host orelse return error.FollowSendFailed;
     const inbox_host = try inbox_host_part.toRawMaybeAlloc(allocator);
-    const inbox_host_header = try hostHeaderAlloc(allocator, inbox_host, inbox_uri.port, app_state.cfg.scheme);
+    const inbox_host_header = try util_uri.hostHeaderAlloc(allocator, inbox_host, inbox_uri.port, inbox_uri.scheme);
 
     const signed = try http_signatures.signRequest(
         allocator,
@@ -252,7 +244,7 @@ fn deliverSignedInboxPostOkDiscardBody(
     inbox_url: []const u8,
     body: []const u8,
 ) Error!void {
-    const delivery = try signInboxPost(app_state, allocator, private_key_pem, key_id, inbox_url, body);
+    const delivery = try signInboxPost(allocator, private_key_pem, key_id, inbox_url, body);
     const resp = try fetchSignedInboxPost(app_state, allocator, inbox_url, delivery.inbox_host_header, delivery.signed, body);
     allocator.free(resp.body);
     if (resp.status.class() != .success) return error.FollowSendFailed;
@@ -381,7 +373,7 @@ pub fn ensureRemoteActorById(app_state: *app.App, allocator: std.mem.Allocator, 
 
     const actor_uri = try std.Uri.parse(actor_id);
     const host = try actor_uri.host.?.toRawMaybeAlloc(allocator);
-    const host_header = try hostHeaderAlloc(allocator, host, actor_uri.port, app_state.cfg.scheme);
+    const host_header = try util_uri.hostHeaderAlloc(allocator, host, actor_uri.port, actor_uri.scheme);
 
     const actor_body = try fetchBodySuccessAlloc(app_state, allocator, .{
         .url = actor_id,
@@ -522,7 +514,7 @@ fn directRecipientActorIdsAlloc(app_state: *app.App, allocator: std.mem.Allocato
 pub fn resolveRemoteActorByHandle(app_state: *app.App, allocator: std.mem.Allocator, handle: []const u8) Error!remote_actors.RemoteActor {
     const remote = try parseHandle(handle);
 
-    const host_header = try hostHeaderAlloc(allocator, remote.host, remote.port, app_state.cfg.scheme);
+    const host_header = try util_uri.hostHeaderAlloc(allocator, remote.host, remote.port, @tagName(app_state.cfg.scheme));
 
     const webfinger_url = std.fmt.allocPrint(
         allocator,
@@ -548,7 +540,7 @@ pub fn resolveRemoteActorByHandle(app_state: *app.App, allocator: std.mem.Alloca
 
     const actor_uri = try std.Uri.parse(actor_id);
     const actor_host = try actor_uri.host.?.toRawMaybeAlloc(allocator);
-    const actor_host_header = try hostHeaderAlloc(allocator, actor_host, actor_uri.port, app_state.cfg.scheme);
+    const actor_host_header = try util_uri.hostHeaderAlloc(allocator, actor_host, actor_uri.port, actor_uri.scheme);
 
     const actor_body = try fetchBodySuccessAlloc(app_state, allocator, .{
         .url = actor_id,
@@ -616,7 +608,7 @@ pub fn sendFollowActivity(
     const inbox_url = deliveryInboxUrl(actor);
     const keys = try actor_keys.ensureForUser(&app_state.conn, allocator, user_id);
 
-    const delivery = try signInboxPost(app_state, allocator, keys.private_key_pem, key_id, inbox_url, follow_body);
+    const delivery = try signInboxPost(allocator, keys.private_key_pem, key_id, inbox_url, follow_body);
     const resp = try fetchSignedInboxPost(app_state, allocator, inbox_url, delivery.inbox_host_header, delivery.signed, follow_body);
     defer allocator.free(resp.body);
 
@@ -1886,9 +1878,6 @@ fn headerValue(headers: []const std.http.Header, name: []const u8) ?[]const u8 {
 }
 
 test "signInboxPost includes query in request-target" {
-    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
-    defer app_state.deinit();
-
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -1897,14 +1886,7 @@ test "signInboxPost includes query in request-target" {
     const body = "{\"hello\":\"world\"}";
     const key_id = "http://example.test/users/alice#main-key";
 
-    const delivery = try signInboxPost(
-        &app_state,
-        a,
-        kp.private_key_pem,
-        key_id,
-        "http://remote.test:8080/inbox?x=1",
-        body,
-    );
+    const delivery = try signInboxPost(a, kp.private_key_pem, key_id, "http://remote.test:8080/inbox?x=1", body);
 
     try std.testing.expectEqualStrings("/inbox?x=1", delivery.inbox_target);
 
