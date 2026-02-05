@@ -377,7 +377,7 @@ fn jsonFirstUrlAlloc(allocator: std.mem.Allocator, val: std.json.Value) std.mem.
 }
 
 pub fn ensureRemoteActorById(app_state: *app.App, allocator: std.mem.Allocator, actor_id: []const u8) Error!remote_actors.RemoteActor {
-    if (try remote_actors.lookupById(&app_state.conn, allocator, actor_id)) |existing| return existing;
+    if (try remote_actors.lookupByIdAny(&app_state.conn, allocator, actor_id)) |existing| return existing;
 
     const actor_uri = try std.Uri.parse(actor_id);
     const host = try actor_uri.host.?.toRawMaybeAlloc(allocator);
