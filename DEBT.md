@@ -19,7 +19,7 @@ This file tracks “good future refactors” and known risks. Add items whenever
 - [x] Unify remote Note ingestion into a single entrypoint used by both inbox-ingested and fetch/backfill-ingested statuses (shared parsing, visibility, attachments, reply mapping).
 - [ ] Unify outbound Host header generation for remote requests (use remote URI scheme for default ports; share across `src/federation.zig` + `src/thread_backfill.zig`).
 - [ ] DRY multipart parsing: extract shared multipart iterator used by `parseMultipart`, `parseMultipartWithFile`, `parseMultipartWithFiles` (avoid subtle behavior drift).
-- [ ] Inbox DRY: factor out a shared `trimTrailingSlash`/`stripQueryAndFragment` comparison helper (remove local `trimSlash` copies in `src/http/activitypub_api.zig`).
+- [x] Inbox DRY: factor out a shared `trimTrailingSlash`/`stripQueryAndFragment` comparison helper (remove local `trimSlash` copies in `src/http/activitypub_api.zig`).
 - [ ] Inbox DRY: add `follows.markAcceptedByActivityIdAny` (slash/query/fragment variants) to replace manual “try trimmed / with slash” logic.
 - [ ] Server DRY: unify `bearerToken`/`targetPath` helpers between `src/server.zig` and `src/http/common.zig` (avoid divergent behavior).
 

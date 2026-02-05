@@ -1137,15 +1137,7 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
         const expected = std.fmt.allocPrint(allocator, "{s}/users/{s}", .{ base, username }) catch
             return .{ .status = .internal_server_error, .body = "internal server error\n" };
 
-        const trimSlash = struct {
-            fn f(s: []const u8) []const u8 {
-                if (s.len == 0) return s;
-                if (s[s.len - 1] == '/') return s[0 .. s.len - 1];
-                return s;
-            }
-        }.f;
-
-        if (!std.mem.eql(u8, trimSlash(object_actor_id), trimSlash(expected))) {
+        if (!std.mem.eql(u8, util_url.trimTrailingSlash(object_actor_id), util_url.trimTrailingSlash(expected))) {
             return .{ .status = .accepted, .body = "ignored\n" };
         }
 
@@ -1205,14 +1197,6 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
         const expected_actor_id = std.fmt.allocPrint(allocator, "{s}/users/{s}", .{ base, username }) catch
             return .{ .status = .internal_server_error, .body = "internal server error\n" };
 
-        const trimSlash = struct {
-            fn f(s: []const u8) []const u8 {
-                if (s.len == 0) return s;
-                if (s[s.len - 1] == '/') return s[0 .. s.len - 1];
-                return s;
-            }
-        }.f;
-
         var is_undo_follow: bool = false;
         var handled_reaction: bool = false;
         switch (obj_val) {
@@ -1220,7 +1204,11 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
                 const existing = followers.lookupByRemoteActorId(&app_state.conn, allocator, user.?.id, remote_actor.?.id) catch
                     return .{ .status = .internal_server_error, .body = "internal server error\n" };
                 if (existing) |f| {
-                    is_undo_follow = std.mem.eql(u8, trimSlash(f.follow_activity_id), trimSlash(undo_object_id));
+                    is_undo_follow = std.mem.eql(
+                        u8,
+                        util_url.trimTrailingSlash(f.follow_activity_id),
+                        util_url.trimTrailingSlash(undo_object_id),
+                    );
                 }
 
                 if (!is_undo_follow) {
@@ -1241,10 +1229,18 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
                     if (inner_actor_val != .string) return .{ .status = .accepted, .body = "ignored\n" };
                     if (inner_object_val != .string) return .{ .status = .accepted, .body = "ignored\n" };
 
-                    if (!std.mem.eql(u8, trimSlash(inner_actor_val.string), trimSlash(remote_actor.?.id))) {
+                    if (!std.mem.eql(
+                        u8,
+                        util_url.trimTrailingSlash(inner_actor_val.string),
+                        util_url.trimTrailingSlash(remote_actor.?.id),
+                    )) {
                         return .{ .status = .accepted, .body = "ignored\n" };
                     }
-                    if (!std.mem.eql(u8, trimSlash(inner_object_val.string), trimSlash(expected_actor_id))) {
+                    if (!std.mem.eql(
+                        u8,
+                        util_url.trimTrailingSlash(inner_object_val.string),
+                        util_url.trimTrailingSlash(expected_actor_id),
+                    )) {
                         return .{ .status = .accepted, .body = "ignored\n" };
                     }
 
@@ -1252,7 +1248,11 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
                 } else if (std.mem.eql(u8, t.string, "Like") or std.mem.eql(u8, t.string, "Announce")) {
                     const inner_actor_val = o.get("actor") orelse return .{ .status = .accepted, .body = "ignored\n" };
                     if (inner_actor_val != .string) return .{ .status = .accepted, .body = "ignored\n" };
-                    if (!std.mem.eql(u8, trimSlash(inner_actor_val.string), trimSlash(remote_actor.?.id))) {
+                    if (!std.mem.eql(
+                        u8,
+                        util_url.trimTrailingSlash(inner_actor_val.string),
+                        util_url.trimTrailingSlash(remote_actor.?.id),
+                    )) {
                         return .{ .status = .accepted, .body = "ignored\n" };
                     }
 
@@ -1356,18 +1356,10 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
             else => return .{ .status = .bad_request, .body = "invalid object\n" },
         }
 
-        const trimSlash = struct {
-            fn f(s: []const u8) []const u8 {
-                if (s.len == 0) return s;
-                if (s[s.len - 1] == '/') return s[0 .. s.len - 1];
-                return s;
-            }
-        }.f;
-
         const changed = follows.markAcceptedByActivityId(&app_state.conn, follow_activity_id) catch
             return .{ .status = .internal_server_error, .body = "internal server error\n" };
         if (!changed) {
-            const trimmed = trimSlash(follow_activity_id);
+            const trimmed = util_url.trimTrailingSlash(follow_activity_id);
             if (!std.mem.eql(u8, trimmed, follow_activity_id)) {
                 _ = follows.markAcceptedByActivityId(&app_state.conn, trimmed) catch
                     return .{ .status = .internal_server_error, .body = "internal server error\n" };
