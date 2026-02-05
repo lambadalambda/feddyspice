@@ -193,20 +193,44 @@ pub fn serveOnce(app_state: *app.App, listener: *net.Server) !void {
         const default_max_len: usize = 1024 * 1024;
         const media_max_len: usize = 10 * 1024 * 1024;
         const max_len: usize = if (std.mem.eql(u8, path, "/api/v1/media")) media_max_len else default_max_len;
-        const content_length: usize = @intCast(request.head.content_length orelse 0);
-        if (content_length > max_len) {
-            const resp: routes.Response = .{
-                .status = .payload_too_large,
-                .body = "payload too large\n",
-            };
-            try writeResponse(app_state, alloc, &request, resp);
-            logAccess(app_state, conn.address, remote_override, method, target, resp.status, start_us);
-            return;
-        }
 
         request.head.expect = null;
         const body_reader = request.readerExpectNone(&body_read_buffer);
-        body = body_reader.readAlloc(alloc, content_length) catch "";
+
+        if (request.head.content_length) |cl| {
+            const content_length: usize = @intCast(cl);
+            if (content_length > max_len) {
+                const resp: routes.Response = .{
+                    .status = .payload_too_large,
+                    .body = "payload too large\n",
+                };
+                try writeResponse(app_state, alloc, &request, resp);
+                logAccess(app_state, conn.address, remote_override, method, target, resp.status, start_us);
+                return;
+            }
+
+            body = body_reader.readAlloc(alloc, content_length) catch |err| {
+                const resp: routes.Response = switch (err) {
+                    error.OutOfMemory => .{ .status = .internal_server_error, .body = "internal server error\n" },
+                    else => .{ .status = .bad_request, .body = "invalid request body\n" },
+                };
+                try writeResponse(app_state, alloc, &request, resp);
+                logAccess(app_state, conn.address, remote_override, method, target, resp.status, start_us);
+                return;
+            };
+        } else {
+            const limit: std.Io.Limit = if (max_len == 0) .unlimited else .limited(max_len);
+            body = body_reader.allocRemaining(alloc, limit) catch |err| {
+                const resp: routes.Response = switch (err) {
+                    error.StreamTooLong => .{ .status = .payload_too_large, .body = "payload too large\n" },
+                    error.OutOfMemory => .{ .status = .internal_server_error, .body = "internal server error\n" },
+                    else => .{ .status = .bad_request, .body = "invalid request body\n" },
+                };
+                try writeResponse(app_state, alloc, &request, resp);
+                logAccess(app_state, conn.address, remote_override, method, target, resp.status, start_us);
+                return;
+            };
+        }
     }
 
     const resp = routes.handle(app_state, alloc, .{
@@ -713,6 +737,65 @@ test "serveOnce: GET /healthz -> 200" {
                 (std.mem.indexOf(u8, lower, "\r\nx-content-type-options: nosniff\r\n") != null) and
                 (std.mem.indexOf(u8, lower, "\r\nreferrer-policy: no-referrer\r\n") != null) and
                 (std.mem.indexOf(u8, lower, "\r\nx-frame-options: deny\r\n") != null);
+        }
+    };
+
+    var t = try std.Thread.spawn(.{}, Client.run, .{&ctx});
+
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    try serveOnce(&app_state, &listener);
+    t.join();
+
+    try std.testing.expect(ctx.ok);
+}
+
+test "serveOnce: reads chunked request bodies" {
+    const listen_address = try net.Address.parseIp("127.0.0.1", 0);
+    var listener = try listen_address.listen(.{ .reuse_address = true });
+    defer listener.deinit();
+
+    const addr = listener.listen_address;
+
+    var ctx: struct {
+        addr: net.Address,
+        ok: bool = false,
+    } = .{ .addr = addr };
+
+    const Client = struct {
+        fn run(c: *@TypeOf(ctx)) !void {
+            var stream = try net.tcpConnectToAddress(c.addr);
+            defer stream.close();
+
+            const json =
+                \\{"client_name":"pl-fe","redirect_uris":"urn:ietf:wg:oauth:2.0:oob","scopes":"read write","website":""}
+            ;
+
+            const start =
+                "POST /api/v1/apps HTTP/1.1\r\n" ++
+                "Host: localhost\r\n" ++
+                "Content-Type: application/json\r\n" ++
+                "Transfer-Encoding: chunked\r\n" ++
+                "Connection: close\r\n" ++
+                "\r\n";
+            try writeAll(stream.handle, start);
+
+            var hdr_buf: [64]u8 = undefined;
+            const hdr = try std.fmt.bufPrint(&hdr_buf, "{x}\r\n", .{json.len});
+            try writeAll(stream.handle, hdr);
+            try writeAll(stream.handle, json);
+            try writeAll(stream.handle, "\r\n0\r\n\r\n");
+
+            var buf: [8192]u8 = undefined;
+            var used: usize = 0;
+            while (used < buf.len) {
+                const n = try std.posix.read(stream.handle, buf[used..]);
+                if (n == 0) break;
+                used += n;
+            }
+
+            c.ok = std.mem.startsWith(u8, buf[0..used], "HTTP/1.1 200");
         }
     };
 
