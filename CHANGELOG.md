@@ -36,6 +36,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Status posting accepts `media_ids[]` and returns `media_attachments` on status payloads.
 - Deleting a status removes any attached media; stale unattached media is pruned opportunistically.
 - Initial ActivityPub discovery endpoints: WebFinger, NodeInfo, and actor document (`/.well-known/webfinger`, `/.well-known/nodeinfo`, `/nodeinfo/2.0`, `/users/:name`).
+- ActivityPub actor docs now advertise `.endpoints.sharedInbox`; feddyspice also accepts deliveries at `POST /inbox` (single-user shared inbox).
 - Host-meta discovery endpoint (`/.well-known/host-meta`) advertising WebFinger LRDD template.
 - Per-actor RSA keypairs (stored in SQLite) and `publicKeyPem` in the ActivityPub actor document.
 - HTTP Signatures helper for signing outbound ActivityPub requests (`Digest`, `Date`, `Signature`).
@@ -142,6 +143,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - Access logs no longer include query strings (prevents leaking `access_token` from streaming URLs), and redacts `/media/:token` paths.
 - Logs escape control characters when printing untrusted strings (prevents log forging via newlines in remote responses or OAuth params).
+- Inbound ActivityPub `Create` treats `directMessage: true` as `visibility=direct` for compatibility with servers that send the extension.
 - Remote ActivityPub ingest now ignores non-`http(s)` Note IDs and attachment URLs; remote actor docs with mismatched IDs are rejected (hardens against URL-scheme injection and actor ID spoofing).
 - Outbound fetch SSRF checks now also validate the connected peer IP address (mitigates DNS-rebinding bypass of pre-connect DNS checks).
 - Outbound HTTP fetches now apply per-host concurrency limits and failure backoff (`FEDDYSPICE_HTTP_MAX_INFLIGHT_PER_HOST`, `FEDDYSPICE_HTTP_FAILURE_BACKOFF_*`) to reduce fetch-storm impact.

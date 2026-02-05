@@ -193,6 +193,16 @@ fn jsonFirstUrlString(val: std.json.Value) ?[]const u8 {
     }
 }
 
+pub fn sharedInboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_types.Request) http_types.Response {
+    const user = users.lookupFirstUser(&app_state.conn, allocator) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    if (user == null) return .{ .status = .not_found, .body = "not found\n" };
+
+    const path = std.fmt.allocPrint(allocator, "/users/{s}/inbox", .{user.?.username}) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    return inboxPost(app_state, allocator, req, path);
+}
+
 pub fn actorGet(app_state: *app.App, allocator: std.mem.Allocator, path: []const u8) http_types.Response {
     const username = path["/users/".len..];
     if (username.len == 0) return .{ .status = .not_found, .body = "not found\n" };
@@ -212,6 +222,8 @@ pub fn actorGet(app_state: *app.App, allocator: std.mem.Allocator, path: []const
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
 
     const inbox = std.fmt.allocPrint(allocator, "{s}/users/{s}/inbox", .{ base, username }) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    const shared_inbox = std.fmt.allocPrint(allocator, "{s}/inbox", .{base}) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
     const outbox = std.fmt.allocPrint(allocator, "{s}/users/{s}/outbox", .{ base, username }) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
@@ -240,6 +252,7 @@ pub fn actorGet(app_state: *app.App, allocator: std.mem.Allocator, path: []const
         .icon = .{ .type = "Image", .url = avatar_url },
         .image = .{ .type = "Image", .url = header_url },
         .inbox = inbox,
+        .endpoints = .{ .sharedInbox = shared_inbox },
         .outbox = outbox,
         .followers = followers_url,
         .following = following,
@@ -610,6 +623,14 @@ fn jsonContainsIri(v: ?std.json.Value, needle: []const u8) bool {
     }
 }
 
+fn jsonTruthiness(v: ?std.json.Value) bool {
+    const val = v orelse return false;
+    return switch (val) {
+        .bool => |b| b,
+        else => false,
+    };
+}
+
 fn jsonFirstUrl(val: std.json.Value) ?[]const u8 {
     switch (val) {
         .string => |s| return if (s.len == 0) null else s,
@@ -922,6 +943,11 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
         if (verifyInboxSignatureOrReject(allocator, req, remote_actor.?, now_sec, max_clock_skew_sec)) |resp| return resp;
 
         const visibility: []const u8 = blk: {
+            const direct_message =
+                jsonTruthiness(parsed.value.object.get("directMessage")) or
+                jsonTruthiness(obj.object.get("directMessage"));
+            if (direct_message) break :blk "direct";
+
             const has_recipients =
                 (parsed.value.object.get("to") != null) or
                 (parsed.value.object.get("cc") != null) or

@@ -10,6 +10,7 @@ const inbox_dedupe = @import("inbox_dedupe.zig");
 const util_html = @import("util/html.zig");
 const util_ids = @import("util/ids.zig");
 const media = @import("media.zig");
+const conversations = @import("conversations.zig");
 const notifications = @import("notifications.zig");
 const oauth = @import("oauth.zig");
 const remote_actors = @import("remote_actors.zig");
@@ -143,6 +144,10 @@ pub fn handle(app_state: *app.App, allocator: std.mem.Allocator, req: Request) R
 
     if (req.method == .GET and std.mem.eql(u8, path, "/nodeinfo/2.1")) {
         return discovery.nodeinfoDocumentWithVersion(app_state, allocator, "2.1");
+    }
+
+    if (req.method == .POST and std.mem.eql(u8, path, "/inbox")) {
+        return activitypub_api.sharedInboxPost(app_state, allocator, req);
     }
 
     if (std.mem.startsWith(u8, path, "/users/")) {
@@ -6054,6 +6059,102 @@ test "POST /users/:name/inbox Create stores remote status" {
     try std.testing.expect(st.id < 0);
     try std.testing.expectEqualStrings("<p>Hello</p>", st.content_html);
     try std.testing.expectEqualStrings("public", st.visibility);
+}
+
+test "POST /users/:name/inbox Create treats directMessage as direct" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const remote_kp = try @import("crypto_rsa.zig").generateRsaKeyPairPem(a, 512);
+    const remote_key_id = "https://remote.test/users/bob#main-key";
+    const remote_actor_id = "https://remote.test/users/bob";
+
+    try remote_actors.upsert(&app_state.conn, .{
+        .id = remote_actor_id,
+        .inbox = "https://remote.test/users/bob/inbox",
+        .shared_inbox = null,
+        .preferred_username = "bob",
+        .domain = "remote.test",
+        .public_key_pem = remote_kp.public_key_pem,
+    });
+
+    const body =
+        \\{"@context":"https://www.w3.org/ns/activitystreams","type":"Create","actor":"https://remote.test/users/bob","directMessage":true,"object":{"id":"https://remote.test/notes/1","type":"Note","content":"<p>Hello</p>","published":"2020-01-01T00:00:00.000Z"}}
+    ;
+
+    const inbox_req = try signedInboxRequest(
+        a,
+        "example.test",
+        "/users/alice/inbox",
+        body,
+        remote_key_id,
+        remote_kp.private_key_pem,
+    );
+    const resp = handle(&app_state, a, inbox_req);
+    try std.testing.expectEqual(std.http.Status.accepted, resp.status);
+
+    const st = (try remote_statuses.lookupByUri(&app_state.conn, a, "https://remote.test/notes/1")).?;
+    try std.testing.expectEqualStrings("direct", st.visibility);
+
+    const convs = try conversations.listVisible(&app_state.conn, a, user_id, 10);
+    try std.testing.expectEqual(@as(usize, 1), convs.len);
+    try std.testing.expectEqualStrings(remote_actor_id, convs[0].remote_actor_id);
+    try std.testing.expectEqual(st.id, convs[0].last_status_id);
+}
+
+test "POST /inbox routes Create to the first user inbox" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const remote_kp = try @import("crypto_rsa.zig").generateRsaKeyPairPem(a, 512);
+    const remote_key_id = "https://remote.test/users/bob#main-key";
+    const remote_actor_id = "https://remote.test/users/bob";
+
+    try remote_actors.upsert(&app_state.conn, .{
+        .id = remote_actor_id,
+        .inbox = "https://remote.test/users/bob/inbox",
+        .shared_inbox = null,
+        .preferred_username = "bob",
+        .domain = "remote.test",
+        .public_key_pem = remote_kp.public_key_pem,
+    });
+
+    const body =
+        \\{"@context":"https://www.w3.org/ns/activitystreams","type":"Create","actor":"https://remote.test/users/bob","object":{"id":"https://remote.test/notes/1","type":"Note","content":"<p>Hello</p>","published":"2020-01-01T00:00:00.000Z","to":["https://example.test/users/alice"]},"to":["https://example.test/users/alice"]}
+    ;
+
+    const inbox_req = try signedInboxRequest(
+        a,
+        "example.test",
+        "/inbox",
+        body,
+        remote_key_id,
+        remote_kp.private_key_pem,
+    );
+    const resp = handle(&app_state, a, inbox_req);
+    try std.testing.expectEqual(std.http.Status.accepted, resp.status);
+
+    const st = (try remote_statuses.lookupByUri(&app_state.conn, a, "https://remote.test/notes/1")).?;
+    try std.testing.expectEqualStrings("direct", st.visibility);
+
+    const convs = try conversations.listVisible(&app_state.conn, a, user_id, 10);
+    try std.testing.expectEqual(@as(usize, 1), convs.len);
+    try std.testing.expectEqualStrings(remote_actor_id, convs[0].remote_actor_id);
+    try std.testing.expectEqual(st.id, convs[0].last_status_id);
 }
 
 test "POST /users/:name/inbox Create stores inReplyTo mapping to local statuses" {
