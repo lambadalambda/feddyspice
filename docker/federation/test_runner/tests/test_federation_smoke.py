@@ -35,13 +35,31 @@ def verify_arg() -> str | bool:
 
 
 def wait_until(fn, *, desc: str, timeout_s: int = 180, interval_s: float = 1.0) -> None:
-    deadline = time.time() + timeout_s
+    deadline = time.monotonic() + timeout_s
     last_exc: Exception | None = None
 
-    while time.time() < deadline:
+    while time.monotonic() < deadline:
         try:
             if fn():
                 return
+        except Exception as exc:  # noqa: BLE001 - used for polling in tests
+            last_exc = exc
+        time.sleep(interval_s)
+
+    if last_exc:
+        raise AssertionError(f"timeout: {desc} (last error: {last_exc})")
+    raise AssertionError(f"timeout: {desc}")
+
+
+def wait_until_value(fn, *, desc: str, timeout_s: int = 180, interval_s: float = 1.0):
+    deadline = time.monotonic() + timeout_s
+    last_exc: Exception | None = None
+
+    while time.monotonic() < deadline:
+        try:
+            value = fn()
+            if value:
+                return value
         except Exception as exc:  # noqa: BLE001 - used for polling in tests
             last_exc = exc
         time.sleep(interval_s)
@@ -462,7 +480,7 @@ def pleroma_delete_status(pleroma_base_url: str, access_token: str, status_id: s
     resp.raise_for_status()
 
 
-def pleroma_post_direct(pleroma_base_url: str, access_token: str, to_handle: str, text: str) -> None:
+def pleroma_post_direct(pleroma_base_url: str, access_token: str, to_handle: str, text: str) -> dict:
     full_text = f"{to_handle} {text}"
     resp = requests.post(
         f"{pleroma_base_url}/api/v1/statuses",
@@ -472,6 +490,10 @@ def pleroma_post_direct(pleroma_base_url: str, access_token: str, to_handle: str
         timeout=10,
     )
     resp.raise_for_status()
+    data = resp.json()
+    if not isinstance(data, dict):
+        raise TypeError("expected object status")
+    return data
 
 
 def pleroma_post_reply(pleroma_base_url: str, access_token: str, in_reply_to_id: str, text: str) -> None:
@@ -514,6 +536,21 @@ def resolve_account_id(base_url: str, access_token: str, handle: str) -> str:
     if not isinstance(results, list) or not results:
         raise AssertionError(f"accounts/search returned no results for {acct}")
     return results[0]["id"]
+
+
+def pleroma_relationship(pleroma_base_url: str, access_token: str, account_id: str) -> dict:
+    resp = requests.get(
+        f"{pleroma_base_url}/api/v1/accounts/relationships",
+        headers={"authorization": f"Bearer {access_token}"},
+        params={"id[]": account_id},
+        verify=verify_arg(),
+        timeout=10,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if not isinstance(data, list) or not data or not isinstance(data[0], dict):
+        raise TypeError("expected list relationships")
+    return data[0]
 
 
 def pleroma_unfollow(pleroma_base_url: str, access_token: str, handle: str) -> None:
@@ -831,9 +868,6 @@ def test_signed_direct_to_feddyspice_is_received_and_not_public():
 
 
 def test_pleroma_direct_to_feddyspice_is_received_and_not_public():
-    if os.getenv("FEDTEST_ENABLE_PLEROMA_DIRECT", "").lower() not in ("1", "true", "yes"):
-        pytest.skip("Pleroma direct-message federation is flaky in fedbox; enable with FEDTEST_ENABLE_PLEROMA_DIRECT=1")
-
     c = cfg()
 
     feddy_user, feddy_domain = parse_handle(c.feddyspice_handle)
@@ -848,8 +882,42 @@ def test_pleroma_direct_to_feddyspice_is_received_and_not_public():
 
     follow_remote(pleroma_base_url, pleroma_token, c.feddyspice_handle)
 
+    feddy_actor_id = webfinger_self_href(feddy_user, feddy_domain)
+    pleroma_actor_id = webfinger_self_href("dave", pleroma_domain)
+    assert feddy_actor_id
+    assert pleroma_actor_id
+
+    pleroma_actor_id_variants = id_variants(pleroma_actor_id)
+
+    wait_until(
+        lambda: any(v in follower_id_set(feddy_actor_id) for v in pleroma_actor_id_variants),
+        desc=f"follow accepted @dave@{pleroma_domain} -> {c.feddyspice_handle}",
+        timeout_s=240,
+        interval_s=2.0,
+    )
+
+    def resolved_remote_account_id() -> str | None:
+        try:
+            return resolve_account_id(pleroma_base_url, pleroma_token, c.feddyspice_handle)
+        except Exception:  # noqa: BLE001 - used for polling in tests
+            return None
+
+    feddy_account_id = wait_until_value(
+        resolved_remote_account_id,
+        desc=f"pleroma resolved remote account {c.feddyspice_handle}",
+        timeout_s=240,
+        interval_s=2.0,
+    )
+
+    wait_until(
+        lambda: pleroma_relationship(pleroma_base_url, pleroma_token, feddy_account_id).get("following") is True,
+        desc=f"pleroma follow active @dave@{pleroma_domain} -> {c.feddyspice_handle}",
+        timeout_s=240,
+        interval_s=2.0,
+    )
+
     marker = f"[fedbox] pleroma direct -> feddyspice {time.time()}"
-    pleroma_post_direct(pleroma_base_url, pleroma_token, c.feddyspice_handle, marker)
+    _ = pleroma_post_direct(pleroma_base_url, pleroma_token, c.feddyspice_handle, marker)
 
     wait_until(
         lambda: any(

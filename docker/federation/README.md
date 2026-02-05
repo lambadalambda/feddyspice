@@ -25,5 +25,5 @@ docker compose -f docker/federation/compose.yml down -v --remove-orphans
 - Pleroma is built from `${PLEROMA_CONTEXT}` (defaults to `../../../pleroma`).
 - Mastodon uses `${MASTODON_IMAGE}` (defaults to `ghcr.io/mastodon/mastodon:v4.5.3`).
 - `feddyspice_web` is included under the `fedtest` profile and served via the `gateway` Caddy container at `https://feddyspice.test`.
-- The Pleroma → remote `direct` message test is skipped by default (flaky in this fedbox build); enable via `FEDTEST_ENABLE_PLEROMA_DIRECT=1`.
+- The fedbox tests cover both deterministic ActivityPub deliveries (via `dm_sender`) and full Pleroma/Mastodon federation flows (follow, post, direct messages, edits, deletes, interactions).
 - If Docker fails to create the `federation` network due to exhausted address pools, set `FEDBOX_SUBNET` (e.g. `FEDBOX_SUBNET=10.88.0.0/16`) and retry.

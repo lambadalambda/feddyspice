@@ -14,12 +14,15 @@ run = "zig fmt ."
 
 [tasks."fed:up"]
 description = "Start federation-in-a-box (Pleroma + Mastodon)"
-run = "docker compose -f docker/federation/compose.yml up -d --build"
+run = "DOCKER_CONFIG=${DOCKER_CONFIG:-/tmp/docker-config} docker compose -f docker/federation/compose.yml up -d --build"
 
 [tasks."fed:test"]
 description = "Run federation-in-a-box smoke tests"
 run = '''
 set -eu
+
+export DOCKER_CONFIG="${DOCKER_CONFIG:-/tmp/docker-config}"
+mkdir -p "$DOCKER_CONFIG"
 
 compose() {
   docker compose -f docker/federation/compose.yml "$@"
@@ -29,7 +32,11 @@ cleanup() {
   compose --profile fedtest down -v --remove-orphans || true
 }
 
-trap cleanup EXIT
+if [ "${FEDTEST_KEEP:-0}" = "1" ]; then
+  echo "FEDTEST_KEEP=1: leaving fedbox containers running after this task"
+else
+  trap cleanup EXIT
+fi
 
 compose --profile fedtest down -v --remove-orphans || true
 compose --profile fedtest up -d --build \
@@ -53,13 +60,36 @@ compose --profile fedtest up -d --wait --wait-timeout 600 \
 
 compose --profile fedtest run --rm --no-deps feddyspice_seed
 compose --profile fedtest run --rm --no-deps pleroma_seed
+
+set +e
 compose --profile fedtest run --rm --no-deps --build fedtest
+rc=$?
+set -e
+
+if [ "$rc" -ne 0 ]; then
+  echo ""
+  echo "=== feddyspice_web inbox access (last 200 matches) ==="
+  compose --profile fedtest logs --no-color feddyspice_web | grep -E " target=/users/[^ ]+/inbox " | tail -n 200
+  echo ""
+  echo "=== feddyspice_web unauthorized access (last 200 matches) ==="
+  compose --profile fedtest logs --no-color feddyspice_web | grep -E " status=401 " | tail -n 200
+  echo ""
+  echo "=== pleroma_web logs mentioning feddyspice.test (last 200 matches) ==="
+  compose --profile fedtest logs --no-color pleroma_web | grep -F "feddyspice.test" | tail -n 200
+  echo ""
+  echo "=== pleroma_web errors (last 200 matches) ==="
+  compose --profile fedtest logs --no-color pleroma_web | grep -E "\\[error\\]|\\*\\* \\(.*\\)|Exception|ERROR" | tail -n 200
+  echo ""
+  echo "=== gateway logs (tail 200) ==="
+  compose --profile fedtest logs --no-color --tail=200 gateway || true
+  exit "$rc"
+fi
 '''
 
 [tasks."fed:logs"]
 description = "Tail federation-in-a-box logs"
-run = "docker compose -f docker/federation/compose.yml logs -f --no-color"
+run = "DOCKER_CONFIG=${DOCKER_CONFIG:-/tmp/docker-config} docker compose -f docker/federation/compose.yml logs -f --no-color"
 
 [tasks."fed:down"]
 description = "Stop federation-in-a-box and delete volumes"
-run = "docker compose -f docker/federation/compose.yml --profile fedtest down -v --remove-orphans"
+run = "DOCKER_CONFIG=${DOCKER_CONFIG:-/tmp/docker-config} docker compose -f docker/federation/compose.yml --profile fedtest down -v --remove-orphans"
