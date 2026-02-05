@@ -22,8 +22,23 @@ pub const Db = struct {
             if (db_ptr) |db| _ = c.sqlite3_close(db);
             return error.Sqlite;
         }
-        _ = c.sqlite3_busy_timeout(db_ptr.?, 5_000);
-        return .{ .handle = db_ptr.? };
+
+        var db: Db = .{ .handle = db_ptr.? };
+        errdefer db.close();
+
+        _ = c.sqlite3_busy_timeout(db.handle, 5_000);
+
+        // Enforce schema constraints consistently (SQLite requires opting-in per connection).
+        try db.execZ("PRAGMA foreign_keys=ON;\x00");
+
+        // Favor higher concurrency for multi-threaded workloads (jobs + web server).
+        // Not applicable for in-memory databases.
+        if (!isMemoryPath(path)) {
+            db.execZ("PRAGMA journal_mode=WAL;\x00") catch {};
+            db.execZ("PRAGMA synchronous=NORMAL;\x00") catch {};
+        }
+
+        return db;
     }
 
     pub fn open(allocator: std.mem.Allocator, path: []const u8) (Error || std.mem.Allocator.Error)!Db {
@@ -61,6 +76,10 @@ pub const Db = struct {
         return c.sqlite3_changes(db.handle);
     }
 };
+
+fn isMemoryPath(path: [:0]const u8) bool {
+    return std.mem.eql(u8, path[0..path.len], ":memory:");
+}
 
 pub const Stmt = struct {
     stmt: *c.sqlite3_stmt,
@@ -136,3 +155,39 @@ pub const Stmt = struct {
         };
     }
 };
+
+test "openZ enables foreign_keys" {
+    var conn = try Db.openZ(":memory:");
+    defer conn.close();
+
+    var stmt = try conn.prepareZ("PRAGMA foreign_keys;\x00");
+    defer stmt.finalize();
+
+    try std.testing.expectEqual(Stmt.Step.row, try stmt.step());
+    try std.testing.expectEqual(@as(i64, 1), stmt.columnInt64(0));
+}
+
+test "openZ attempts to enable WAL for file-backed DBs" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const f = try tmp.dir.createFile("db.sqlite3", .{ .truncate = true });
+    f.close();
+
+    const abs_path = try tmp.dir.realpathAlloc(std.testing.allocator, "db.sqlite3");
+    defer std.testing.allocator.free(abs_path);
+
+    const path_z = try std.testing.allocator.dupeZ(u8, abs_path);
+    defer std.testing.allocator.free(path_z);
+
+    var conn = try Db.openZ(path_z);
+    defer conn.close();
+
+    var stmt = try conn.prepareZ("PRAGMA journal_mode;\x00");
+    defer stmt.finalize();
+    try std.testing.expectEqual(Stmt.Step.row, try stmt.step());
+
+    const mode = stmt.columnText(0);
+    try std.testing.expect(mode.len > 0);
+    try std.testing.expect(std.ascii.eqlIgnoreCase(mode, "wal"));
+}

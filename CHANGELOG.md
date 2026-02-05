@@ -150,6 +150,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Inbox: use `src/util/url.zig` `trimTrailingSlash` for all trailing-slash comparisons (remove local `trimSlash` helpers).
 - DRY: centralize outbound Host header generation for remote fetches in `src/util/uri.zig` (federation + thread backfill).
 - Inbox: `Accept(Follow)` handling now uses `follows.markAcceptedByActivityIdAny` (slash/query/fragment variants) instead of manual fallbacks.
+- SQLite: all connections now enable foreign keys, and file-backed DBs attempt to use WAL (`journal_mode=WAL`, `synchronous=NORMAL`) for better concurrency.
 
 ### Fixed
 

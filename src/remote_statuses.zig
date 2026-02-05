@@ -489,6 +489,15 @@ test "lookupByUriIncludingDeletedAny handles slash and query/fragment variants" 
     defer arena.deinit();
     const a = arena.allocator();
 
+    try @import("remote_actors.zig").upsert(&conn, .{
+        .id = "https://remote.test/users/bob",
+        .inbox = "https://remote.test/users/bob/inbox",
+        .shared_inbox = null,
+        .preferred_username = "bob",
+        .domain = "remote.test",
+        .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
+    });
+
     const uri = "https://remote.test/notes/1";
     const created = try createIfNotExists(
         &conn,

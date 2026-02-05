@@ -27,7 +27,7 @@ This file tracks “good future refactors” and known risks. Add items whenever
 
 - [x] Avoid `std.heap.page_allocator` per request in `src/server.zig` response header building (use stack + request arena).
 - [x] Outbound fetches enforce a maximum response size (`FEDDYSPICE_HTTP_MAX_BODY_BYTES`) and allow per-request overrides (`FetchOptions.max_body_bytes`).
-- [ ] Apply SQLite connection pragmas consistently for every connection (foreign keys, WAL where applicable) across app/job threads to reduce “half-applied” behavior under load.
+- [x] Apply SQLite connection pragmas consistently for every connection (foreign keys, WAL where applicable) across app/job threads to reduce “half-applied” behavior under load.
 - [ ] Stop swallowing request-body read errors in `src/server.zig` (empty body fallback can cause confusing “half working” behavior); return a clear 4xx/5xx.
 - [ ] Background `.sync` job execution should log errors instead of silent `catch {}` (makes federation/backfill failures diagnosable).
 
