@@ -12,6 +12,11 @@ This file tracks “good future refactors” and known risks. Add items whenever
 - [x] DRY federation delivery code (“sign + POST” loops) via shared helpers in `src/federation.zig`.
 - [x] Store explicit recipient/mention metadata at post-create time (at least for `visibility=direct`) and base delivery on stored addressing rather than reparsing text.
 - [x] DRY: centralize URL normalization helpers (`trimTrailingSlash`, `stripQueryAndFragment`) in `src/util/url.zig`.
+- [ ] Add `remote_actors.lookupByIdAny` and use it anywhere we currently re-implement slash/no-slash actor lookups (e.g. inbox `Create`/`Delete`).
+- [ ] Remove duplicated “remote status by URI variants” logic in inbox handlers by using shared helpers (extend `remote_statuses.lookupByUriAny` with `IncludingDeletedAny` if needed).
+- [ ] Extract shared ActivityPub JSON helpers (`jsonTruthiness`, `jsonContainsIri`, URL-first extraction) into a small module and use it in both inbox parsing and thread backfill.
+- [ ] DRY `localStatusIdFromIri` / local-IRI parsing (currently duplicated across inbox + backfill codepaths).
+- [ ] Unify remote Note ingestion into a single entrypoint used by both inbox-ingested and fetch/backfill-ingested statuses (shared parsing, visibility, attachments, reply mapping).
 
 ## Performance / robustness
 
