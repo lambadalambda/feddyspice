@@ -51,24 +51,6 @@ fn textToHtmlAlloc(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
     return util_html.textToHtmlAlloc(allocator, text);
 }
 
-fn trimTrailingSlash(s: []const u8) []const u8 {
-    if (s.len == 0) return s;
-    if (s[s.len - 1] == '/') return s[0 .. s.len - 1];
-    return s;
-}
-
-fn stripQueryAndFragment(s: []const u8) []const u8 {
-    const q = std.mem.indexOfScalar(u8, s, '?');
-    const h = std.mem.indexOfScalar(u8, s, '#');
-    const cut = blk: {
-        if (q == null and h == null) break :blk s.len;
-        if (q != null and h == null) break :blk q.?;
-        if (q == null and h != null) break :blk h.?;
-        break :blk @min(q.?, h.?);
-    };
-    return s[0..cut];
-}
-
 fn stripLocalBase(app_state: *app.App, iri: []const u8) ?[]const u8 {
     const domain = app_state.cfg.domain;
 
@@ -597,23 +579,23 @@ pub fn userStatusGet(app_state: *app.App, allocator: std.mem.Allocator, path: []
 
 fn jsonContainsIri(v: ?std.json.Value, needle: []const u8) bool {
     const val = v orelse return false;
-    const want = trimTrailingSlash(needle);
+    const want = util_url.trimTrailingSlash(needle);
 
     switch (val) {
-        .string => |s| return std.mem.eql(u8, trimTrailingSlash(s), want),
+        .string => |s| return std.mem.eql(u8, util_url.trimTrailingSlash(s), want),
         .object => |o| {
             const id_val = o.get("id") orelse return false;
             if (id_val != .string) return false;
-            return std.mem.eql(u8, trimTrailingSlash(id_val.string), want);
+            return std.mem.eql(u8, util_url.trimTrailingSlash(id_val.string), want);
         },
         .array => |arr| {
             for (arr.items) |item| {
                 switch (item) {
-                    .string => |s| if (std.mem.eql(u8, trimTrailingSlash(s), want)) return true,
+                    .string => |s| if (std.mem.eql(u8, util_url.trimTrailingSlash(s), want)) return true,
                     .object => |o| {
                         const id_val = o.get("id") orelse continue;
                         if (id_val != .string) continue;
-                        if (std.mem.eql(u8, trimTrailingSlash(id_val.string), want)) return true;
+                        if (std.mem.eql(u8, util_url.trimTrailingSlash(id_val.string), want)) return true;
                     },
                     else => continue,
                 }
@@ -832,7 +814,7 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
             const id_val = parsed.value.object.get("id") orelse break :blk null;
             if (id_val != .string) break :blk null;
             if (id_val.string.len == 0) break :blk null;
-            break :blk trimTrailingSlash(id_val.string);
+            break :blk util_url.trimTrailingSlash(id_val.string);
         };
 
         const dedupe_id = activity_id orelse inbox_dedupe.fallbackKeyAlloc(allocator, actor_val.string, req.body) catch
@@ -849,7 +831,7 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
                 break :blk found;
             }
 
-            const trimmed = trimTrailingSlash(actor_val.string);
+            const trimmed = util_url.trimTrailingSlash(actor_val.string);
             if (!std.mem.eql(u8, trimmed, actor_val.string)) {
                 if (remote_actors.lookupById(&app_state.conn, allocator, trimmed) catch
                     return .{ .status = .internal_server_error, .body = "internal server error\n" }) |found|
@@ -928,7 +910,7 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
             };
             if (uri_str.len == 0) break :blk null;
 
-            const trimmed = stripQueryAndFragment(trimTrailingSlash(uri_str));
+            const trimmed = util_url.stripQueryAndFragment(util_url.trimTrailingSlash(uri_str));
             if (!util_url.isHttpOrHttpsUrl(trimmed)) break :blk null;
 
             if (localStatusIdFromIri(app_state, trimmed)) |local_id| {
@@ -998,7 +980,7 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
             const id_val = parsed.value.object.get("id") orelse break :blk null;
             if (id_val != .string) break :blk null;
             if (id_val.string.len == 0) break :blk null;
-            break :blk trimTrailingSlash(id_val.string);
+            break :blk util_url.trimTrailingSlash(id_val.string);
         };
 
         const dedupe_id = activity_id orelse inbox_dedupe.fallbackKeyAlloc(allocator, actor_val.string, req.body) catch
@@ -1026,7 +1008,7 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
         if (obj_type_val != .string) return .{ .status = .accepted, .body = "ignored\n" };
 
         if (std.mem.eql(u8, obj_type_val.string, "Person")) {
-            if (!std.mem.eql(u8, trimTrailingSlash(obj_id_val.string), trimTrailingSlash(remote_actor.?.id))) {
+            if (!std.mem.eql(u8, util_url.trimTrailingSlash(obj_id_val.string), util_url.trimTrailingSlash(remote_actor.?.id))) {
                 return .{ .status = .accepted, .body = "ignored\n" };
             }
 
@@ -1108,7 +1090,7 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
                     break :blk found;
                 }
 
-                const trimmed = trimTrailingSlash(obj_id_val.string);
+                const trimmed = util_url.trimTrailingSlash(obj_id_val.string);
                 if (!std.mem.eql(u8, trimmed, obj_id_val.string)) {
                     if (remote_statuses.lookupByUri(&app_state.conn, allocator, trimmed) catch
                         return .{ .status = .internal_server_error, .body = "internal server error\n" }) |found|
@@ -1125,7 +1107,7 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
                     }
                 }
 
-                const stripped = stripQueryAndFragment(obj_id_val.string);
+                const stripped = util_url.stripQueryAndFragment(obj_id_val.string);
                 if (!std.mem.eql(u8, stripped, obj_id_val.string)) {
                     if (remote_statuses.lookupByUri(&app_state.conn, allocator, stripped) catch
                         return .{ .status = .internal_server_error, .body = "internal server error\n" }) |found|
@@ -1133,7 +1115,7 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
                         break :blk found;
                     }
 
-                    const stripped_trimmed = trimTrailingSlash(stripped);
+                    const stripped_trimmed = util_url.trimTrailingSlash(stripped);
                     if (!std.mem.eql(u8, stripped_trimmed, stripped)) {
                         if (remote_statuses.lookupByUri(&app_state.conn, allocator, stripped_trimmed) catch
                             return .{ .status = .internal_server_error, .body = "internal server error\n" }) |found|
@@ -1254,7 +1236,7 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
             const id_val = parsed.value.object.get("id") orelse break :blk null;
             if (id_val != .string) break :blk null;
             if (id_val.string.len == 0) break :blk null;
-            break :blk trimTrailingSlash(id_val.string);
+            break :blk util_url.trimTrailingSlash(id_val.string);
         };
 
         const dedupe_id = activity_id orelse inbox_dedupe.fallbackKeyAlloc(allocator, actor_val.string, req.body) catch
@@ -1271,7 +1253,7 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
         const max_clock_skew_sec: i64 = @intCast(app_state.cfg.signature_max_clock_skew_sec);
         if (verifyInboxSignatureOrReject(allocator, req, remote_actor.?, now_sec, max_clock_skew_sec)) |resp| return resp;
 
-        const trimmed = stripQueryAndFragment(trimTrailingSlash(object_iri));
+        const trimmed = util_url.stripQueryAndFragment(util_url.trimTrailingSlash(object_iri));
         if (!util_url.isHttpOrHttpsUrl(trimmed)) return .{ .status = .accepted, .body = "ignored\n" };
 
         const status_id_opt = localStatusIdFromIri(app_state, trimmed);
@@ -1333,7 +1315,7 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
             const id_val = parsed.value.object.get("id") orelse break :blk null;
             if (id_val != .string) break :blk null;
             if (id_val.string.len == 0) break :blk null;
-            break :blk trimTrailingSlash(id_val.string);
+            break :blk util_url.trimTrailingSlash(id_val.string);
         };
 
         const dedupe_id = activity_id orelse inbox_dedupe.fallbackKeyAlloc(allocator, actor_val.string, req.body) catch
@@ -1350,7 +1332,7 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
                 break :blk found;
             }
 
-            const trimmed = trimTrailingSlash(actor_val.string);
+            const trimmed = util_url.trimTrailingSlash(actor_val.string);
             if (!std.mem.eql(u8, trimmed, actor_val.string)) {
                 if (remote_actors.lookupById(&app_state.conn, allocator, trimmed) catch
                     return .{ .status = .internal_server_error, .body = "internal server error\n" }) |found|
@@ -1399,7 +1381,7 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
                 break :blk found;
             }
 
-            const trimmed = trimTrailingSlash(object_id);
+            const trimmed = util_url.trimTrailingSlash(object_id);
             if (!std.mem.eql(u8, trimmed, object_id)) {
                 if (remote_statuses.lookupByUriIncludingDeleted(&app_state.conn, allocator, trimmed) catch
                     return .{ .status = .internal_server_error, .body = "internal server error\n" }) |found|
@@ -1456,7 +1438,7 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
             }
         }
 
-        const follow_activity_id = trimTrailingSlash(id_val.string);
+        const follow_activity_id = util_url.trimTrailingSlash(id_val.string);
         const inserted = inbox_dedupe.begin(&app_state.conn, follow_activity_id, user.?.id, actor_val.string, received_at_ms) catch
             return .{ .status = .internal_server_error, .body = "internal server error\n" };
         if (!inserted) return .{ .status = .accepted, .body = "duplicate\n" };
@@ -1524,7 +1506,7 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
             const id_val = parsed.value.object.get("id") orelse break :blk null;
             if (id_val != .string) break :blk null;
             if (id_val.string.len == 0) break :blk null;
-            break :blk trimTrailingSlash(id_val.string);
+            break :blk util_url.trimTrailingSlash(id_val.string);
         };
 
         const dedupe_id = activity_id orelse inbox_dedupe.fallbackKeyAlloc(allocator, actor_val.string, req.body) catch
@@ -1568,7 +1550,7 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
                 }
 
                 if (!is_undo_follow) {
-                    const trimmed_id = trimTrailingSlash(undo_object_id);
+                    const trimmed_id = util_url.trimTrailingSlash(undo_object_id);
                     if (trimmed_id.len > 0) {
                         _ = status_reactions.undoByActivityId(&app_state.conn, remote_actor.?.id, trimmed_id, received_at_ms) catch
                             return .{ .status = .internal_server_error, .body = "internal server error\n" };
@@ -1612,7 +1594,7 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
                     };
                     if (inner_object_iri.len == 0) return .{ .status = .accepted, .body = "ignored\n" };
 
-                    const trimmed = stripQueryAndFragment(trimTrailingSlash(inner_object_iri));
+                    const trimmed = util_url.stripQueryAndFragment(util_url.trimTrailingSlash(inner_object_iri));
                     if (!util_url.isHttpOrHttpsUrl(trimmed)) return .{ .status = .accepted, .body = "ignored\n" };
 
                     const status_id = localStatusIdFromIri(app_state, trimmed) orelse return .{ .status = .accepted, .body = "ignored\n" };
@@ -1660,7 +1642,7 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
             const id_val = parsed.value.object.get("id") orelse break :blk null;
             if (id_val != .string) break :blk null;
             if (id_val.string.len == 0) break :blk null;
-            break :blk trimTrailingSlash(id_val.string);
+            break :blk util_url.trimTrailingSlash(id_val.string);
         };
         const actor_id = blk: {
             const actor_val = parsed.value.object.get("actor") orelse break :blk null;

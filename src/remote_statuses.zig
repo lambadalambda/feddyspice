@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const db = @import("db.zig");
+const util_url = @import("util/url.zig");
 
 pub const Error = db.Error || std.mem.Allocator.Error;
 
@@ -15,23 +16,6 @@ pub const RemoteStatus = struct {
     created_at: []const u8,
     deleted_at: ?[]const u8,
 };
-
-fn trimTrailingSlash(s: []const u8) []const u8 {
-    if (s.len == 0) return s;
-    if (s[s.len - 1] == '/') return s[0 .. s.len - 1];
-    return s;
-}
-
-fn stripQueryAndFragment(s: []const u8) []const u8 {
-    const q = std.mem.indexOfScalar(u8, s, '?');
-    const h = std.mem.indexOfScalar(u8, s, '#');
-    const end = blk: {
-        if (q == null and h == null) break :blk s.len;
-        if (q != null and h != null) break :blk @min(q.?, h.?);
-        break :blk if (q) |qi| qi else h.?;
-    };
-    return s[0..end];
-}
 
 fn nextNegativeId(conn: *db.Db) db.Error!i64 {
     var stmt = try conn.prepareZ("SELECT MIN(id) FROM remote_statuses;\x00");
@@ -125,7 +109,7 @@ pub fn lookupByUri(conn: *db.Db, allocator: std.mem.Allocator, remote_uri: []con
 pub fn lookupByUriAny(conn: *db.Db, allocator: std.mem.Allocator, remote_uri: []const u8) Error!?RemoteStatus {
     if (try lookupByUri(conn, allocator, remote_uri)) |st| return st;
 
-    const trimmed = trimTrailingSlash(remote_uri);
+    const trimmed = util_url.trimTrailingSlash(remote_uri);
     if (!std.mem.eql(u8, trimmed, remote_uri)) {
         if (try lookupByUri(conn, allocator, trimmed)) |st| return st;
     } else {
@@ -135,11 +119,11 @@ pub fn lookupByUriAny(conn: *db.Db, allocator: std.mem.Allocator, remote_uri: []
         }
     }
 
-    const stripped = stripQueryAndFragment(remote_uri);
+    const stripped = util_url.stripQueryAndFragment(remote_uri);
     if (!std.mem.eql(u8, stripped, remote_uri)) {
         if (try lookupByUri(conn, allocator, stripped)) |st| return st;
 
-        const stripped_trimmed = trimTrailingSlash(stripped);
+        const stripped_trimmed = util_url.trimTrailingSlash(stripped);
         if (!std.mem.eql(u8, stripped_trimmed, stripped)) {
             if (try lookupByUri(conn, allocator, stripped_trimmed)) |st| return st;
         } else {

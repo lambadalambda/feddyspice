@@ -145,6 +145,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Added `src/http/follows_api.zig` and moved `POST /api/v1/follows` out of `src/http.zig`.
 - Added `src/http/compat_api.zig` for client-compat placeholder endpoints (custom emojis, markers, preferences, and other empty-list endpoints).
 - Added `src/http/metrics_api.zig` and moved `GET /metrics` out of `src/http.zig`.
+- DRY: centralized URL normalization helpers (`trimTrailingSlash`, `stripQueryAndFragment`) in `src/util/url.zig`.
 
 ### Fixed
 

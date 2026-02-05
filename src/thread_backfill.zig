@@ -17,23 +17,6 @@ pub const IngestResult = struct {
     was_new: bool,
 };
 
-fn trimTrailingSlash(s: []const u8) []const u8 {
-    if (s.len == 0) return s;
-    if (s[s.len - 1] == '/') return s[0 .. s.len - 1];
-    return s;
-}
-
-fn stripQueryAndFragment(s: []const u8) []const u8 {
-    const q = std.mem.indexOfScalar(u8, s, '?');
-    const h = std.mem.indexOfScalar(u8, s, '#');
-    const end = blk: {
-        if (q == null and h == null) break :blk s.len;
-        if (q != null and h != null) break :blk @min(q.?, h.?);
-        break :blk if (q) |qi| qi else h.?;
-    };
-    return s[0..end];
-}
-
 fn stripLocalBase(app_state: *app.App, iri: []const u8) ?[]const u8 {
     const prefix = switch (app_state.cfg.scheme) {
         .http => "http://",
@@ -91,20 +74,20 @@ fn jsonTruthiness(v: ?std.json.Value) bool {
 fn jsonContainsIri(v: ?std.json.Value, want: []const u8) bool {
     const val = v orelse return false;
     switch (val) {
-        .string => |s| return std.mem.eql(u8, trimTrailingSlash(s), want),
+        .string => |s| return std.mem.eql(u8, util_url.trimTrailingSlash(s), want),
         .object => |o| {
             const id_val = o.get("id") orelse return false;
             if (id_val != .string) return false;
-            return std.mem.eql(u8, trimTrailingSlash(id_val.string), want);
+            return std.mem.eql(u8, util_url.trimTrailingSlash(id_val.string), want);
         },
         .array => |arr| {
             for (arr.items) |item| {
                 switch (item) {
-                    .string => |s| if (std.mem.eql(u8, trimTrailingSlash(s), want)) return true,
+                    .string => |s| if (std.mem.eql(u8, util_url.trimTrailingSlash(s), want)) return true,
                     .object => |o| {
                         const id_val = o.get("id") orelse continue;
                         if (id_val != .string) continue;
-                        if (std.mem.eql(u8, trimTrailingSlash(id_val.string), want)) return true;
+                        if (std.mem.eql(u8, util_url.trimTrailingSlash(id_val.string), want)) return true;
                     },
                     else => continue,
                 }
@@ -223,11 +206,11 @@ fn parseNoteDoc(allocator: std.mem.Allocator, body: []const u8) Error!?ParsedNot
     const id_val = obj.get("id") orelse return null;
     if (id_val != .string or id_val.string.len == 0) return null;
 
-    const id_norm = stripQueryAndFragment(trimTrailingSlash(id_val.string));
+    const id_norm = util_url.stripQueryAndFragment(util_url.trimTrailingSlash(id_val.string));
     if (!util_url.isHttpOrHttpsUrl(id_norm)) return null;
 
     const actor_id_raw = noteFirstActorId(obj) orelse return null;
-    const actor_id = stripQueryAndFragment(trimTrailingSlash(actor_id_raw));
+    const actor_id = util_url.stripQueryAndFragment(util_url.trimTrailingSlash(actor_id_raw));
     if (!util_url.isHttpOrHttpsUrl(actor_id)) return null;
 
     const created_at = blk: {
@@ -247,7 +230,7 @@ fn parseNoteDoc(allocator: std.mem.Allocator, body: []const u8) Error!?ParsedNot
 
     const in_reply_to_uri = blk: {
         const raw = noteInReplyToUri(obj) orelse break :blk null;
-        const norm = stripQueryAndFragment(trimTrailingSlash(raw));
+        const norm = util_url.stripQueryAndFragment(util_url.trimTrailingSlash(raw));
         if (!util_url.isHttpOrHttpsUrl(norm)) break :blk null;
         break :blk norm;
     };
@@ -282,7 +265,7 @@ pub fn backfillRemoteAncestors(
 
     var depth: usize = 0;
     while (depth < 20 and next_uri_opt != null and cur_id < 0) : (depth += 1) {
-        const next_uri_norm = stripQueryAndFragment(trimTrailingSlash(next_uri_opt.?));
+        const next_uri_norm = util_url.stripQueryAndFragment(util_url.trimTrailingSlash(next_uri_opt.?));
         if (!util_url.isHttpOrHttpsUrl(next_uri_norm)) break;
 
         if (localStatusIdFromIri(app_state, next_uri_norm)) |local_id| {
@@ -327,7 +310,7 @@ pub fn ingestRemoteNoteByUri(
     note_uri_raw: []const u8,
     require_public: bool,
 ) Error!?IngestResult {
-    const note_uri_norm = stripQueryAndFragment(trimTrailingSlash(note_uri_raw));
+    const note_uri_norm = util_url.stripQueryAndFragment(util_url.trimTrailingSlash(note_uri_raw));
     if (!util_url.isHttpOrHttpsUrl(note_uri_norm)) return null;
 
     if (remote_statuses.lookupByUriAny(&app_state.conn, allocator, note_uri_norm) catch null) |existing| {

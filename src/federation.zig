@@ -292,12 +292,6 @@ fn extractWebfingerSelfHref(allocator: std.mem.Allocator, body: []const u8) Erro
     return error.WebfingerNoSelfLink;
 }
 
-fn trimTrailingSlash(s: []const u8) []const u8 {
-    if (s.len == 0) return s;
-    if (s[s.len - 1] == '/') return s[0 .. s.len - 1];
-    return s;
-}
-
 fn parseActorDoc(
     allocator: std.mem.Allocator,
     body: []const u8,
@@ -314,7 +308,7 @@ fn parseActorDoc(
     const user_val = parsed.value.object.get("preferredUsername") orelse return error.ActorDocMissingFields;
     if (id_val != .string or inbox_val != .string or user_val != .string) return error.ActorDocMissingFields;
     if (!url.isHttpOrHttpsUrl(id_val.string) or !url.isHttpOrHttpsUrl(inbox_val.string)) return error.ActorDocInvalidUrl;
-    if (!std.mem.eql(u8, trimTrailingSlash(id_val.string), trimTrailingSlash(expected_id))) return error.ActorDocIdMismatch;
+    if (!std.mem.eql(u8, url.trimTrailingSlash(id_val.string), url.trimTrailingSlash(expected_id))) return error.ActorDocIdMismatch;
 
     const pk_val = parsed.value.object.get("publicKey") orelse return error.ActorDocMissingFields;
     if (pk_val != .object) return error.ActorDocMissingFields;

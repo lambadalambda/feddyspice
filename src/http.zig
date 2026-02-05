@@ -596,12 +596,6 @@ fn percentEncodeAlloc(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {
     return common.percentEncodeAlloc(allocator, raw);
 }
 
-fn trimTrailingSlash(s: []const u8) []const u8 {
-    if (s.len == 0) return s;
-    if (s[s.len - 1] == '/') return s[0 .. s.len - 1];
-    return s;
-}
-
 fn isForm(content_type: ?[]const u8) bool {
     return common.isForm(content_type);
 }

@@ -11,6 +11,7 @@ This file tracks “good future refactors” and known risks. Add items whenever
   - [x] Move remaining handlers still living in `src/http.zig` (media, notifications, conversations, follows, metrics, misc compat endpoints).
 - [x] DRY federation delivery code (“sign + POST” loops) via shared helpers in `src/federation.zig`.
 - [x] Store explicit recipient/mention metadata at post-create time (at least for `visibility=direct`) and base delivery on stored addressing rather than reparsing text.
+- [x] DRY: centralize URL normalization helpers (`trimTrailingSlash`, `stripQueryAndFragment`) in `src/util/url.zig`.
 
 ## Performance / robustness
 

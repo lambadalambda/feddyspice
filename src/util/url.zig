@@ -2,6 +2,23 @@ const std = @import("std");
 
 const app = @import("../app.zig");
 
+pub fn trimTrailingSlash(s: []const u8) []const u8 {
+    if (s.len == 0) return s;
+    if (s[s.len - 1] == '/') return s[0 .. s.len - 1];
+    return s;
+}
+
+pub fn stripQueryAndFragment(s: []const u8) []const u8 {
+    const q = std.mem.indexOfScalar(u8, s, '?');
+    const h = std.mem.indexOfScalar(u8, s, '#');
+    const end = blk: {
+        if (q == null and h == null) break :blk s.len;
+        if (q != null and h != null) break :blk @min(q.?, h.?);
+        break :blk if (q) |qi| qi else h.?;
+    };
+    return s[0..end];
+}
+
 pub fn isHttpOrHttpsUrl(raw: []const u8) bool {
     if (raw.len == 0) return false;
     for (raw) |c| {
@@ -54,4 +71,20 @@ test "isHttpOrHttpsUrl accepts only http(s) without userinfo" {
     try std.testing.expect(!isHttpOrHttpsUrl("https://"));
     try std.testing.expect(!isHttpOrHttpsUrl("https://user:pass@example.test/"));
     try std.testing.expect(!isHttpOrHttpsUrl("https://example.test/\r\nx: y"));
+}
+
+test "trimTrailingSlash removes at most one slash" {
+    try std.testing.expectEqualStrings("", trimTrailingSlash(""));
+    try std.testing.expectEqualStrings("", trimTrailingSlash("/"));
+    try std.testing.expectEqualStrings("https://example.test", trimTrailingSlash("https://example.test"));
+    try std.testing.expectEqualStrings("https://example.test", trimTrailingSlash("https://example.test/"));
+    try std.testing.expectEqualStrings("https://example.test//", trimTrailingSlash("https://example.test///"));
+}
+
+test "stripQueryAndFragment strips query and fragment" {
+    try std.testing.expectEqualStrings("", stripQueryAndFragment(""));
+    try std.testing.expectEqualStrings("https://example.test/p", stripQueryAndFragment("https://example.test/p?q=1"));
+    try std.testing.expectEqualStrings("https://example.test/p", stripQueryAndFragment("https://example.test/p#x"));
+    try std.testing.expectEqualStrings("https://example.test/p", stripQueryAndFragment("https://example.test/p?q=1#x"));
+    try std.testing.expectEqualStrings("https://example.test/p", stripQueryAndFragment("https://example.test/p#x?q=1"));
 }
