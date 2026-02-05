@@ -111,10 +111,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Additional client-compat endpoints to eliminate 404s (`GET /api/v1/instance/peers`, `GET /api/v1/instance/activity`, `GET /api/v1/instance/extended_description`, `GET /api/v1/directory`, `GET /nodeinfo/2.1`, `GET /robots.txt`).
 - Outbound federation of `visibility=direct` statuses to mentioned recipients (ActivityPub Create/Delete with `to=[actor ids]`, no `Public` recipients).
 - Outbound federation direct deliveries store resolved recipient actor IDs in SQLite to avoid reparsing mentions or re-resolving handles.
-- Thread context now backfills missing remote ancestors by fetching ActivityPub objects referenced by `inReplyTo`.
+- Inbound ActivityPub `Create` now backfills missing remote thread ancestors at ingest-time via a background job (fetches objects referenced by `inReplyTo`).
 
 ### Changed
 
+- `/api/v1/statuses/:id/context` no longer fetches missing remote ancestors at request time; thread backfill happens during ActivityPub ingest.
 - Fedbox: wait for follow acceptance + remote account resolution before posting Pleroma `direct` messages (reduces flakes).
 - Fedbox: use `.fedbox.dev` hostnames to keep Pleroma mention parsing working (Pleroma’s Linkify mention matcher rejects `.test`).
 - Extracted shared helpers (`htmlEscapeAlloc`, `textToHtmlAlloc`, URL builders, remote account API ID mapping) into `src/util/*` for easier modularization.

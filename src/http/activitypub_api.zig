@@ -976,7 +976,9 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
         const safe_content_html = util_html.safeHtmlFromRemoteHtmlAlloc(allocator, content_val.string) catch
             return .{ .status = .internal_server_error, .body = "internal server error\n" };
 
-        const in_reply_to_id: ?i64 = blk: {
+        const InReplyTo = struct { id: ?i64, uri: ?[]const u8 };
+
+        const in_reply_to: ?InReplyTo = blk: {
             const raw = obj.object.get("inReplyTo") orelse break :blk null;
 
             const uri_str: []const u8 = switch (raw) {
@@ -995,14 +997,17 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
 
             if (localStatusIdFromIri(app_state, trimmed)) |local_id| {
                 const parent = statuses.lookup(&app_state.conn, allocator, local_id) catch break :blk null;
-                if (parent != null) break :blk local_id;
+                if (parent != null) break :blk InReplyTo{ .id = local_id, .uri = null };
+                break :blk null;
             }
 
-            const remote_parent = remote_statuses.lookupByUri(&app_state.conn, allocator, trimmed) catch break :blk null;
-            if (remote_parent) |p| break :blk p.id;
+            const remote_parent = remote_statuses.lookupByUriAny(&app_state.conn, allocator, trimmed) catch break :blk null;
+            if (remote_parent) |p| break :blk InReplyTo{ .id = p.id, .uri = null };
 
-            break :blk null;
+            break :blk InReplyTo{ .id = null, .uri = trimmed };
         };
+        const in_reply_to_id: ?i64 = if (in_reply_to) |it| it.id else null;
+        const in_reply_to_uri: ?[]const u8 = if (in_reply_to) |it| it.uri else null;
 
         const created = remote_statuses.createIfNotExists(
             &app_state.conn,
@@ -1015,6 +1020,12 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
             visibility,
             created_at,
         ) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
+        if (created.in_reply_to_id == null) {
+            if (in_reply_to_uri) |uri| {
+                background.backfillThread(app_state, allocator, user.?.id, created.id, uri);
+            }
+        }
 
         if (std.mem.eql(u8, visibility, "direct")) {
             conversations.upsertDirect(

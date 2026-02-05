@@ -283,6 +283,14 @@ fn encodeJob(allocator: std.mem.Allocator, job: jobs.Job) Error!EncodedJob {
                 .dedupe_key = try std.fmt.allocPrint(allocator, "deliver_delete:{d}", .{j.status_id}),
             };
         },
+        .backfill_thread => |j| {
+            const payload = .{ .user_id = j.user_id, .status_id = j.status_id, .in_reply_to_uri = j.in_reply_to_uri };
+            return .{
+                .job_type = "backfill_thread",
+                .payload_json = try std.json.Stringify.valueAlloc(allocator, payload, .{}),
+                .dedupe_key = try std.fmt.allocPrint(allocator, "backfill_thread:{d}", .{j.status_id}),
+            };
+        },
     }
 }
 
@@ -440,6 +448,23 @@ fn decodeJob(allocator: std.mem.Allocator, job_type: []const u8, payload_json: [
         if (status_id_val != .integer) return error.InvalidPayload;
 
         return .{ .deliver_delete = .{ .user_id = user_id_val.integer, .status_id = status_id_val.integer } };
+    }
+
+    if (std.mem.eql(u8, job_type, "backfill_thread")) {
+        const user_id_val = o.get("user_id") orelse return error.InvalidPayload;
+        const status_id_val = o.get("status_id") orelse return error.InvalidPayload;
+        const in_reply_to_uri_val = o.get("in_reply_to_uri") orelse return error.InvalidPayload;
+        if (user_id_val != .integer) return error.InvalidPayload;
+        if (status_id_val != .integer) return error.InvalidPayload;
+        if (in_reply_to_uri_val != .string) return error.InvalidPayload;
+
+        return .{
+            .backfill_thread = .{
+                .user_id = user_id_val.integer,
+                .status_id = status_id_val.integer,
+                .in_reply_to_uri = try allocator.dupe(u8, in_reply_to_uri_val.string),
+            },
+        };
     }
 
     return error.UnknownJobType;

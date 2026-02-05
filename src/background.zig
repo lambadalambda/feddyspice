@@ -7,6 +7,7 @@ const federation = @import("federation.zig");
 const jobs = @import("jobs.zig");
 const log = @import("log.zig");
 const statuses = @import("statuses.zig");
+const thread_backfill = @import("thread_backfill.zig");
 const users = @import("users.zig");
 const transport = @import("transport.zig");
 const jobs_db = @import("jobs_db.zig");
@@ -63,6 +64,9 @@ pub fn runJob(app_state: *app.App, allocator: std.mem.Allocator, job: jobs.Job) 
             if (st == null) return;
             if (st.?.deleted_at == null) return;
             try federation.deliverDeleteToFollowers(app_state, allocator, user.?, st.?);
+        },
+        .backfill_thread => |j| {
+            try thread_backfill.backfillRemoteAncestors(app_state, allocator, j.user_id, j.status_id, j.in_reply_to_uri);
         },
     }
 }
@@ -130,6 +134,72 @@ pub fn sendFollow(
 
     var t = std.Thread.spawn(.{}, SendFollowJob.run, .{job}) catch |err| {
         app_state.logger.err("sendFollow: thread spawn failed err={any}", .{err});
+        return;
+    };
+    t.detach();
+}
+
+pub fn backfillThread(
+    app_state: *app.App,
+    allocator: std.mem.Allocator,
+    user_id: i64,
+    status_id: i64,
+    in_reply_to_uri: []const u8,
+) void {
+    if (status_id >= 0) return;
+    if (in_reply_to_uri.len == 0) return;
+
+    switch (app_state.jobs_mode) {
+        .sync => {
+            thread_backfill.backfillRemoteAncestors(app_state, allocator, user_id, status_id, in_reply_to_uri) catch |err| {
+                app_state.logger.err("backfillThread: sync failed status_id={d} err={any}", .{ status_id, err });
+            };
+            return;
+        },
+        .disabled => {
+            const uri_copy = app_state.allocator.dupe(u8, in_reply_to_uri) catch return;
+            errdefer app_state.allocator.free(uri_copy);
+            app_state.jobs_queue.push(app_state.allocator, .{
+                .backfill_thread = .{
+                    .user_id = user_id,
+                    .status_id = status_id,
+                    .in_reply_to_uri = uri_copy,
+                },
+            }) catch {};
+            return;
+        },
+        .spawn => {},
+    }
+
+    if (jobs_db.enqueue(&app_state.conn, allocator, .{
+        .backfill_thread = .{
+            .user_id = user_id,
+            .status_id = status_id,
+            .in_reply_to_uri = @constCast(in_reply_to_uri),
+        },
+    }, .{})) |_| {
+        return;
+    } else |err| {
+        app_state.logger.err("backfillThread: enqueue failed status_id={d} err={any}", .{ status_id, err });
+        // Fallback to per-job thread execution.
+    }
+
+    const job = std.heap.page_allocator.create(BackfillThreadJob) catch return;
+    errdefer std.heap.page_allocator.destroy(job);
+
+    const uri_copy = std.heap.page_allocator.dupe(u8, in_reply_to_uri) catch return;
+    errdefer std.heap.page_allocator.free(uri_copy);
+
+    job.* = .{
+        .cfg = app_state.cfg,
+        .logger = app_state.logger,
+        .user_id = user_id,
+        .status_id = status_id,
+        .in_reply_to_uri = uri_copy,
+    };
+
+    var t = std.Thread.spawn(.{}, BackfillThreadJob.run, .{job}) catch |err| {
+        app_state.logger.err("backfillThread: thread spawn failed err={any}", .{err});
         return;
     };
     t.detach();
@@ -595,6 +665,51 @@ pub fn deliverStatusToFollowers(
     };
     t.detach();
 }
+
+const BackfillThreadJob = struct {
+    cfg: config.Config,
+    logger: *log.Logger,
+    user_id: i64,
+    status_id: i64,
+    in_reply_to_uri: []u8,
+
+    fn run(job: *@This()) void {
+        defer {
+            std.heap.page_allocator.free(job.in_reply_to_uri);
+            std.heap.page_allocator.destroy(job);
+        }
+
+        var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+
+        var conn = db.Db.open(a, job.cfg.db_path) catch return;
+        defer conn.close();
+
+        var hub: streaming_hub.Hub = streaming_hub.Hub.init(std.heap.page_allocator);
+        defer hub.deinit();
+
+        var thread_app: app.App = .{
+            .allocator = a,
+            .cfg = job.cfg,
+            .conn = conn,
+            .logger = job.logger,
+            .jobs_mode = .sync,
+            .jobs_queue = .{},
+            .streaming = &hub,
+            .transport = undefined,
+            .null_transport = transport.NullTransport.init(),
+            .real_transport = transport.RealTransport.init(a, job.cfg) catch return,
+        };
+        thread_app.transport = thread_app.real_transport.transport();
+        defer thread_app.transport.deinit();
+
+        thread_backfill.backfillRemoteAncestors(&thread_app, a, job.user_id, job.status_id, job.in_reply_to_uri) catch |err| {
+            job.logger.err("BackfillThreadJob: failed status_id={d} err={any}", .{ job.status_id, err });
+            return;
+        };
+    }
+};
 
 pub fn deliverActorUpdate(
     app_state: *app.App,
