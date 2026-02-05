@@ -146,6 +146,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Added `src/http/compat_api.zig` for client-compat placeholder endpoints (custom emojis, markers, preferences, and other empty-list endpoints).
 - Added `src/http/metrics_api.zig` and moved `GET /metrics` out of `src/http.zig`.
 - DRY: centralized URL normalization helpers (`trimTrailingSlash`, `stripQueryAndFragment`) in `src/util/url.zig`.
+- DRY: unified remote ActivityPub Note ingestion across inbox and backfill via `src/remote_note_ingest.zig` (shared parsing, visibility, attachments, reply mapping).
 
 ### Fixed
 
