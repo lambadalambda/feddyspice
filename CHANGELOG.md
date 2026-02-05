@@ -160,6 +160,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Outbound federation fetches now reject explicit nonstandard ports by default (`FEDDYSPICE_HTTP_ALLOW_NONSTANDARD_PORTS=false`) to reduce SSRF blast radius.
 - Fedbox sets `FEDDYSPICE_HTTP_ALLOW_NONSTANDARD_PORTS=true` so internal helpers (like `dm_sender`) can be discovered on their nonstandard ports.
 - OAuth token responses include `Cache-Control: no-store` / `Pragma: no-cache`; HTML form POSTs (`/login`, `/signup`, `/oauth/authorize`) enforce same-origin when `Origin`/`Referer` is present.
+- HTML form same-origin checks validate against configured `FEDDYSPICE_DOMAIN` + `FEDDYSPICE_SCHEME` (works behind reverse proxies like Coolify).
 - Inbox idempotency now falls back to a body-hash dedupe key when an ActivityPub activity `id` is missing (reduces replay/dup processing).
 - Added basic SQLite-backed rate limiting for high-risk entrypoints (`/login`, `/signup`, `/oauth/token`, `/api/v1/apps`, and ActivityPub inbox) to reduce brute-force/DoS impact.
 - `Dockerfile` Zig download works on both amd64/arm64 Docker builders.

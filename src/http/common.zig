@@ -74,12 +74,15 @@ pub fn safeReturnTo(return_to: ?[]const u8) ?[]const u8 {
     return rt;
 }
 
-pub fn isSameOrigin(req: http_types.Request) bool {
-    const host_hdr = req.host orelse return true;
-    const expected = parseHostHeader(host_hdr);
+pub fn isSameOrigin(req: http_types.Request, expected_scheme: []const u8, expected_host: []const u8) bool {
+    const expected_host_port = parseHostHeader(expected_host);
+    const expected = HostAndPort{
+        .host = expected_host_port.host,
+        .port = expected_host_port.port orelse defaultPortForScheme(expected_scheme),
+    };
 
-    if (req.origin) |o| return uriHasSameHost(o, expected);
-    if (req.referer) |r| return uriHasSameHost(r, expected);
+    if (req.origin) |o| return uriHasSameOrigin(o, expected_scheme, expected);
+    if (req.referer) |r| return uriHasSameOrigin(r, expected_scheme, expected);
     return true;
 }
 
@@ -114,9 +117,9 @@ fn parseHostHeader(host_hdr_raw: []const u8) HostAndPort {
     return .{ .host = host_hdr, .port = null };
 }
 
-fn uriHasSameHost(uri_str: []const u8, expected: HostAndPort) bool {
+fn uriHasSameOrigin(uri_str: []const u8, expected_scheme: []const u8, expected: HostAndPort) bool {
     const uri = std.Uri.parse(uri_str) catch return false;
-    if (!schemeIsHttp(uri.scheme)) return false;
+    if (!std.ascii.eqlIgnoreCase(uri.scheme, expected_scheme)) return false;
 
     var host_buf: [std.Uri.host_name_max]u8 = undefined;
     const host = uri.getHost(&host_buf) catch return false;
@@ -128,10 +131,6 @@ fn uriHasSameHost(uri_str: []const u8, expected: HostAndPort) bool {
     }
 
     return true;
-}
-
-fn schemeIsHttp(scheme: []const u8) bool {
-    return std.ascii.eqlIgnoreCase(scheme, "http") or std.ascii.eqlIgnoreCase(scheme, "https");
 }
 
 fn defaultPortForScheme(scheme: []const u8) u16 {
@@ -216,15 +215,15 @@ test "isSameOrigin validates Origin/Referer host and port (when present)" {
         .host = "example.test",
     };
 
-    try std.testing.expect(isSameOrigin(base));
+    try std.testing.expect(isSameOrigin(base, "https", "example.test"));
 
     var origin_ok = base;
     origin_ok.origin = "https://example.test";
-    try std.testing.expect(isSameOrigin(origin_ok));
+    try std.testing.expect(isSameOrigin(origin_ok, "https", "example.test"));
 
     var origin_bad = base;
     origin_bad.origin = "https://evil.test";
-    try std.testing.expect(!isSameOrigin(origin_bad));
+    try std.testing.expect(!isSameOrigin(origin_bad, "https", "example.test"));
 
     const with_port: http_types.Request = .{
         .method = .POST,
@@ -233,15 +232,37 @@ test "isSameOrigin validates Origin/Referer host and port (when present)" {
     };
     var origin_port_ok = with_port;
     origin_port_ok.origin = "http://example.test:8080/some/path";
-    try std.testing.expect(isSameOrigin(origin_port_ok));
+    try std.testing.expect(isSameOrigin(origin_port_ok, "http", "example.test:8080"));
 
     var origin_port_bad = with_port;
     origin_port_bad.origin = "http://example.test:3000/";
-    try std.testing.expect(!isSameOrigin(origin_port_bad));
+    try std.testing.expect(!isSameOrigin(origin_port_bad, "http", "example.test:8080"));
 
     var referer_ok = with_port;
     referer_ok.referer = "https://example.test:8080/x";
-    try std.testing.expect(isSameOrigin(referer_ok));
+    try std.testing.expect(isSameOrigin(referer_ok, "https", "example.test:8080"));
+}
+
+test "isSameOrigin checks scheme, not just host" {
+    const req: http_types.Request = .{
+        .method = .POST,
+        .target = "/",
+        .origin = "http://example.test",
+    };
+
+    try std.testing.expect(!isSameOrigin(req, "https", "example.test"));
+    try std.testing.expect(isSameOrigin(req, "http", "example.test"));
+}
+
+test "isSameOrigin uses configured origin, not Host header" {
+    const req: http_types.Request = .{
+        .method = .POST,
+        .target = "/signup",
+        .host = "127.0.0.1:8080",
+        .origin = "https://social.example.com",
+    };
+
+    try std.testing.expect(isSameOrigin(req, "https", "social.example.com"));
 }
 
 pub fn isJson(content_type: ?[]const u8) bool {

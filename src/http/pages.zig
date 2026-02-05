@@ -34,7 +34,9 @@ pub fn signupPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_t
     if (!common.isForm(req.content_type)) {
         return .{ .status = .bad_request, .body = "invalid content-type\n" };
     }
-    if (!common.isSameOrigin(req)) return .{ .status = .forbidden, .body = "forbidden\n" };
+    if (!common.isSameOrigin(req, @tagName(app_state.cfg.scheme), app_state.cfg.domain)) {
+        return .{ .status = .forbidden, .body = "forbidden\n" };
+    }
     const ok = rate_limit.allowNow(&app_state.conn, "signup_post", 60_000, 10) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
     if (!ok) return .{ .status = .too_many_requests, .body = "too many requests\n" };
@@ -103,7 +105,9 @@ pub fn loginPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
     if (!common.isForm(req.content_type)) {
         return .{ .status = .bad_request, .body = "invalid content-type\n" };
     }
-    if (!common.isSameOrigin(req)) return .{ .status = .forbidden, .body = "forbidden\n" };
+    if (!common.isSameOrigin(req, @tagName(app_state.cfg.scheme), app_state.cfg.domain)) {
+        return .{ .status = .forbidden, .body = "forbidden\n" };
+    }
     const ok = rate_limit.allowNow(&app_state.conn, "login_post", 60_000, 20) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
     if (!ok) return .{ .status = .too_many_requests, .body = "too many requests\n" };

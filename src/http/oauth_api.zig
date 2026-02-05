@@ -136,7 +136,9 @@ pub fn authorizePost(app_state: *app.App, allocator: std.mem.Allocator, req: htt
     if (!common.isForm(req.content_type)) {
         return .{ .status = .bad_request, .body = "invalid content-type\n" };
     }
-    if (!common.isSameOrigin(req)) return .{ .status = .forbidden, .body = "forbidden\n" };
+    if (!common.isSameOrigin(req, @tagName(app_state.cfg.scheme), app_state.cfg.domain)) {
+        return .{ .status = .forbidden, .body = "forbidden\n" };
+    }
 
     const user_id = session.currentUserId(app_state, req) catch null;
     if (user_id == null) return common.redirect(allocator, "/login");
