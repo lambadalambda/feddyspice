@@ -476,12 +476,10 @@ fn writeResponse(app_state: *app.App, allocator: std.mem.Allocator, request: *ht
     if (include_csp) {
         const csp_value = blk: {
             const scheme = @tagName(app_state.cfg.scheme);
-            const domain = app_state.cfg.domain;
-            if (!headerValueIsSafe(domain)) break :blk "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
             break :blk std.fmt.allocPrint(
                 allocator,
-                "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self' {s}://{s}",
-                .{ scheme, domain },
+                "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self' {s}:",
+                .{scheme},
             ) catch "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
         };
         headers[used] = .{ .name = "content-security-policy", .value = csp_value };
@@ -771,9 +769,7 @@ test "serveOnce: GET /login includes CSP header" {
                 (std.mem.indexOf(u8, lower, "\r\ncontent-security-policy:") != null) and
                 (std.mem.indexOf(u8, lower, "frame-ancestors 'none'") != null);
 
-            // `form-action 'self'` breaks if the document has an opaque origin (Origin: null),
-            // so include the configured public origin explicitly.
-            c.ok = c.ok and (std.mem.indexOf(u8, lower, "form-action 'self' http://example.test") != null);
+            c.ok = c.ok and (std.mem.indexOf(u8, lower, "form-action 'self' http:") != null);
         }
     };
 

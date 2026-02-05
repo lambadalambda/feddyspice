@@ -149,7 +149,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Logs escape control characters when printing untrusted strings (prevents log forging via newlines in remote responses or OAuth params).
 - Access logs now prefer `X-Forwarded-For`/`X-Real-IP` when present (reverse proxy deployments), and no longer emit `remote=unknown` for typical socket addresses.
 - HTML auth endpoints (`/signup`, `/login`, `/oauth/authorize`) now use a CSRF cookie + hidden form field (no longer depend on `Origin`/`Referer`).
-- HTML CSP now explicitly allows form submissions to the configured public origin (fixes OAuth in browsers that send `Origin: null`).
+- HTML CSP now allows form submissions to the current scheme (`form-action ... https:`), fixing OAuth in browsers that send `Origin: null`.
 - Inbound ActivityPub `Create` treats `directMessage: true` as `visibility=direct` for compatibility with servers that send the extension.
 - Remote ActivityPub ingest now ignores non-`http(s)` Note IDs and attachment URLs; remote actor docs with mismatched IDs are rejected (hardens against URL-scheme injection and actor ID spoofing).
 - Outbound fetch SSRF checks now also validate the connected peer IP address (mitigates DNS-rebinding bypass of pre-connect DNS checks).
