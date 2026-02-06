@@ -8,7 +8,7 @@ This repo is intended to become a minimal single-user Fediverse server in Zig.
 - Keep the project **small**: prefer Zig stdlib, avoid large frameworks, avoid unnecessary dependencies.
 - Database is **SQLite**. Schema changes must include migrations and tests.
 - Keep `CHANGELOG.md` updated (add entries under “Unreleased” as part of each change).
-- Changes should be small and topical (easy to review and revert).
+- Changes and commits should be small and topical (easy to review and revert).
 - Format Zig code with `zig fmt`.
 
 ## Repo conventions (proposed)
