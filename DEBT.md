@@ -72,3 +72,107 @@ This is a “rough backlog” based on Mastodon’s `config/routes/api.rb` and P
 - [x] Implement “interaction state” on statuses (instead of no-ops): favourites/boosts/bookmarks/pins/mutes + `Status` relationship booleans (`favourited`, `reblogged`, `bookmarked`, `pinned`, `muted`).
 - [x] Federation parity: outbound `Create(Note)` includes `inReplyTo` for replies and `tag` mention objects; inbound remote `inReplyTo` stored/mapped to improve threads.
 - [x] Remote visibility mapping: treat followers-only ActivityPub deliveries as `private` (not `direct`), and keep `direct` statuses out of the home timeline (Mastodon/clients expect them in `/api/v1/timelines/direct`).
+
+## 2026-02 API/Federation audit findings
+
+### High priority
+
+- [x] `POST /api/v2/media` still uses the default 1 MiB body cap.
+  - Evidence:
+    - `src/server.zig:196` only applies `media_max_len` for `"/api/v1/media"`.
+    - `src/http.zig:411` routes `"/api/v2/media"` to the same upload handler.
+  - Impact:
+    - Clients using `/api/v2/media` can hit unexpected `413 payload too large` for files that `/api/v1/media` accepts.
+  - Suggested fix:
+    - Treat both `/api/v1/media` and `/api/v2/media` as media-upload paths in request body sizing.
+    - Add a regression test that posts `>1MiB` to `/api/v2/media` and expects success.
+
+- [x] ActivityPub `Update(Note)` maps followers-only recipients to `direct` instead of `private`.
+  - Evidence:
+    - `src/http/activitypub_api.zig:874` computes visibility for updates.
+    - `src/http/activitypub_api.zig:894` falls back to `"direct"` when `Public` is absent.
+    - `src/remote_note_ingest.zig:92`..`src/remote_note_ingest.zig:103` already classifies followers collections as `"private"` for ingest/create.
+  - Impact:
+    - A followers-only remote edit can change stored visibility from `private` to `direct`, affecting home/direct timeline placement and notification semantics.
+  - Suggested fix:
+    - Reuse the same visibility classifier used by `remote_note_ingest` for both `Create` and `Update` paths.
+    - Add a test for `Update(Note)` with `to=[.../followers]` to preserve `private`.
+
+- [x] Public status lookup/context endpoints are auth-required, unlike Mastodon/Pleroma behavior.
+  - Evidence:
+    - `src/http/statuses_api.zig:430` and `src/http/statuses_api.zig:462` require bearer tokens up front.
+    - Mastodon allows unauthenticated `show/context` with visibility checks (`../mastodon/app/controllers/api/v1/statuses_controller.rb:10`, `../mastodon/app/controllers/api/v1/statuses_controller.rb:36`, `../mastodon/app/controllers/api/v1/statuses_controller.rb:42`).
+    - Pleroma similarly supports unauthenticated access for these actions (`../pleroma/lib/pleroma/web/mastodon_api/controllers/status_controller.ex:35`, `../pleroma/lib/pleroma/web/mastodon_api/controllers/status_controller.ex:40`).
+  - Impact:
+    - Public links and unauthenticated clients cannot fetch public statuses/threads through Mastodon API endpoints.
+  - Suggested fix:
+    - Make auth optional for `GET /api/v1/statuses/:id` and `/context`; enforce visibility-based access control instead of unconditional auth.
+
+- [x] Outbound federation `Create(Note)` payloads omit media attachments.
+  - Evidence:
+    - `src/federation.zig:1116`..`src/federation.zig:1126` builds Note object without an `attachment` field.
+  - Impact:
+    - Remote followers may receive text-only posts when local statuses include media.
+  - Suggested fix:
+    - Include ActivityPub `attachment` objects generated from local status media metadata, with tests covering image/video attachment federation.
+
+### Medium priority
+
+- [x] ActivityPub outbox/object serialization is inconsistent with outbound federation payload richness.
+  - Evidence:
+    - `src/http/activitypub_api.zig:343` defines `ApNote` with only `id/type/attributedTo/content/published/to/cc`.
+    - `src/http/activitypub_api.zig:494`..`src/http/activitypub_api.zig:503` serves `Note` without `inReplyTo`, `tag`, or `attachment`.
+    - Outbound delivery already includes at least `inReplyTo` and mention `tag` (`src/federation.zig:1124`, `src/federation.zig:1125`).
+  - Impact:
+    - GET object/outbox views can diverge from delivered activities and lose thread/mention/media semantics for fetchers.
+  - Suggested fix:
+    - Share a single Note serializer for delivery + object endpoints, then add parity tests.
+
+- [x] Rate limiting is globally keyed per endpoint, not scoped by requester.
+  - Evidence:
+    - `src/rate_limit.zig:17` stores one row per `key` in `rate_limits`.
+    - Call sites use static keys like `"login_post"`, `"oauth_token"`, `"ap_inbox"` (`src/http/pages.zig:54`, `src/http/oauth_api.zig:217`, `src/http/activitypub_api.zig:641`).
+  - Impact:
+    - One abusive client can throttle all clients for a route.
+  - Suggested fix:
+    - Include requester dimension (IP and/or authenticated principal) in rate-limit key construction.
+
+- [x] `GET /api/v1/statuses?ids[]=...` is auth-required, while Mastodon/Pleroma allow unauth reads with visibility filtering.
+  - Evidence:
+    - `src/http/statuses_api.zig:24` enforces bearer token.
+    - Mastodon’s `index` is not behind `require_user!` (`../mastodon/app/controllers/api/v1/statuses_controller.rb:10`, `../mastodon/app/controllers/api/v1/statuses_controller.rb:31`).
+    - Pleroma declares unauth fallback for `index` (`../pleroma/lib/pleroma/web/mastodon_api/controllers/status_controller.ex:35`, `../pleroma/lib/pleroma/web/mastodon_api/controllers/status_controller.ex:41`).
+  - Impact:
+    - Some clients cannot hydrate public status IDs without authentication.
+  - Suggested fix:
+    - Make token optional and filter by status visibility for unauthenticated callers.
+
+### Low priority (refactor / DRY)
+
+- [x] Timeline handlers duplicate pagination/query parsing and Link-header assembly.
+  - Evidence:
+    - `src/http/timelines_api.zig:80`, `src/http/timelines_api.zig:213`, `src/http/timelines_api.zig:340`, `src/http/timelines_api.zig:533` all repeat `limit/max_id/since_id/min_id` parsing.
+    - Similar header construction appears at `src/http/timelines_api.zig:175`, `src/http/timelines_api.zig:302`, `src/http/timelines_api.zig:424`, `src/http/timelines_api.zig:633`.
+  - Impact:
+    - Higher maintenance cost and risk of behavior drift between timeline endpoints.
+  - Suggested fix:
+    - Introduce shared pagination parser + link-header helper.
+
+- [x] Repeated query-array parsing logic for ID lists.
+  - Evidence:
+    - `src/http/statuses_api.zig:34`..`src/http/statuses_api.zig:45` parses `ids[]` manually.
+    - `src/http/accounts_api.zig:809`..`src/http/accounts_api.zig:820` parses `id[]` manually.
+  - Impact:
+    - Duplicate parsing behavior is easy to diverge over time.
+  - Suggested fix:
+    - Add a shared helper for extracting repeated query values with normalized key aliases.
+
+- [x] Instance helper endpoints are placeholders and can still semantically drift from Mastodon expectations.
+  - Evidence:
+    - `src/http/instance.zig:53` (`rules`) and `src/http/instance.zig:58` (`domain_blocks`) return static empty arrays.
+    - `src/http/instance.zig:63` (`translation_languages`) returns static `{}`.
+    - `src/http/instance.zig:34` and `src/http/instance.zig:88` advertise registrations as enabled by default.
+  - Impact:
+    - Real-world client UX/feature checks can misinterpret server policy/capabilities.
+  - Suggested fix:
+    - Back these fields with actual config/state and align payload semantics with Mastodon endpoint contracts.

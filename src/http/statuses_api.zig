@@ -20,39 +20,30 @@ const users = @import("../users.zig");
 
 const StatusPayload = masto.StatusPayload;
 
+fn isPublicishVisibility(visibility: []const u8) bool {
+    return std.mem.eql(u8, visibility, "public") or std.mem.eql(u8, visibility, "unlisted");
+}
+
 pub fn statusesBulkGet(app_state: *app.App, allocator: std.mem.Allocator, req: http_types.Request) http_types.Response {
-    const token = common.bearerToken(req.authorization) orelse return common.unauthorized(allocator);
-    const info = oauth.verifyAccessToken(&app_state.conn, allocator, token) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-    if (info == null) return common.unauthorized(allocator);
+    const viewer_user_id: ?i64 = blk: {
+        if (req.authorization == null) break :blk null;
+        const token = common.bearerToken(req.authorization) orelse return common.unauthorized(allocator);
+        const info = oauth.verifyAccessToken(&app_state.conn, allocator, token) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        if (info == null) return common.unauthorized(allocator);
+        break :blk info.?.user_id;
+    };
 
     const q = common.queryString(req.target);
-
-    var ids: std.ArrayListUnmanaged([]const u8) = .empty;
-    defer ids.deinit(allocator);
-
-    var it = std.mem.splitScalar(u8, q, '&');
-    while (it.next()) |pair_raw| {
-        if (pair_raw.len == 0) continue;
-        const eq = std.mem.indexOfScalar(u8, pair_raw, '=') orelse continue;
-        const key = pair_raw[0..eq];
-        const value = pair_raw[eq + 1 ..];
-        if (value.len == 0) continue;
-
-        if (std.mem.eql(u8, key, "ids") or std.mem.eql(u8, key, "ids[]") or std.mem.eql(u8, key, "ids%5B%5D")) {
-            ids.append(allocator, value) catch
-                return .{ .status = .internal_server_error, .body = "internal server error\n" };
-        }
-    }
-
-    const user = users.lookupUserById(&app_state.conn, allocator, info.?.user_id) catch
+    const key_aliases = [_][]const u8{ "ids", "ids[]", "ids%5B%5D" };
+    const ids = common.collectQueryValuesForKeys(allocator, q, &key_aliases) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
-    if (user == null) return common.unauthorized(allocator);
+    defer allocator.free(ids);
 
     var payloads: std.ArrayListUnmanaged(StatusPayload) = .empty;
     defer payloads.deinit(allocator);
 
-    for (ids.items) |id_str| {
+    for (ids) |id_str| {
         const id = std.fmt.parseInt(i64, id_str, 10) catch continue;
 
         if (id < 0) {
@@ -63,15 +54,29 @@ pub fn statusesBulkGet(app_state: *app.App, allocator: std.mem.Allocator, req: h
             const actor = remote_actors.lookupById(&app_state.conn, allocator, st.?.remote_actor_id) catch
                 return .{ .status = .internal_server_error, .body = "internal server error\n" };
             if (actor == null) continue;
+            if (viewer_user_id == null and !isPublicishVisibility(st.?.visibility)) continue;
 
-            payloads.append(allocator, masto.makeRemoteStatusPayloadForViewer(app_state, allocator, actor.?, st.?, info.?.user_id)) catch
+            const payload = if (viewer_user_id) |vid|
+                masto.makeRemoteStatusPayloadForViewer(app_state, allocator, actor.?, st.?, vid)
+            else
+                masto.makeRemoteStatusPayload(app_state, allocator, actor.?, st.?);
+            payloads.append(allocator, payload) catch
                 return .{ .status = .internal_server_error, .body = "internal server error\n" };
         } else {
             const st = statuses.lookup(&app_state.conn, allocator, id) catch
                 return .{ .status = .internal_server_error, .body = "internal server error\n" };
             if (st == null) continue;
+            if (viewer_user_id == null and !isPublicishVisibility(st.?.visibility)) continue;
 
-            payloads.append(allocator, masto.makeStatusPayloadForViewer(app_state, allocator, user.?, st.?, info.?.user_id)) catch
+            const author = users.lookupUserById(&app_state.conn, allocator, st.?.user_id) catch
+                return .{ .status = .internal_server_error, .body = "internal server error\n" };
+            if (author == null) continue;
+
+            const payload = if (viewer_user_id) |vid|
+                masto.makeStatusPayloadForViewer(app_state, allocator, author.?, st.?, vid)
+            else
+                masto.makeStatusPayload(app_state, allocator, author.?, st.?);
+            payloads.append(allocator, payload) catch
                 return .{ .status = .internal_server_error, .body = "internal server error\n" };
         }
     }
@@ -427,10 +432,14 @@ pub fn createStatus(app_state: *app.App, allocator: std.mem.Allocator, req: http
 }
 
 pub fn getStatus(app_state: *app.App, allocator: std.mem.Allocator, req: http_types.Request, path: []const u8) http_types.Response {
-    const token = common.bearerToken(req.authorization) orelse return common.unauthorized(allocator);
-    const info = oauth.verifyAccessToken(&app_state.conn, allocator, token) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-    if (info == null) return common.unauthorized(allocator);
+    const viewer_user_id: ?i64 = blk: {
+        if (req.authorization == null) break :blk null;
+        const token = common.bearerToken(req.authorization) orelse return common.unauthorized(allocator);
+        const info = oauth.verifyAccessToken(&app_state.conn, allocator, token) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        if (info == null) return common.unauthorized(allocator);
+        break :blk info.?.user_id;
+    };
 
     const id_str = path["/api/v1/statuses/".len..];
     const id = std.fmt.parseInt(i64, id_str, 10) catch return .{ .status = .not_found, .body = "not found\n" };
@@ -443,26 +452,32 @@ pub fn getStatus(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
         const actor = remote_actors.lookupById(&app_state.conn, allocator, st.?.remote_actor_id) catch
             return .{ .status = .internal_server_error, .body = "internal server error\n" };
         if (actor == null) return .{ .status = .not_found, .body = "not found\n" };
+        if (viewer_user_id == null and !isPublicishVisibility(st.?.visibility)) return .{ .status = .not_found, .body = "not found\n" };
 
-        return remoteStatusResponse(app_state, allocator, info.?.user_id, actor.?, st.?);
+        return remoteStatusResponse(app_state, allocator, viewer_user_id, actor.?, st.?);
     }
 
     const st = statuses.lookup(&app_state.conn, allocator, id) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
     if (st == null) return .{ .status = .not_found, .body = "not found\n" };
+    if (viewer_user_id == null and !isPublicishVisibility(st.?.visibility)) return .{ .status = .not_found, .body = "not found\n" };
 
-    const user = users.lookupUserById(&app_state.conn, allocator, info.?.user_id) catch
+    const author = users.lookupUserById(&app_state.conn, allocator, st.?.user_id) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
-    if (user == null) return common.unauthorized(allocator);
+    if (author == null) return .{ .status = .not_found, .body = "not found\n" };
 
-    return statusResponse(app_state, allocator, info.?.user_id, user.?, st.?);
+    return statusResponse(app_state, allocator, viewer_user_id, author.?, st.?);
 }
 
 pub fn statusContext(app_state: *app.App, allocator: std.mem.Allocator, req: http_types.Request, path: []const u8) http_types.Response {
-    const token = common.bearerToken(req.authorization) orelse return common.unauthorized(allocator);
-    const info = oauth.verifyAccessToken(&app_state.conn, allocator, token) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-    if (info == null) return common.unauthorized(allocator);
+    const viewer_user_id: ?i64 = blk: {
+        if (req.authorization == null) break :blk null;
+        const token = common.bearerToken(req.authorization) orelse return common.unauthorized(allocator);
+        const info = oauth.verifyAccessToken(&app_state.conn, allocator, token) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        if (info == null) return common.unauthorized(allocator);
+        break :blk info.?.user_id;
+    };
 
     const prefix = "/api/v1/statuses/";
     const suffix = "/context";
@@ -476,15 +491,13 @@ pub fn statusContext(app_state: *app.App, allocator: std.mem.Allocator, req: htt
         const st = remote_statuses.lookup(&app_state.conn, allocator, id) catch
             return .{ .status = .internal_server_error, .body = "internal server error\n" };
         if (st == null) return .{ .status = .not_found, .body = "not found\n" };
+        if (viewer_user_id == null and !isPublicishVisibility(st.?.visibility)) return .{ .status = .not_found, .body = "not found\n" };
     } else {
         const st = statuses.lookup(&app_state.conn, allocator, id) catch
             return .{ .status = .internal_server_error, .body = "internal server error\n" };
         if (st == null) return .{ .status = .not_found, .body = "not found\n" };
+        if (viewer_user_id == null and !isPublicishVisibility(st.?.visibility)) return .{ .status = .not_found, .body = "not found\n" };
     }
-
-    const user = users.lookupUserById(&app_state.conn, allocator, info.?.user_id) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
-    if (user == null) return common.unauthorized(allocator);
 
     var ancestors: std.ArrayListUnmanaged(StatusPayload) = .empty;
     defer ancestors.deinit(allocator);
@@ -512,15 +525,18 @@ pub fn statusContext(app_state: *app.App, allocator: std.mem.Allocator, req: htt
             const parent_st = remote_statuses.lookup(&app_state.conn, allocator, parent_id) catch
                 return .{ .status = .internal_server_error, .body = "internal server error\n" };
             if (parent_st == null) break;
+            if (viewer_user_id == null and !isPublicishVisibility(parent_st.?.visibility)) break;
 
             const actor = remote_actors.lookupById(&app_state.conn, allocator, parent_st.?.remote_actor_id) catch
                 return .{ .status = .internal_server_error, .body = "internal server error\n" };
             if (actor == null) break;
 
-            ancestors.append(
-                allocator,
-                masto.makeRemoteStatusPayloadForViewer(app_state, allocator, actor.?, parent_st.?, info.?.user_id),
-            ) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
+            const payload = if (viewer_user_id) |vid|
+                masto.makeRemoteStatusPayloadForViewer(app_state, allocator, actor.?, parent_st.?, vid)
+            else
+                masto.makeRemoteStatusPayload(app_state, allocator, actor.?, parent_st.?);
+            ancestors.append(allocator, payload) catch
+                return .{ .status = .internal_server_error, .body = "internal server error\n" };
 
             cur_id = parent_id;
             continue;
@@ -529,9 +545,21 @@ pub fn statusContext(app_state: *app.App, allocator: std.mem.Allocator, req: htt
         const parent_st = statuses.lookup(&app_state.conn, allocator, parent_id) catch
             return .{ .status = .internal_server_error, .body = "internal server error\n" };
         if (parent_st == null) break;
-        if (parent_st.?.user_id != info.?.user_id) break;
+        if (viewer_user_id) |vid| {
+            if (parent_st.?.user_id != vid) break;
+        } else if (!isPublicishVisibility(parent_st.?.visibility)) {
+            break;
+        }
 
-        ancestors.append(allocator, masto.makeStatusPayloadForViewer(app_state, allocator, user.?, parent_st.?, info.?.user_id)) catch
+        const author = users.lookupUserById(&app_state.conn, allocator, parent_st.?.user_id) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        if (author == null) break;
+
+        const payload = if (viewer_user_id) |vid|
+            masto.makeStatusPayloadForViewer(app_state, allocator, author.?, parent_st.?, vid)
+        else
+            masto.makeStatusPayload(app_state, allocator, author.?, parent_st.?);
+        ancestors.append(allocator, payload) catch
             return .{ .status = .internal_server_error, .body = "internal server error\n" };
 
         cur_id = parent_id;
@@ -550,12 +578,17 @@ pub fn statusContext(app_state: *app.App, allocator: std.mem.Allocator, req: htt
             const st = remote_statuses.lookup(&app_state.conn, allocator, desc_id) catch
                 return .{ .status = .internal_server_error, .body = "internal server error\n" };
             if (st == null) continue;
+            if (viewer_user_id == null and !isPublicishVisibility(st.?.visibility)) continue;
 
             const actor = remote_actors.lookupById(&app_state.conn, allocator, st.?.remote_actor_id) catch
                 return .{ .status = .internal_server_error, .body = "internal server error\n" };
             if (actor == null) continue;
 
-            descendants.append(allocator, masto.makeRemoteStatusPayloadForViewer(app_state, allocator, actor.?, st.?, info.?.user_id)) catch
+            const payload = if (viewer_user_id) |vid|
+                masto.makeRemoteStatusPayloadForViewer(app_state, allocator, actor.?, st.?, vid)
+            else
+                masto.makeRemoteStatusPayload(app_state, allocator, actor.?, st.?);
+            descendants.append(allocator, payload) catch
                 return .{ .status = .internal_server_error, .body = "internal server error\n" };
             continue;
         }
@@ -563,8 +596,21 @@ pub fn statusContext(app_state: *app.App, allocator: std.mem.Allocator, req: htt
         const st = statuses.lookup(&app_state.conn, allocator, desc_id) catch
             return .{ .status = .internal_server_error, .body = "internal server error\n" };
         if (st == null) continue;
-        if (st.?.user_id != info.?.user_id) continue;
-        descendants.append(allocator, masto.makeStatusPayloadForViewer(app_state, allocator, user.?, st.?, info.?.user_id)) catch
+        if (viewer_user_id) |vid| {
+            if (st.?.user_id != vid) continue;
+        } else if (!isPublicishVisibility(st.?.visibility)) {
+            continue;
+        }
+
+        const author = users.lookupUserById(&app_state.conn, allocator, st.?.user_id) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        if (author == null) continue;
+
+        const payload = if (viewer_user_id) |vid|
+            masto.makeStatusPayloadForViewer(app_state, allocator, author.?, st.?, vid)
+        else
+            masto.makeStatusPayload(app_state, allocator, author.?, st.?);
+        descendants.append(allocator, payload) catch
             return .{ .status = .internal_server_error, .body = "internal server error\n" };
     }
 
@@ -733,8 +779,11 @@ pub fn deleteStatus(app_state: *app.App, allocator: std.mem.Allocator, req: http
     return resp;
 }
 
-fn statusResponse(app_state: *app.App, allocator: std.mem.Allocator, viewer_user_id: i64, user: users.User, st: statuses.Status) http_types.Response {
-    const payload = masto.makeStatusPayloadForViewer(app_state, allocator, user, st, viewer_user_id);
+fn statusResponse(app_state: *app.App, allocator: std.mem.Allocator, viewer_user_id: ?i64, user: users.User, st: statuses.Status) http_types.Response {
+    const payload = if (viewer_user_id) |vid|
+        masto.makeStatusPayloadForViewer(app_state, allocator, user, st, vid)
+    else
+        masto.makeStatusPayload(app_state, allocator, user, st);
     const body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
     return .{
@@ -746,11 +795,14 @@ fn statusResponse(app_state: *app.App, allocator: std.mem.Allocator, viewer_user
 fn remoteStatusResponse(
     app_state: *app.App,
     allocator: std.mem.Allocator,
-    viewer_user_id: i64,
+    viewer_user_id: ?i64,
     actor: remote_actors.RemoteActor,
     st: remote_statuses.RemoteStatus,
 ) http_types.Response {
-    const payload = masto.makeRemoteStatusPayloadForViewer(app_state, allocator, actor, st, viewer_user_id);
+    const payload = if (viewer_user_id) |vid|
+        masto.makeRemoteStatusPayloadForViewer(app_state, allocator, actor, st, vid)
+    else
+        masto.makeRemoteStatusPayload(app_state, allocator, actor, st);
     const body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
     return .{

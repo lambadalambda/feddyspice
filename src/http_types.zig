@@ -13,6 +13,7 @@ pub const Request = struct {
     signature: ?[]const u8 = null,
     cookie: ?[]const u8 = null,
     authorization: ?[]const u8 = null,
+    remote_addr: ?[]const u8 = null,
 };
 
 pub const Response = struct {

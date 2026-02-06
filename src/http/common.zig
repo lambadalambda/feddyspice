@@ -37,6 +37,52 @@ pub fn queryString(target: []const u8) []const u8 {
     return target[idx + 1 ..];
 }
 
+fn queryKeyMatches(key: []const u8, keys: []const []const u8) bool {
+    for (keys) |k| {
+        if (std.mem.eql(u8, key, k)) return true;
+    }
+    return false;
+}
+
+pub fn collectQueryValuesForKeys(
+    allocator: std.mem.Allocator,
+    query: []const u8,
+    keys: []const []const u8,
+) std.mem.Allocator.Error![]const []const u8 {
+    var out: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer out.deinit(allocator);
+
+    var it = std.mem.splitScalar(u8, query, '&');
+    while (it.next()) |pair_raw| {
+        if (pair_raw.len == 0) continue;
+        const eq = std.mem.indexOfScalar(u8, pair_raw, '=') orelse continue;
+        const key = pair_raw[0..eq];
+        const value = pair_raw[eq + 1 ..];
+        if (value.len == 0) continue;
+        if (!queryKeyMatches(key, keys)) continue;
+        try out.append(allocator, value);
+    }
+
+    return out.toOwnedSlice(allocator);
+}
+
+pub fn requesterRateLimitSubject(req: http_types.Request) []const u8 {
+    const raw = req.remote_addr orelse return "unknown";
+    const trimmed = std.mem.trim(u8, raw, " \t");
+    if (trimmed.len == 0) return "unknown";
+    if (!headerValueIsSafe(trimmed)) return "unknown";
+    return trimmed;
+}
+
+pub fn scopedRateLimitKeyAlloc(
+    allocator: std.mem.Allocator,
+    prefix: []const u8,
+    req: http_types.Request,
+) std.mem.Allocator.Error![]u8 {
+    const subject = requesterRateLimitSubject(req);
+    return std.fmt.allocPrint(allocator, "{s}:{s}", .{ prefix, subject });
+}
+
 pub fn targetPath(target: []const u8) []const u8 {
     if (std.mem.indexOfScalar(u8, target, '?')) |idx| return target[0..idx];
     return target;
@@ -276,6 +322,28 @@ test "isSameOrigin uses configured origin, not Host header" {
     };
 
     try std.testing.expect(isSameOrigin(req, "https", "social.example.com"));
+}
+
+test "collectQueryValuesForKeys extracts repeated aliases" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const keys = [_][]const u8{ "ids", "ids[]", "ids%5B%5D" };
+    const vals = try collectQueryValuesForKeys(a, "ids=1&x=0&ids[]=2&ids%5B%5D=3&ids[]=", &keys);
+    try std.testing.expectEqual(@as(usize, 3), vals.len);
+    try std.testing.expectEqualStrings("1", vals[0]);
+    try std.testing.expectEqualStrings("2", vals[1]);
+    try std.testing.expectEqualStrings("3", vals[2]);
+}
+
+test "requesterRateLimitSubject uses remote address when safe" {
+    const req: http_types.Request = .{
+        .method = .GET,
+        .target = "/",
+        .remote_addr = "203.0.113.9",
+    };
+    try std.testing.expectEqualStrings("203.0.113.9", requesterRateLimitSubject(req));
 }
 
 test "isSameOrigin trims OWS around Origin/Referer" {

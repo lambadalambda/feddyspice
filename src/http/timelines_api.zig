@@ -64,18 +64,18 @@ fn retainStatusesNewerThan(payloads: *std.ArrayListUnmanaged(StatusPayload), cur
     payloads.items = payloads.items[0..out_len];
 }
 
-pub fn publicTimeline(app_state: *app.App, allocator: std.mem.Allocator, req: http_types.Request) http_types.Response {
-    const viewer_user_id: ?i64 = blk: {
-        if (req.authorization == null) break :blk null;
-        const token = common.bearerToken(req.authorization) orelse return common.unauthorized(allocator);
-        const info = oauth.verifyAccessToken(&app_state.conn, allocator, token) catch
-            return .{ .status = .internal_server_error, .body = "internal server error\n" };
-        if (info == null) return common.unauthorized(allocator);
-        break :blk info.?.user_id;
-    };
+const TimelineParams = struct {
+    limit: usize,
+    max_id: ?i64,
+    since_id: ?i64,
+    min_id: ?i64,
+    local_only: bool,
+};
 
-    const q = common.queryString(req.target);
+fn parseTimelineParams(allocator: std.mem.Allocator, target: []const u8, allow_local: bool) TimelineParams {
+    const q = common.queryString(target);
     var params = form.parse(allocator, q) catch form.Form{ .map = .empty };
+    defer params.deinit(allocator);
 
     const limit: usize = blk: {
         const lim_str = params.get("limit") orelse break :blk 20;
@@ -99,11 +99,94 @@ pub fn publicTimeline(app_state: *app.App, allocator: std.mem.Allocator, req: ht
     };
 
     const local_only: bool = blk: {
+        if (!allow_local) break :blk false;
         const s = params.get("local") orelse break :blk false;
         if (std.ascii.eqlIgnoreCase(s, "true")) break :blk true;
         if (std.mem.eql(u8, s, "1")) break :blk true;
         break :blk false;
     };
+
+    return .{
+        .limit = limit,
+        .max_id = max_id,
+        .since_id = since_id,
+        .min_id = min_id,
+        .local_only = local_only,
+    };
+}
+
+fn applySinceAndMinFilters(
+    app_state: *app.App,
+    allocator: std.mem.Allocator,
+    payloads: *std.ArrayListUnmanaged(StatusPayload),
+    since_id: ?i64,
+    min_id: ?i64,
+) void {
+    if (since_id) |id| {
+        if (lookupTimelineCursor(app_state, allocator, id)) |c| {
+            retainStatusesNewerThan(payloads, c);
+        }
+    }
+    if (min_id) |id| {
+        if (lookupTimelineCursor(app_state, allocator, id)) |c| {
+            retainStatusesNewerThan(payloads, c);
+        }
+    }
+}
+
+fn timelineLinkHeaders(
+    app_state: *app.App,
+    allocator: std.mem.Allocator,
+    endpoint_path: []const u8,
+    limit: usize,
+    slice: []const StatusPayload,
+    include_local_param: bool,
+    local_only: bool,
+) ![]const std.http.Header {
+    if (slice.len == 0) return &.{};
+
+    const base = try url.baseUrlAlloc(app_state, allocator);
+    const newest_id = statusPayloadIdInt(slice[0]);
+    const oldest_id = statusPayloadIdInt(slice[slice.len - 1]);
+    const local_param: []const u8 = if (include_local_param and local_only) "&local=true" else "";
+
+    const next_url = try std.fmt.allocPrint(
+        allocator,
+        "{s}{s}?limit={d}{s}&max_id={d}",
+        .{ base, endpoint_path, limit, local_param, oldest_id },
+    );
+    const prev_url = try std.fmt.allocPrint(
+        allocator,
+        "{s}{s}?limit={d}{s}&since_id={d}",
+        .{ base, endpoint_path, limit, local_param, newest_id },
+    );
+    const link = try std.fmt.allocPrint(
+        allocator,
+        "<{s}>; rel=\"next\", <{s}>; rel=\"prev\"",
+        .{ next_url, prev_url },
+    );
+
+    const header_slice = try allocator.alloc(std.http.Header, 1);
+    header_slice[0] = .{ .name = "link", .value = link };
+    return header_slice;
+}
+
+pub fn publicTimeline(app_state: *app.App, allocator: std.mem.Allocator, req: http_types.Request) http_types.Response {
+    const viewer_user_id: ?i64 = blk: {
+        if (req.authorization == null) break :blk null;
+        const token = common.bearerToken(req.authorization) orelse return common.unauthorized(allocator);
+        const info = oauth.verifyAccessToken(&app_state.conn, allocator, token) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        if (info == null) return common.unauthorized(allocator);
+        break :blk info.?.user_id;
+    };
+
+    const parsed = parseTimelineParams(allocator, req.target, true);
+    const limit = parsed.limit;
+    const max_id = parsed.max_id;
+    const since_id = parsed.since_id;
+    const min_id = parsed.min_id;
+    const local_only = parsed.local_only;
 
     const cursor = if (max_id) |id| lookupTimelineCursor(app_state, allocator, id) else null;
     const before_created_at = if (cursor) |c| c.created_at else null;
@@ -149,50 +232,21 @@ pub fn publicTimeline(app_state: *app.App, allocator: std.mem.Allocator, req: ht
 
     std.sort.block(StatusPayload, payloads.items, {}, masto.statusPayloadNewerFirst);
 
-    if (since_id) |id| {
-        if (lookupTimelineCursor(app_state, allocator, id)) |c| {
-            retainStatusesNewerThan(&payloads, c);
-        }
-    }
-    if (min_id) |id| {
-        if (lookupTimelineCursor(app_state, allocator, id)) |c| {
-            retainStatusesNewerThan(&payloads, c);
-        }
-    }
+    applySinceAndMinFilters(app_state, allocator, &payloads, since_id, min_id);
 
     const slice = payloads.items[0..@min(limit, payloads.items.len)];
     const body = std.json.Stringify.valueAlloc(allocator, slice, .{}) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
 
-    var headers: []const std.http.Header = &.{};
-    if (slice.len > 0) {
-        const base = url.baseUrlAlloc(app_state, allocator) catch
-            return .{ .status = .internal_server_error, .body = "internal server error\n" };
-        const newest_id = statusPayloadIdInt(slice[0]);
-        const oldest_id = statusPayloadIdInt(slice[slice.len - 1]);
-
-        const local_param: []const u8 = if (local_only) "&local=true" else "";
-        const next_url = std.fmt.allocPrint(
-            allocator,
-            "{s}/api/v1/timelines/public?limit={d}{s}&max_id={d}",
-            .{ base, limit, local_param, oldest_id },
-        ) catch "";
-        const prev_url = std.fmt.allocPrint(
-            allocator,
-            "{s}/api/v1/timelines/public?limit={d}{s}&since_id={d}",
-            .{ base, limit, local_param, newest_id },
-        ) catch "";
-        const link = std.fmt.allocPrint(
-            allocator,
-            "<{s}>; rel=\"next\", <{s}>; rel=\"prev\"",
-            .{ next_url, prev_url },
-        ) catch "";
-
-        var header_slice = allocator.alloc(std.http.Header, 1) catch
-            return .{ .status = .internal_server_error, .body = "internal server error\n" };
-        header_slice[0] = .{ .name = "link", .value = link };
-        headers = header_slice;
-    }
+    const headers = timelineLinkHeaders(
+        app_state,
+        allocator,
+        "/api/v1/timelines/public",
+        limit,
+        slice,
+        true,
+        local_only,
+    ) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
 
     return .{
         .content_type = "application/json; charset=utf-8",
@@ -207,29 +261,11 @@ pub fn homeTimeline(app_state: *app.App, allocator: std.mem.Allocator, req: http
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
     if (info == null) return common.unauthorized(allocator);
 
-    const q = common.queryString(req.target);
-    var params = form.parse(allocator, q) catch form.Form{ .map = .empty };
-
-    const limit: usize = blk: {
-        const lim_str = params.get("limit") orelse break :blk 20;
-        const parsed = std.fmt.parseInt(usize, lim_str, 10) catch 20;
-        break :blk @min(parsed, 200);
-    };
-
-    const max_id: ?i64 = blk: {
-        const s = params.get("max_id") orelse break :blk null;
-        break :blk std.fmt.parseInt(i64, s, 10) catch null;
-    };
-
-    const since_id: ?i64 = blk: {
-        const s = params.get("since_id") orelse break :blk null;
-        break :blk std.fmt.parseInt(i64, s, 10) catch null;
-    };
-
-    const min_id: ?i64 = blk: {
-        const s = params.get("min_id") orelse break :blk null;
-        break :blk std.fmt.parseInt(i64, s, 10) catch null;
-    };
+    const parsed = parseTimelineParams(allocator, req.target, false);
+    const limit = parsed.limit;
+    const max_id = parsed.max_id;
+    const since_id = parsed.since_id;
+    const min_id = parsed.min_id;
 
     const cursor = if (max_id) |id| lookupTimelineCursor(app_state, allocator, id) else null;
     const before_created_at = if (cursor) |c| c.created_at else null;
@@ -277,49 +313,21 @@ pub fn homeTimeline(app_state: *app.App, allocator: std.mem.Allocator, req: http
 
     std.sort.block(StatusPayload, payloads.items, {}, masto.statusPayloadNewerFirst);
 
-    if (since_id) |id| {
-        if (lookupTimelineCursor(app_state, allocator, id)) |c| {
-            retainStatusesNewerThan(&payloads, c);
-        }
-    }
-    if (min_id) |id| {
-        if (lookupTimelineCursor(app_state, allocator, id)) |c| {
-            retainStatusesNewerThan(&payloads, c);
-        }
-    }
+    applySinceAndMinFilters(app_state, allocator, &payloads, since_id, min_id);
 
     const slice = payloads.items[0..@min(limit, payloads.items.len)];
     const body = std.json.Stringify.valueAlloc(allocator, slice, .{}) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
 
-    var headers: []const std.http.Header = &.{};
-    if (slice.len > 0) {
-        const base = url.baseUrlAlloc(app_state, allocator) catch
-            return .{ .status = .internal_server_error, .body = "internal server error\n" };
-        const newest_id = statusPayloadIdInt(slice[0]);
-        const oldest_id = statusPayloadIdInt(slice[slice.len - 1]);
-
-        const next_url = std.fmt.allocPrint(
-            allocator,
-            "{s}/api/v1/timelines/home?limit={d}&max_id={d}",
-            .{ base, limit, oldest_id },
-        ) catch "";
-        const prev_url = std.fmt.allocPrint(
-            allocator,
-            "{s}/api/v1/timelines/home?limit={d}&since_id={d}",
-            .{ base, limit, newest_id },
-        ) catch "";
-        const link = std.fmt.allocPrint(
-            allocator,
-            "<{s}>; rel=\"next\", <{s}>; rel=\"prev\"",
-            .{ next_url, prev_url },
-        ) catch "";
-
-        var header_slice = allocator.alloc(std.http.Header, 1) catch
-            return .{ .status = .internal_server_error, .body = "internal server error\n" };
-        header_slice[0] = .{ .name = "link", .value = link };
-        headers = header_slice;
-    }
+    const headers = timelineLinkHeaders(
+        app_state,
+        allocator,
+        "/api/v1/timelines/home",
+        limit,
+        slice,
+        false,
+        false,
+    ) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
 
     return .{
         .content_type = "application/json; charset=utf-8",
@@ -334,29 +342,11 @@ pub fn directTimeline(app_state: *app.App, allocator: std.mem.Allocator, req: ht
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
     if (info == null) return common.unauthorized(allocator);
 
-    const q = common.queryString(req.target);
-    var params = form.parse(allocator, q) catch form.Form{ .map = .empty };
-
-    const limit: usize = blk: {
-        const lim_str = params.get("limit") orelse break :blk 20;
-        const parsed = std.fmt.parseInt(usize, lim_str, 10) catch 20;
-        break :blk @min(parsed, 200);
-    };
-
-    const max_id: ?i64 = blk: {
-        const s = params.get("max_id") orelse break :blk null;
-        break :blk std.fmt.parseInt(i64, s, 10) catch null;
-    };
-
-    const since_id: ?i64 = blk: {
-        const s = params.get("since_id") orelse break :blk null;
-        break :blk std.fmt.parseInt(i64, s, 10) catch null;
-    };
-
-    const min_id: ?i64 = blk: {
-        const s = params.get("min_id") orelse break :blk null;
-        break :blk std.fmt.parseInt(i64, s, 10) catch null;
-    };
+    const parsed = parseTimelineParams(allocator, req.target, false);
+    const limit = parsed.limit;
+    const max_id = parsed.max_id;
+    const since_id = parsed.since_id;
+    const min_id = parsed.min_id;
 
     const cursor = if (max_id) |id| lookupTimelineCursor(app_state, allocator, id) else null;
     const before_created_at = if (cursor) |c| c.created_at else null;
@@ -399,49 +389,21 @@ pub fn directTimeline(app_state: *app.App, allocator: std.mem.Allocator, req: ht
 
     std.sort.block(StatusPayload, payloads.items, {}, masto.statusPayloadNewerFirst);
 
-    if (since_id) |id| {
-        if (lookupTimelineCursor(app_state, allocator, id)) |c| {
-            retainStatusesNewerThan(&payloads, c);
-        }
-    }
-    if (min_id) |id| {
-        if (lookupTimelineCursor(app_state, allocator, id)) |c| {
-            retainStatusesNewerThan(&payloads, c);
-        }
-    }
+    applySinceAndMinFilters(app_state, allocator, &payloads, since_id, min_id);
 
     const slice = payloads.items[0..@min(limit, payloads.items.len)];
     const body = std.json.Stringify.valueAlloc(allocator, slice, .{}) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
 
-    var headers: []const std.http.Header = &.{};
-    if (slice.len > 0) {
-        const base = url.baseUrlAlloc(app_state, allocator) catch
-            return .{ .status = .internal_server_error, .body = "internal server error\n" };
-        const newest_id = statusPayloadIdInt(slice[0]);
-        const oldest_id = statusPayloadIdInt(slice[slice.len - 1]);
-
-        const next_url = std.fmt.allocPrint(
-            allocator,
-            "{s}/api/v1/timelines/direct?limit={d}&max_id={d}",
-            .{ base, limit, oldest_id },
-        ) catch "";
-        const prev_url = std.fmt.allocPrint(
-            allocator,
-            "{s}/api/v1/timelines/direct?limit={d}&since_id={d}",
-            .{ base, limit, newest_id },
-        ) catch "";
-        const link = std.fmt.allocPrint(
-            allocator,
-            "<{s}>; rel=\"next\", <{s}>; rel=\"prev\"",
-            .{ next_url, prev_url },
-        ) catch "";
-
-        var header_slice = allocator.alloc(std.http.Header, 1) catch
-            return .{ .status = .internal_server_error, .body = "internal server error\n" };
-        header_slice[0] = .{ .name = "link", .value = link };
-        headers = header_slice;
-    }
+    const headers = timelineLinkHeaders(
+        app_state,
+        allocator,
+        "/api/v1/timelines/direct",
+        limit,
+        slice,
+        false,
+        false,
+    ) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
 
     return .{
         .content_type = "application/json; charset=utf-8",
@@ -527,36 +489,12 @@ pub fn tagTimeline(app_state: *app.App, allocator: std.mem.Allocator, req: http_
         break :blk info.?.user_id;
     };
 
-    const q = common.queryString(req.target);
-    var params = form.parse(allocator, q) catch form.Form{ .map = .empty };
-
-    const limit: usize = blk: {
-        const lim_str = params.get("limit") orelse break :blk 20;
-        const parsed = std.fmt.parseInt(usize, lim_str, 10) catch 20;
-        break :blk @min(parsed, 200);
-    };
-
-    const max_id: ?i64 = blk: {
-        const s = params.get("max_id") orelse break :blk null;
-        break :blk std.fmt.parseInt(i64, s, 10) catch null;
-    };
-
-    const since_id: ?i64 = blk: {
-        const s = params.get("since_id") orelse break :blk null;
-        break :blk std.fmt.parseInt(i64, s, 10) catch null;
-    };
-
-    const min_id: ?i64 = blk: {
-        const s = params.get("min_id") orelse break :blk null;
-        break :blk std.fmt.parseInt(i64, s, 10) catch null;
-    };
-
-    const local_only: bool = blk: {
-        const s = params.get("local") orelse break :blk false;
-        if (std.ascii.eqlIgnoreCase(s, "true")) break :blk true;
-        if (std.mem.eql(u8, s, "1")) break :blk true;
-        break :blk false;
-    };
+    const parsed = parseTimelineParams(allocator, req.target, true);
+    const limit = parsed.limit;
+    const max_id = parsed.max_id;
+    const since_id = parsed.since_id;
+    const min_id = parsed.min_id;
+    const local_only = parsed.local_only;
 
     const cursor = if (max_id) |id| lookupTimelineCursor(app_state, allocator, id) else null;
     const before_created_at = if (cursor) |c| c.created_at else null;
@@ -607,50 +545,23 @@ pub fn tagTimeline(app_state: *app.App, allocator: std.mem.Allocator, req: http_
 
     std.sort.block(StatusPayload, payloads.items, {}, masto.statusPayloadNewerFirst);
 
-    if (since_id) |id| {
-        if (lookupTimelineCursor(app_state, allocator, id)) |c| {
-            retainStatusesNewerThan(&payloads, c);
-        }
-    }
-    if (min_id) |id| {
-        if (lookupTimelineCursor(app_state, allocator, id)) |c| {
-            retainStatusesNewerThan(&payloads, c);
-        }
-    }
+    applySinceAndMinFilters(app_state, allocator, &payloads, since_id, min_id);
 
     const slice = payloads.items[0..@min(limit, payloads.items.len)];
     const body = std.json.Stringify.valueAlloc(allocator, slice, .{}) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
 
-    var headers: []const std.http.Header = &.{};
-    if (slice.len > 0) {
-        const base = url.baseUrlAlloc(app_state, allocator) catch
-            return .{ .status = .internal_server_error, .body = "internal server error\n" };
-        const newest_id = statusPayloadIdInt(slice[0]);
-        const oldest_id = statusPayloadIdInt(slice[slice.len - 1]);
-
-        const local_param: []const u8 = if (local_only) "&local=true" else "";
-        const next_url = std.fmt.allocPrint(
-            allocator,
-            "{s}/api/v1/timelines/tag/{s}?limit={d}{s}&max_id={d}",
-            .{ base, tag_enc, limit, local_param, oldest_id },
-        ) catch "";
-        const prev_url = std.fmt.allocPrint(
-            allocator,
-            "{s}/api/v1/timelines/tag/{s}?limit={d}{s}&since_id={d}",
-            .{ base, tag_enc, limit, local_param, newest_id },
-        ) catch "";
-        const link = std.fmt.allocPrint(
-            allocator,
-            "<{s}>; rel=\"next\", <{s}>; rel=\"prev\"",
-            .{ next_url, prev_url },
-        ) catch "";
-
-        var header_slice = allocator.alloc(std.http.Header, 1) catch
-            return .{ .status = .internal_server_error, .body = "internal server error\n" };
-        header_slice[0] = .{ .name = "link", .value = link };
-        headers = header_slice;
-    }
+    const endpoint_path = std.fmt.allocPrint(allocator, "/api/v1/timelines/tag/{s}", .{tag_enc}) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    const headers = timelineLinkHeaders(
+        app_state,
+        allocator,
+        endpoint_path,
+        limit,
+        slice,
+        true,
+        local_only,
+    ) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
 
     return .{
         .content_type = "application/json; charset=utf-8",

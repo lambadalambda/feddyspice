@@ -65,7 +65,7 @@ fn noteInReplyToUri(note: std.json.ObjectMap) ?[]const u8 {
     return firstIdString(raw);
 }
 
-fn noteVisibility(activity_obj_opt: ?std.json.ObjectMap, note: std.json.ObjectMap) []const u8 {
+pub fn noteVisibility(activity_obj_opt: ?std.json.ObjectMap, note: std.json.ObjectMap) []const u8 {
     if (activitypub_json.truthiness(note.get("directMessage"))) return "direct";
     if (activity_obj_opt) |a| {
         if (activitypub_json.truthiness(a.get("directMessage"))) return "direct";

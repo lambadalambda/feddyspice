@@ -54,6 +54,16 @@ First-time setup:
 - Open `http://localhost:8080/signup` to create the single local user.
 - Then use pl-fe (or visit `/login` for the HTML flow used during OAuth authorization).
 
+## Reverse proxy requirement (production)
+
+Production deployments are expected to run behind a **trusted reverse proxy** (for example Caddy, Coolify, Traefik, or nginx).
+
+- Do not expose feddyspice’s listen port directly to the public internet.
+- Terminate TLS at the proxy and keep `FEDDYSPICE_DOMAIN`/`FEDDYSPICE_SCHEME` aligned with the public URL.
+- Configure the proxy to sanitize/overwrite forwarded headers (`X-Forwarded-For`, `X-Real-IP`, `X-Forwarded-Host`).
+
+feddyspice uses forwarded header values for request identity/logging and host handling. Direct public exposure is supported only for local/dev testing.
+
 ## Configuration (env vars)
 
 `mise` loads `.env` automatically for tasks. For production or `zig build run`, export variables explicitly.

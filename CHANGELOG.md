@@ -116,6 +116,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- Added a prioritized API/Fediverse audit section to `debt.md` with concrete bug/semantic mismatch/refactor findings and code references.
 - `/api/v1/statuses/:id/context` no longer fetches missing remote ancestors at request time; thread backfill happens during ActivityPub ingest.
 - Fedbox: wait for follow acceptance + remote account resolution before posting Pleroma `direct` messages (reduces flakes).
 - Fedbox: use `.fedbox.dev` hostnames to keep Pleroma mention parsing working (Pleroma’s Linkify mention matcher rejects `.test`).
@@ -155,6 +156,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Background: `.sync` job execution now logs federation delivery failures instead of silently ignoring them.
 - DRY: `src/server.zig` now reuses `src/http/common.zig` helpers for parsing request targets and bearer tokens.
 - DRY: multipart form parsing now uses a shared iterator to keep behavior consistent across field/file variants.
+- DRY: timeline endpoints now share pagination/query parsing and Link-header construction helpers.
+- DRY: repeated query-array extraction (`ids[]` / `id[]` aliases) now uses a shared helper in `src/http/common.zig`.
+- DRY: local ActivityPub Note serialization is now shared between federation delivery and outbox/object rendering.
+- Docs: clarified that production deployments must run behind a trusted reverse proxy and should not expose the app port directly.
+- ActivityPub outbox page now prefetches recipients/attachments in batches to reduce per-status query overhead.
+- Outbound ActivityPub GET fetches now include HTTP Signatures (Date/Digest/Signature) when a local actor identity is available.
+- Remote thread backfill fetches now go through federation’s shared signed-fetch helper instead of making unsigned direct transport calls.
+- Fedbox seeding/test helpers now perform CSRF-aware HTML form posts for feddyspice login/signup flows.
 
 ### Fixed
 
@@ -184,9 +193,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Same-origin failures now log the observed `Host`/`Origin`/`Referer` values (escaped) to make reverse-proxy debugging easier.
 - Inbox idempotency now falls back to a body-hash dedupe key when an ActivityPub activity `id` is missing (reduces replay/dup processing).
 - Added basic SQLite-backed rate limiting for high-risk entrypoints (`/login`, `/signup`, `/oauth/token`, `/api/v1/apps`, and ActivityPub inbox) to reduce brute-force/DoS impact.
+- High-risk endpoint rate limits are now scoped per requester (`remote_addr`) instead of globally per route key.
 - `Dockerfile` Zig download works on both amd64/arm64 Docker builders.
 - Mastodon-ish API endpoints accept client JSON + multipart form-data bodies (pl-fe/Elk compatibility) and send permissive CORS headers.
+- Server request-body limits now treat `POST /api/v2/media` like `POST /api/v1/media` (10 MiB cap), avoiding unexpected `413` responses for v2 uploads.
+- `GET /api/v1/statuses/:id` and `GET /api/v1/statuses/:id/context` now allow unauthenticated reads for publicly visible statuses, while keeping private/direct statuses hidden.
+- `GET /api/v1/statuses?ids[]=...` now supports unauthenticated hydration of public/unlisted statuses (private/direct statuses are filtered out without auth).
 - `/api/v2/instance` now advertises the correct streaming base URL (`ws(s)://domain`, not a nested `/api/v1/streaming` path).
+- `/api/v1/instance` and `/api/v2/instance` now report registration availability from single-user state (enabled only before the first local account exists).
 - Streaming WebSocket events now include `stream` (e.g. `["user"]`) for multiplexed clients like pl-fe.
 - WebSocket streaming now echoes `Sec-WebSocket-Protocol` when the client requests it (pl-fe passes the access token as a subprotocol).
 - Streaming WebSocket auth accepts access tokens via `Sec-WebSocket-Protocol` (Elk/browser compatibility).
@@ -207,6 +221,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Inbound ActivityPub `Create` infers `direct` vs `public` visibility based on recipients.
 - Inbound ActivityPub `Create` maps `object.inReplyTo` to known local/remote statuses and stores it (improves threading; remote status `/context` includes ancestors).
 - `GET /api/v1/statuses/:id/context` descendants now include remote replies (threads can cross local/remote reply chains).
+- Fedbox `feddyspice_seed` no longer times out on account creation now that it fetches/signup-posts with CSRF token + cookie.
+- Fedbox test-runner OAuth bootstrap (`create_feddyspice_token`) now includes CSRF fields for `/login` and `/oauth/authorize`, restoring smoke test compatibility.
 - Notifications now include a full `status` payload when `status_id` is present (e.g. for favourite/reblog notifications).
 - `POST /api/v1/follows` is idempotent when the follow already exists.
 - Actor key generation tolerates concurrent requests (avoids transient failures when multiple requests race to create keys).
@@ -219,12 +235,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - ActivityPub visibility is enforced more strictly: outbox/object endpoints exclude `private`/`direct`, unlisted uses `cc=Public`, and outbound Create/Delete deliveries no longer leak non-public posts to `Public`.
 - Outbound Create/Delete deliveries now also fan out to stored recipients (e.g. mentions) even when there are no followers.
 - Outbound ActivityPub `Create(Note)` now includes `inReplyTo` for replies and `tag` mention objects for mentions (better reply/mention federation).
+- ActivityPub outbox/object Note payloads now include `inReplyTo`, mention `tag`, and `attachment`, matching outbound `Create(Note)` semantics.
+- ActivityPub outbox pages now expose a `next` cursor (`?page=true&max_id=...`) so older local posts are discoverable by outbox traversal.
 - `POST /api/v1/accounts/:id/unfollow` now sends ActivityPub `Undo(Follow)` to the remote inbox (previously local-only).
 - Inbox handling now supports ActivityPub `Undo(Follow)` to remove inbound followers.
 - Inbox handling now supports ActivityPub `Like` / `Announce` / `Undo(Like|Announce)` on local statuses, emitting favourite/reblog notifications (and streaming events) for the status owner.
 - Added `status_reactions` table to track remote favourites/reblogs on local statuses (idempotency + Undo support).
 - Inbox handling now supports ActivityPub `Update(Person)` to refresh remote actor metadata (inbox/sharedInbox/public key/avatar/header).
 - Inbox handling now supports ActivityPub `Update(Note)` to apply remote post edits (updates stored content/attachments/visibility and emits a streaming `update`).
+- ActivityPub `Update(Note)` now preserves followers-only visibility as `private` (matching Create/inbox ingest classification), instead of demoting those updates to `direct`.
+- Outbound ActivityPub `Create(Note)` deliveries now include attached local media as ActivityPub `attachment` objects (type/mediaType/url/name).
 - Status payloads now reflect remote favourites/reblogs via `favourites_count` and `reblogs_count`.
 - `GET /api/v1/statuses/:id/{favourited_by,reblogged_by}` now returns real account lists for remote favourites/reblogs of local statuses.
 - `POST /api/v1/statuses/:id/{favourite,unfavourite}` now federates `Like` / `Undo(Like)` for remote statuses.

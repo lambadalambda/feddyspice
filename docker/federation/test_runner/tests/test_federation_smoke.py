@@ -289,11 +289,20 @@ def create_feddyspice_token(feddyspice_base_url: str, username: str, password: s
 
     session = requests.Session()
 
+    login_page = session.get(
+        f"{feddyspice_base_url}/login",
+        verify=verify_arg(),
+        timeout=10,
+    )
+    login_page.raise_for_status()
+    login_csrf = extract_html_csrf_token(login_page.text)
+
     login = session.post(
         f"{feddyspice_base_url}/login",
         data={
             "username": username,
             "password": password,
+            "csrf": login_csrf,
         },
         verify=verify_arg(),
         timeout=10,
@@ -315,6 +324,7 @@ def create_feddyspice_token(feddyspice_base_url: str, username: str, password: s
         allow_redirects=True,
     )
     auth.raise_for_status()
+    auth_csrf = extract_html_csrf_token(auth.text)
 
     auth_post = session.post(
         f"{feddyspice_base_url}/oauth/authorize",
@@ -325,6 +335,7 @@ def create_feddyspice_token(feddyspice_base_url: str, username: str, password: s
             "scope": scopes,
             "state": "xyz",
             "approve": "1",
+            "csrf": auth_csrf,
         },
         verify=verify_arg(),
         timeout=10,
@@ -352,6 +363,13 @@ def create_feddyspice_token(feddyspice_base_url: str, username: str, password: s
     )
     token.raise_for_status()
     return token.json()["access_token"]
+
+
+def extract_html_csrf_token(html_text: str) -> str:
+    m = re.search(r'name="csrf" value="([^"]+)"', html_text)
+    if not m:
+        raise AssertionError("missing csrf token in HTML form response")
+    return m.group(1)
 
 
 def feddyspice_follow(feddyspice_base_url: str, access_token: str, handle: str) -> None:

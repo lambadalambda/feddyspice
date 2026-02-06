@@ -51,7 +51,9 @@ pub fn signupPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_t
     if (!common.isForm(req.content_type)) {
         return .{ .status = .bad_request, .body = "invalid content-type\n" };
     }
-    const ok = rate_limit.allowNow(&app_state.conn, "signup_post", 60_000, 10) catch
+    const rate_key = common.scopedRateLimitKeyAlloc(allocator, "signup_post", req) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    const ok = rate_limit.allowNow(&app_state.conn, rate_key, 60_000, 10) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
     if (!ok) return .{ .status = .too_many_requests, .body = "too many requests\n" };
 
@@ -148,7 +150,9 @@ pub fn loginPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
     if (!common.isForm(req.content_type)) {
         return .{ .status = .bad_request, .body = "invalid content-type\n" };
     }
-    const ok = rate_limit.allowNow(&app_state.conn, "login_post", 60_000, 20) catch
+    const rate_key = common.scopedRateLimitKeyAlloc(allocator, "login_post", req) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    const ok = rate_limit.allowNow(&app_state.conn, rate_key, 60_000, 20) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
     if (!ok) return .{ .status = .too_many_requests, .body = "too many requests\n" };
 

@@ -10,6 +10,7 @@ const followers = @import("followers.zig");
 const http_signatures = @import("http_signatures.zig");
 const http_urls = @import("http/urls.zig");
 const log = @import("log.zig");
+const media = @import("media.zig");
 const notifications = @import("notifications.zig");
 const remote_actors = @import("remote_actors.zig");
 const remote_statuses = @import("remote_statuses.zig");
@@ -68,10 +69,30 @@ const AccountPayload = struct {
     header_static: []const u8,
 };
 
-const MentionTag = struct {
+pub const MentionTag = struct {
     type: []const u8,
     href: []const u8,
     name: []const u8,
+};
+
+pub const NoteAttachment = struct {
+    type: []const u8,
+    mediaType: []const u8,
+    url: []const u8,
+    name: ?[]const u8 = null,
+};
+
+pub const LocalNote = struct {
+    id: []const u8,
+    type: []const u8 = "Note",
+    attributedTo: []const u8,
+    content: []const u8,
+    published: []const u8,
+    to: []const []const u8,
+    cc: []const []const u8,
+    inReplyTo: ?[]const u8 = null,
+    tag: ?[]const MentionTag = null,
+    attachment: []const NoteAttachment = &.{},
 };
 
 const ParsedHandle = struct {
@@ -175,6 +196,26 @@ const SignedDelivery = struct {
     signed: http_signatures.SignedHeaders,
 };
 
+const SignedGetIdentity = struct {
+    private_key_pem: []const u8,
+    key_id: []const u8,
+};
+
+fn signedGetIdentityAlloc(app_state: *app.App, allocator: std.mem.Allocator) Error!?SignedGetIdentity {
+    const local_user = users.lookupFirstUser(&app_state.conn, allocator) catch
+        return error.RemoteFetchFailed;
+    if (local_user == null) return null;
+
+    const keys = try actor_keys.ensureForUser(&app_state.conn, allocator, local_user.?.id);
+    const base = try baseUrlAlloc(app_state, allocator);
+    const actor_id = try std.fmt.allocPrint(allocator, "{s}/users/{s}", .{ base, local_user.?.username });
+    const key_id = try std.fmt.allocPrint(allocator, "{s}#main-key", .{actor_id});
+    return .{
+        .private_key_pem = keys.private_key_pem,
+        .key_id = key_id,
+    };
+}
+
 fn signInboxPost(
     allocator: std.mem.Allocator,
     private_key_pem: []const u8,
@@ -250,13 +291,57 @@ fn deliverSignedInboxPostOkDiscardBody(
     if (resp.status.class() != .success) return error.FollowSendFailed;
 }
 
-fn fetchBodySuccessAlloc(app_state: *app.App, allocator: std.mem.Allocator, opts: transport.FetchOptions) Error![]u8 {
+fn fetchBodySuccessUnsignedAlloc(app_state: *app.App, allocator: std.mem.Allocator, opts: transport.FetchOptions) Error![]u8 {
     const resp = try app_state.transport.fetch(allocator, opts);
     if (resp.status.class() != .success) {
         allocator.free(resp.body);
         return error.RemoteFetchFailed;
     }
     return resp.body;
+}
+
+pub fn fetchBodySuccessAlloc(app_state: *app.App, allocator: std.mem.Allocator, opts: transport.FetchOptions) Error![]u8 {
+    if (opts.method == .GET and opts.payload == null) {
+        const maybe_identity = try signedGetIdentityAlloc(app_state, allocator);
+        if (maybe_identity) |identity| {
+            const uri = try std.Uri.parse(opts.url);
+            const host_header = util_uri.hostHeaderAllocForUri(allocator, uri) catch
+                return error.RemoteFetchFailed;
+            const target = try requestTargetAlloc(allocator, uri);
+            const signed = try http_signatures.signRequest(
+                allocator,
+                identity.private_key_pem,
+                identity.key_id,
+                .GET,
+                target,
+                host_header,
+                "",
+                std.time.timestamp(),
+            );
+
+            const extra = try allocator.alloc(std.http.Header, opts.extra_headers.len + 3);
+            @memcpy(extra[0..opts.extra_headers.len], opts.extra_headers);
+            extra[opts.extra_headers.len + 0] = .{ .name = "date", .value = signed.date };
+            extra[opts.extra_headers.len + 1] = .{ .name = "digest", .value = signed.digest };
+            extra[opts.extra_headers.len + 2] = .{ .name = "signature", .value = signed.signature };
+
+            var headers = opts.headers;
+            headers.host = .{ .override = host_header };
+
+            return fetchBodySuccessUnsignedAlloc(app_state, allocator, .{
+                .url = opts.url,
+                .method = opts.method,
+                .headers = headers,
+                .extra_headers = extra,
+                .payload = opts.payload,
+                .keep_alive = opts.keep_alive,
+                .redirect_behavior = opts.redirect_behavior,
+                .max_body_bytes = opts.max_body_bytes,
+            });
+        }
+    }
+
+    return fetchBodySuccessUnsignedAlloc(app_state, allocator, opts);
 }
 
 fn deliveryInboxUrl(actor: remote_actors.RemoteActor) []const u8 {
@@ -394,6 +479,145 @@ fn htmlEscapeAlloc(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {
 
 fn textToHtmlAlloc(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
     return html.textToHtmlAlloc(allocator, text);
+}
+
+pub fn noteAttachmentType(content_type: []const u8) []const u8 {
+    if (std.mem.startsWith(u8, content_type, "image/")) return "Image";
+    if (std.mem.startsWith(u8, content_type, "video/")) return "Video";
+    if (std.mem.startsWith(u8, content_type, "audio/")) return "Audio";
+    return "Document";
+}
+
+pub fn localNoteAttachmentsAlloc(
+    app_state: *app.App,
+    allocator: std.mem.Allocator,
+    base: []const u8,
+    status_id: i64,
+) Error![]const NoteAttachment {
+    const metas = try media.listForStatus(&app_state.conn, allocator, status_id);
+    defer {
+        for (metas) |*m| m.deinit(allocator);
+        allocator.free(metas);
+    }
+
+    if (metas.len == 0) return &.{};
+
+    const out = try allocator.alloc(NoteAttachment, metas.len);
+    for (metas, 0..) |m, idx| {
+        const media_type = try allocator.dupe(u8, m.content_type);
+        const media_url = try std.fmt.allocPrint(allocator, "{s}/media/{s}", .{ base, m.public_token });
+        const description = if (m.description) |d| try allocator.dupe(u8, d) else null;
+        out[idx] = .{
+            .type = noteAttachmentType(media_type),
+            .mediaType = media_type,
+            .url = media_url,
+            .name = description,
+        };
+    }
+
+    return out;
+}
+
+pub fn localNoteInReplyToUrlAlloc(
+    app_state: *app.App,
+    allocator: std.mem.Allocator,
+    base: []const u8,
+    st: statuses.Status,
+) ?[]const u8 {
+    const rid = st.in_reply_to_id orelse return null;
+
+    if (rid < 0) {
+        const parent = remote_statuses.lookup(&app_state.conn, allocator, rid) catch return null;
+        if (parent == null) return null;
+        return parent.?.remote_uri;
+    }
+
+    const parent = statuses.lookup(&app_state.conn, allocator, rid) catch return null;
+    if (parent == null) return null;
+
+    const parent_user = users.lookupUserById(&app_state.conn, allocator, parent.?.user_id) catch return null;
+    if (parent_user == null) return null;
+
+    return std.fmt.allocPrint(allocator, "{s}/users/{s}/statuses/{d}", .{ base, parent_user.?.username, rid }) catch null;
+}
+
+pub fn mentionTagsFromActorIdsAlloc(
+    app_state: *app.App,
+    allocator: std.mem.Allocator,
+    actor_ids: []const []const u8,
+) Error!?[]const MentionTag {
+    var tag_list: std.ArrayListUnmanaged(MentionTag) = .empty;
+    defer tag_list.deinit(allocator);
+
+    for (actor_ids) |actor_id| {
+        const actor = remote_actors.lookupById(&app_state.conn, allocator, actor_id) catch null;
+        if (actor == null) continue;
+        const name = std.fmt.allocPrint(allocator, "@{s}@{s}", .{ actor.?.preferred_username, actor.?.domain }) catch continue;
+        tag_list.append(allocator, .{
+            .type = "Mention",
+            .href = actor_id,
+            .name = name,
+        }) catch return error.OutOfMemory;
+    }
+
+    if (tag_list.items.len == 0) return null;
+    return try allocator.dupe(MentionTag, tag_list.items);
+}
+
+pub fn localNoteFromStatusWithResolvedMetaAlloc(
+    app_state: *app.App,
+    allocator: std.mem.Allocator,
+    user: users.User,
+    st: statuses.Status,
+    to: []const []const u8,
+    cc: []const []const u8,
+    in_reply_to_url: ?[]const u8,
+    tags: ?[]const MentionTag,
+    attachments: []const NoteAttachment,
+) Error!LocalNote {
+    const base = try baseUrlAlloc(app_state, allocator);
+    const local_actor_id = try std.fmt.allocPrint(allocator, "{s}/users/{s}", .{ base, user.username });
+    const status_url = try std.fmt.allocPrint(allocator, "{s}/users/{s}/statuses/{d}", .{ base, user.username, st.id });
+    const content_html = try textToHtmlAlloc(allocator, st.text);
+
+    return .{
+        .id = status_url,
+        .attributedTo = local_actor_id,
+        .content = content_html,
+        .published = st.created_at,
+        .to = to,
+        .cc = cc,
+        .inReplyTo = in_reply_to_url,
+        .tag = tags,
+        .attachment = attachments,
+    };
+}
+
+pub fn localNoteFromStatusAlloc(
+    app_state: *app.App,
+    allocator: std.mem.Allocator,
+    user: users.User,
+    st: statuses.Status,
+    to: []const []const u8,
+    cc: []const []const u8,
+    mention_actor_ids: []const []const u8,
+) Error!LocalNote {
+    const base = try baseUrlAlloc(app_state, allocator);
+    const in_reply_to_url = localNoteInReplyToUrlAlloc(app_state, allocator, base, st);
+    const tags = try mentionTagsFromActorIdsAlloc(app_state, allocator, mention_actor_ids);
+    const attachments = try localNoteAttachmentsAlloc(app_state, allocator, base, st.id);
+
+    return localNoteFromStatusWithResolvedMetaAlloc(
+        app_state,
+        allocator,
+        user,
+        st,
+        to,
+        cc,
+        in_reply_to_url,
+        tags,
+        attachments,
+    );
 }
 
 fn isMentionUsernameChar(c: u8) bool {
@@ -1025,28 +1249,7 @@ pub fn deliverStatusToFollowers(app_state: *app.App, allocator: std.mem.Allocato
     const key_id = try std.fmt.allocPrint(allocator, "{s}#main-key", .{local_actor_id});
     const followers_url = try std.fmt.allocPrint(allocator, "{s}/users/{s}/followers", .{ base, user.username });
 
-    const status_url = try std.fmt.allocPrint(allocator, "{s}/users/{s}/statuses/{d}", .{ base, user.username, st.id });
-    const create_id = try std.fmt.allocPrint(allocator, "{s}#create", .{status_url});
-
-    const content_html = try textToHtmlAlloc(allocator, st.text);
-
     const public_iri = "https://www.w3.org/ns/activitystreams#Public";
-
-    const in_reply_to_url: ?[]const u8 = if (st.in_reply_to_id) |rid| blk: {
-        if (rid < 0) {
-            const parent = remote_statuses.lookup(&app_state.conn, allocator, rid) catch break :blk null;
-            if (parent == null) break :blk null;
-            break :blk parent.?.remote_uri;
-        }
-
-        const parent = statuses.lookup(&app_state.conn, allocator, rid) catch break :blk null;
-        if (parent == null) break :blk null;
-
-        const parent_user = users.lookupUserById(&app_state.conn, allocator, parent.?.user_id) catch break :blk null;
-        if (parent_user == null) break :blk null;
-
-        break :blk std.fmt.allocPrint(allocator, "{s}/users/{s}/statuses/{d}", .{ base, parent_user.?.username, rid }) catch null;
-    } else null;
 
     var to_list: std.ArrayListUnmanaged([]const u8) = .empty;
     defer to_list.deinit(allocator);
@@ -1091,39 +1294,26 @@ pub fn deliverStatusToFollowers(app_state: *app.App, allocator: std.mem.Allocato
         if (!already) try deliver_ids.append(allocator, id);
     }
 
-    var tag_list: std.ArrayListUnmanaged(MentionTag) = .empty;
-    defer tag_list.deinit(allocator);
-    for (mentioned_ids) |actor_id| {
-        const actor = remote_actors.lookupById(&app_state.conn, allocator, actor_id) catch null;
-        if (actor == null) continue;
-        const name = std.fmt.allocPrint(allocator, "@{s}@{s}", .{ actor.?.preferred_username, actor.?.domain }) catch continue;
-        tag_list.append(allocator, .{
-            .type = "Mention",
-            .href = actor_id,
-            .name = name,
-        }) catch return error.OutOfMemory;
-    }
-    const tags: ?[]const MentionTag = if (tag_list.items.len == 0) null else tag_list.items;
+    const note = try localNoteFromStatusAlloc(
+        app_state,
+        allocator,
+        user,
+        st,
+        to_list.items,
+        cc_list.items,
+        mentioned_ids,
+    );
+    const create_id = try std.fmt.allocPrint(allocator, "{s}#create", .{note.id});
 
     const payload = .{
         .@"@context" = "https://www.w3.org/ns/activitystreams",
         .id = create_id,
         .type = "Create",
-        .actor = local_actor_id,
-        .published = st.created_at,
+        .actor = note.attributedTo,
+        .published = note.published,
         .to = to_list.items,
         .cc = cc_list.items,
-        .object = .{
-            .id = status_url,
-            .type = "Note",
-            .attributedTo = local_actor_id,
-            .content = content_html,
-            .published = st.created_at,
-            .to = to_list.items,
-            .cc = cc_list.items,
-            .inReplyTo = in_reply_to_url,
-            .tag = tags,
-        },
+        .object = note,
     };
 
     const create_body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch
@@ -1247,66 +1437,31 @@ fn deliverDirectStatus(app_state: *app.App, allocator: std.mem.Allocator, user: 
     const local_actor_id = try std.fmt.allocPrint(allocator, "{s}/users/{s}", .{ base, user.username });
     const key_id = try std.fmt.allocPrint(allocator, "{s}#main-key", .{local_actor_id});
 
-    const status_url = try std.fmt.allocPrint(allocator, "{s}/users/{s}/statuses/{d}", .{ base, user.username, st.id });
-    const create_id = try std.fmt.allocPrint(allocator, "{s}#create", .{status_url});
-
-    const content_html = try textToHtmlAlloc(allocator, st.text);
-
-    const in_reply_to_url: ?[]const u8 = if (st.in_reply_to_id) |rid| blk: {
-        if (rid < 0) {
-            const parent = remote_statuses.lookup(&app_state.conn, allocator, rid) catch break :blk null;
-            if (parent == null) break :blk null;
-            break :blk parent.?.remote_uri;
-        }
-
-        const parent = statuses.lookup(&app_state.conn, allocator, rid) catch break :blk null;
-        if (parent == null) break :blk null;
-
-        const parent_user = users.lookupUserById(&app_state.conn, allocator, parent.?.user_id) catch break :blk null;
-        if (parent_user == null) break :blk null;
-
-        break :blk std.fmt.allocPrint(allocator, "{s}/users/{s}/statuses/{d}", .{ base, parent_user.?.username, rid }) catch null;
-    } else null;
-
     const to = try allocator.alloc([]const u8, recipient_ids.len);
     for (recipient_ids, 0..) |actor_id, idx| {
         to[idx] = actor_id;
     }
     const cc: []const []const u8 = &.{};
-
-    var tag_list: std.ArrayListUnmanaged(MentionTag) = .empty;
-    defer tag_list.deinit(allocator);
-    for (recipient_ids) |actor_id| {
-        const actor = remote_actors.lookupById(&app_state.conn, allocator, actor_id) catch null;
-        if (actor == null) continue;
-        const name = std.fmt.allocPrint(allocator, "@{s}@{s}", .{ actor.?.preferred_username, actor.?.domain }) catch continue;
-        tag_list.append(allocator, .{
-            .type = "Mention",
-            .href = actor_id,
-            .name = name,
-        }) catch return error.OutOfMemory;
-    }
-    const tags: ?[]const MentionTag = if (tag_list.items.len == 0) null else tag_list.items;
+    const note = try localNoteFromStatusAlloc(
+        app_state,
+        allocator,
+        user,
+        st,
+        to,
+        cc,
+        recipient_ids,
+    );
+    const create_id = try std.fmt.allocPrint(allocator, "{s}#create", .{note.id});
 
     const payload = .{
         .@"@context" = "https://www.w3.org/ns/activitystreams",
         .id = create_id,
         .type = "Create",
-        .actor = local_actor_id,
-        .published = st.created_at,
+        .actor = note.attributedTo,
+        .published = note.published,
         .to = to,
         .cc = cc,
-        .object = .{
-            .id = status_url,
-            .type = "Note",
-            .attributedTo = local_actor_id,
-            .content = content_html,
-            .published = st.created_at,
-            .to = to,
-            .cc = cc,
-            .inReplyTo = in_reply_to_url,
-            .tag = tags,
-        },
+        .object = note,
     };
 
     const create_body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch
@@ -1508,6 +1663,9 @@ test "deliverStatusToFollowers direct uses stored recipients without resolving h
 
     const user = (try users.lookupUserById(&app_state.conn, a, user_id)).?;
     const st = try statuses.create(&app_state.conn, a, user_id, "hello @bob@remote.test", "direct", null);
+    var m1 = try media.createWithToken(&app_state.conn, a, user_id, "tok-direct-1", "image/png", "PNGDATA", "alt direct", 0);
+    defer m1.deinit(a);
+    try std.testing.expect(try media.attachToStatus(&app_state.conn, st.id, m1.id, 0));
     try status_recipients.add(&app_state.conn, st.id, remote_actor_id);
 
     try mock.pushExpected(.{ .method = .POST, .url = remote_inbox, .response_status = .accepted, .response_body = "" });
@@ -1529,6 +1687,14 @@ test "deliverStatusToFollowers direct uses stored recipients without resolving h
     try std.testing.expectEqualStrings("Mention", tags_val.array.items[0].object.get("type").?.string);
     try std.testing.expectEqualStrings(remote_actor_id, tags_val.array.items[0].object.get("href").?.string);
     try std.testing.expectEqualStrings("@bob@remote.test", tags_val.array.items[0].object.get("name").?.string);
+
+    const attachments_val = obj.get("attachment") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(attachments_val == .array);
+    try std.testing.expectEqual(@as(usize, 1), attachments_val.array.items.len);
+    try std.testing.expectEqualStrings("Image", attachments_val.array.items[0].object.get("type").?.string);
+    try std.testing.expectEqualStrings("image/png", attachments_val.array.items[0].object.get("mediaType").?.string);
+    try std.testing.expectEqualStrings("alt direct", attachments_val.array.items[0].object.get("name").?.string);
+    try std.testing.expect(std.mem.endsWith(u8, attachments_val.array.items[0].object.get("url").?.string, "/media/tok-direct-1"));
 }
 
 fn jsonArrayHasString(val: std.json.Value, needle: []const u8) bool {
@@ -1566,6 +1732,9 @@ test "deliverStatusToFollowers includes stored recipients for non-direct statuse
 
     const user = (try users.lookupUserById(&app_state.conn, a, user_id)).?;
     const st = try statuses.create(&app_state.conn, a, user_id, "hello", "private", null);
+    var m1 = try media.createWithToken(&app_state.conn, a, user_id, "tok-private-1", "video/mp4", "MP4DATA", "alt private", 0);
+    defer m1.deinit(a);
+    try std.testing.expect(try media.attachToStatus(&app_state.conn, st.id, m1.id, 0));
     try status_recipients.add(&app_state.conn, st.id, remote_actor_id);
 
     try mock.pushExpected(.{ .method = .POST, .url = remote_inbox, .response_status = .accepted, .response_body = "" });
@@ -1592,6 +1761,14 @@ test "deliverStatusToFollowers includes stored recipients for non-direct statuse
     try std.testing.expectEqualStrings("Mention", tags_val.array.items[0].object.get("type").?.string);
     try std.testing.expectEqualStrings(remote_actor_id, tags_val.array.items[0].object.get("href").?.string);
     try std.testing.expectEqualStrings("@bob@remote.test", tags_val.array.items[0].object.get("name").?.string);
+
+    const attachments_val = obj.get("attachment") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(attachments_val == .array);
+    try std.testing.expectEqual(@as(usize, 1), attachments_val.array.items.len);
+    try std.testing.expectEqualStrings("Video", attachments_val.array.items[0].object.get("type").?.string);
+    try std.testing.expectEqualStrings("video/mp4", attachments_val.array.items[0].object.get("mediaType").?.string);
+    try std.testing.expectEqualStrings("alt private", attachments_val.array.items[0].object.get("name").?.string);
+    try std.testing.expect(std.mem.endsWith(u8, attachments_val.array.items[0].object.get("url").?.string, "/media/tok-private-1"));
 }
 
 test "deliverStatusToFollowers includes inReplyTo when replying to remote statuses" {
@@ -1720,11 +1897,11 @@ test "deliverActorUpdate delivers Update with avatar and header to follower inbo
     try followers.upsertPending(&app_state.conn, user_id, remote_actor_id, "http://remote.test/follows/1");
     try std.testing.expect(try followers.markAcceptedByRemoteActorId(&app_state.conn, user_id, remote_actor_id));
 
-    const media = @import("media.zig");
+    const media_mod = @import("media.zig");
     const now_ms: i64 = 1_000_000;
-    var avatar_meta = try media.create(&app_state.conn, a, user_id, "image/png", "AVATAR", null, now_ms);
+    var avatar_meta = try media_mod.create(&app_state.conn, a, user_id, "image/png", "AVATAR", null, now_ms);
     defer avatar_meta.deinit(a);
-    var header_meta = try media.create(&app_state.conn, a, user_id, "image/png", "HEADER", null, now_ms);
+    var header_meta = try media_mod.create(&app_state.conn, a, user_id, "image/png", "HEADER", null, now_ms);
     defer header_meta.deinit(a);
 
     try std.testing.expect(try users.updateProfile(&app_state.conn, user_id, "Alice", "Hello", avatar_meta.id, header_meta.id));
@@ -1799,6 +1976,63 @@ test "followHandle sends signed Follow to remote inbox" {
     _ = try followHandle(&app_state, a, user_id, "@bob@remote.test");
 
     try std.testing.expectEqual(@as(usize, 3), mock.requests.items.len);
+
+    const webfinger_req = mock.requests.items[0];
+    try std.testing.expectEqual(std.http.Method.GET, webfinger_req.method);
+    try std.testing.expectEqualStrings("https://remote.test/.well-known/webfinger?resource=acct:bob@remote.test", webfinger_req.url);
+    const webfinger_date = headerValue(webfinger_req.extra_headers, "date") orelse return error.TestUnexpectedResult;
+    const webfinger_digest = headerValue(webfinger_req.extra_headers, "digest") orelse return error.TestUnexpectedResult;
+    const webfinger_signature = headerValue(webfinger_req.extra_headers, "signature") orelse return error.TestUnexpectedResult;
+    const empty_digest = try http_signatures.digestHeaderValueAlloc(a, "");
+    try std.testing.expectEqualStrings(empty_digest, webfinger_digest);
+    const webfinger_uri = try std.Uri.parse(webfinger_req.url);
+    const webfinger_target = try requestTargetAlloc(a, webfinger_uri);
+    const webfinger_host = try util_uri.hostHeaderAllocForUri(a, webfinger_uri);
+    const webfinger_signing_string = try http_signatures.signingStringAlloc(
+        a,
+        .GET,
+        webfinger_target,
+        webfinger_host,
+        webfinger_date,
+        webfinger_digest,
+    );
+    const webfinger_sig_prefix = "signature=\"";
+    const webfinger_sig_b64_i = std.mem.indexOf(u8, webfinger_signature, webfinger_sig_prefix) orelse return error.TestUnexpectedResult;
+    const webfinger_sig_b64_start = webfinger_sig_b64_i + webfinger_sig_prefix.len;
+    const webfinger_sig_b64_end = std.mem.indexOfPos(u8, webfinger_signature, webfinger_sig_b64_start, "\"") orelse return error.TestUnexpectedResult;
+    const webfinger_sig_b64 = webfinger_signature[webfinger_sig_b64_start..webfinger_sig_b64_end];
+    const webfinger_sig_len = std.base64.standard.Decoder.calcSizeForSlice(webfinger_sig_b64) catch return error.TestUnexpectedResult;
+    const webfinger_sig_bytes = try a.alloc(u8, webfinger_sig_len);
+    std.base64.standard.Decoder.decode(webfinger_sig_bytes, webfinger_sig_b64) catch return error.TestUnexpectedResult;
+    try std.testing.expect(try @import("crypto_rsa.zig").verifyRsaSha256Pem(keys.public_key_pem, webfinger_signing_string, webfinger_sig_bytes));
+
+    const actor_req = mock.requests.items[1];
+    try std.testing.expectEqual(std.http.Method.GET, actor_req.method);
+    try std.testing.expectEqualStrings(actor_id, actor_req.url);
+    const actor_date = headerValue(actor_req.extra_headers, "date") orelse return error.TestUnexpectedResult;
+    const actor_digest = headerValue(actor_req.extra_headers, "digest") orelse return error.TestUnexpectedResult;
+    const actor_signature = headerValue(actor_req.extra_headers, "signature") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(empty_digest, actor_digest);
+    const actor_uri = try std.Uri.parse(actor_req.url);
+    const actor_target = try requestTargetAlloc(a, actor_uri);
+    const actor_host = try util_uri.hostHeaderAllocForUri(a, actor_uri);
+    const actor_signing_string = try http_signatures.signingStringAlloc(
+        a,
+        .GET,
+        actor_target,
+        actor_host,
+        actor_date,
+        actor_digest,
+    );
+    const actor_sig_prefix = "signature=\"";
+    const actor_sig_b64_i = std.mem.indexOf(u8, actor_signature, actor_sig_prefix) orelse return error.TestUnexpectedResult;
+    const actor_sig_b64_start = actor_sig_b64_i + actor_sig_prefix.len;
+    const actor_sig_b64_end = std.mem.indexOfPos(u8, actor_signature, actor_sig_b64_start, "\"") orelse return error.TestUnexpectedResult;
+    const actor_sig_b64 = actor_signature[actor_sig_b64_start..actor_sig_b64_end];
+    const actor_sig_len = std.base64.standard.Decoder.calcSizeForSlice(actor_sig_b64) catch return error.TestUnexpectedResult;
+    const actor_sig_bytes = try a.alloc(u8, actor_sig_len);
+    std.base64.standard.Decoder.decode(actor_sig_bytes, actor_sig_b64) catch return error.TestUnexpectedResult;
+    try std.testing.expect(try @import("crypto_rsa.zig").verifyRsaSha256Pem(keys.public_key_pem, actor_signing_string, actor_sig_bytes));
 
     const req = mock.requests.items[2];
     try std.testing.expectEqual(std.http.Method.POST, req.method);

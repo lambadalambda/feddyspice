@@ -1,13 +1,12 @@
 const std = @import("std");
 
 const app = @import("app.zig");
+const federation = @import("federation.zig");
 const remote_note_ingest = @import("remote_note_ingest.zig");
 const remote_statuses = @import("remote_statuses.zig");
 const statuses = @import("statuses.zig");
-const transport = @import("transport.zig");
 const util_json = @import("util/json.zig");
 const util_local_iri = @import("util/local_iri.zig");
-const util_uri = @import("util/uri.zig");
 const util_url = @import("util/url.zig");
 
 pub const Error = remote_note_ingest.Error;
@@ -18,20 +17,12 @@ pub const IngestResult = struct {
 };
 
 fn fetchActivityPubObjectBodyAlloc(app_state: *app.App, allocator: std.mem.Allocator, url_str: []const u8) Error![]u8 {
-    const uri = try std.Uri.parse(url_str);
-    const host_header = util_uri.hostHeaderAllocForUri(allocator, uri) catch return error.RemoteFetchFailed;
-
-    const resp = try app_state.transport.fetch(allocator, .{
+    return federation.fetchBodySuccessAlloc(app_state, allocator, .{
         .url = url_str,
         .method = .GET,
-        .headers = .{ .host = .{ .override = host_header }, .accept_encoding = .omit },
+        .headers = .{ .accept_encoding = .omit },
         .extra_headers = &.{.{ .name = "accept", .value = "application/activity+json" }},
     });
-    if (resp.status.class() != .success) {
-        allocator.free(resp.body);
-        return error.RemoteFetchFailed;
-    }
-    return resp.body;
 }
 
 pub fn backfillRemoteAncestors(

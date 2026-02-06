@@ -802,29 +802,15 @@ pub fn accountRelationships(app_state: *app.App, allocator: std.mem.Allocator, r
     if (info == null) return common.unauthorized(allocator);
 
     const q = common.queryString(req.target);
-
-    var ids: std.ArrayListUnmanaged([]const u8) = .empty;
-    defer ids.deinit(allocator);
-
-    var it = std.mem.splitScalar(u8, q, '&');
-    while (it.next()) |pair_raw| {
-        if (pair_raw.len == 0) continue;
-        const eq = std.mem.indexOfScalar(u8, pair_raw, '=') orelse continue;
-
-        const key = pair_raw[0..eq];
-        const value = pair_raw[eq + 1 ..];
-        if (value.len == 0) continue;
-
-        if (std.mem.eql(u8, key, "id") or std.mem.eql(u8, key, "id[]") or std.mem.eql(u8, key, "id%5B%5D")) {
-            ids.append(allocator, value) catch
-                return .{ .status = .internal_server_error, .body = "internal server error\n" };
-        }
-    }
+    const key_aliases = [_][]const u8{ "id", "id[]", "id%5B%5D" };
+    const ids = common.collectQueryValuesForKeys(allocator, q, &key_aliases) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    defer allocator.free(ids);
 
     var rels: std.ArrayListUnmanaged(RelationshipPayload) = .empty;
     defer rels.deinit(allocator);
 
-    for (ids.items) |id_str| {
+    for (ids) |id_str| {
         var state: ?follows.FollowState = null;
 
         const id_num = std.fmt.parseInt(i64, id_str, 10) catch null;

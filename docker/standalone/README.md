@@ -2,6 +2,14 @@
 
 This folder contains a minimal Docker Compose setup for running feddyspice as a single service behind **Caddy** (TLS + reverse proxy).
 
+## Trust model (important)
+
+This deployment expects **Caddy to be the only public entrypoint**.
+
+- Do not expose the `feddyspice` container port directly to the internet.
+- Keep TLS termination and inbound header handling at the reverse proxy layer.
+- Forwarded headers used by the app (`X-Forwarded-For`, `X-Real-IP`, `X-Forwarded-Host`) must come from the trusted proxy path.
+
 ## Quick start
 
 From the repo root:
@@ -41,4 +49,4 @@ Important:
 
 - `FEDDYSPICE_DOMAIN` must match the public hostname.
 - `FEDDYSPICE_SCHEME` should be `https` if TLS is terminated in front of feddyspice.
-
+- Configure your proxy to sanitize/overwrite forwarded headers so clients cannot spoof requester identity.

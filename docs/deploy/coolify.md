@@ -8,6 +8,7 @@ Coolify can deploy feddyspice directly from this repo’s `Dockerfile` and put i
 2. Choose **Dockerfile** as the build method.
 3. Set the **internal port** to `8080`.
 4. Attach your public domain in Coolify (this is the hostname other servers will federate with).
+5. Keep the app reachable only through Coolify’s proxy/TLS entrypoint; do not separately publish port `8080` to the public internet.
 
 ## Persistent storage (required)
 
@@ -43,6 +44,14 @@ Configure the container health check to use:
 
 - Path: `/healthz`
 
+## Reverse-proxy trust model (important)
+
+feddyspice assumes it is behind a trusted reverse proxy in production.
+
+- Coolify’s proxy should be the only public entrypoint.
+- Do not place untrusted direct traffic in front of the app container.
+- Forwarded headers (`X-Forwarded-For`, `X-Real-IP`, `X-Forwarded-Host`) must come from the trusted proxy path, not directly from clients.
+
 ## First-time setup
 
 After the first deploy:
@@ -56,3 +65,4 @@ After the first deploy:
 - If you change domains later, you must update `FEDDYSPICE_DOMAIN` and expect remote instances to treat it as a different actor.
 - If `POST /signup` or `POST /login` returns `403 forbidden`, ensure your browser accepts cookies from your instance (signup/login use a CSRF cookie) and double-check `FEDDYSPICE_DOMAIN`/`FEDDYSPICE_SCHEME` match the public URL.
 - Confirm the app sees the expected domain by checking `GET /api/v2/instance` (`domain` field). If it shows `localhost`, your env vars aren’t being applied to the running container.
+- If you accidentally expose port `8080` directly, rate-limiting and requester attribution assumptions are weakened because deployment is outside the supported trust model.

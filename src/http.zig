@@ -16,6 +16,7 @@ const oauth = @import("oauth.zig");
 const remote_actors = @import("remote_actors.zig");
 const remote_statuses = @import("remote_statuses.zig");
 const sessions = @import("sessions.zig");
+const status_recipients = @import("status_recipients.zig");
 const statuses = @import("statuses.zig");
 const transport = @import("transport.zig");
 const users = @import("users.zig");
@@ -772,6 +773,42 @@ test "GET /api/v2/instance -> 200 with domain" {
     }
 }
 
+test "instance registrations reflect single-user setup state" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const before_v1 = handle(&app_state, a, .{ .method = .GET, .target = "/api/v1/instance" });
+    try std.testing.expectEqual(std.http.Status.ok, before_v1.status);
+    var before_v1_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, before_v1.body, .{});
+    defer before_v1_json.deinit();
+    try std.testing.expect(before_v1_json.value.object.get("registrations").?.bool);
+
+    const before_v2 = handle(&app_state, a, .{ .method = .GET, .target = "/api/v2/instance" });
+    try std.testing.expectEqual(std.http.Status.ok, before_v2.status);
+    var before_v2_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, before_v2.body, .{});
+    defer before_v2_json.deinit();
+    try std.testing.expect(before_v2_json.value.object.get("registrations").?.object.get("enabled").?.bool);
+
+    const params = app_state.cfg.password_params;
+    _ = try users.create(&app_state.conn, a, "alice", "password", params);
+
+    const after_v1 = handle(&app_state, a, .{ .method = .GET, .target = "/api/v1/instance" });
+    try std.testing.expectEqual(std.http.Status.ok, after_v1.status);
+    var after_v1_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, after_v1.body, .{});
+    defer after_v1_json.deinit();
+    try std.testing.expect(!after_v1_json.value.object.get("registrations").?.bool);
+
+    const after_v2 = handle(&app_state, a, .{ .method = .GET, .target = "/api/v2/instance" });
+    try std.testing.expectEqual(std.http.Status.ok, after_v2.status);
+    var after_v2_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, after_v2.body, .{});
+    defer after_v2_json.deinit();
+    try std.testing.expect(!after_v2_json.value.object.get("registrations").?.object.get("enabled").?.bool);
+}
+
 test "GET /api/v1/streaming -> 501" {
     var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
     defer app_state.deinit();
@@ -1300,6 +1337,37 @@ test "POST /api/v1/apps registers app" {
     try std.testing.expect(obj.get("client_id") != null);
     try std.testing.expect(obj.get("client_secret") != null);
     try std.testing.expectEqualStrings("urn:ietf:wg:oauth:2.0:oob", obj.get("redirect_uri").?.string);
+}
+
+test "POST /api/v1/apps rate limit is scoped per requester" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const body = "client_name=pl-fe&redirect_uris=urn%3Aietf%3Awg%3Aoauth%3A2.0%3Aoob&scopes=read+write&website=";
+    var last_same_ip: http_types.Response = undefined;
+    for (0..31) |_| {
+        last_same_ip = handle(&app_state, a, .{
+            .method = .POST,
+            .target = "/api/v1/apps",
+            .content_type = "application/x-www-form-urlencoded",
+            .body = body,
+            .remote_addr = "203.0.113.1",
+        });
+    }
+    try std.testing.expectEqual(std.http.Status.too_many_requests, last_same_ip.status);
+
+    const other_ip_resp = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/api/v1/apps",
+        .content_type = "application/x-www-form-urlencoded",
+        .body = body,
+        .remote_addr = "203.0.113.2",
+    });
+    try std.testing.expectEqual(std.http.Status.ok, other_ip_resp.status);
 }
 
 test "POST /api/v1/apps accepts json" {
@@ -2650,6 +2718,12 @@ test "inbox: backfills missing remote ancestors on ingest" {
 
     try std.testing.expectEqual(@as(usize, 1), mock.requests.items.len);
     try std.testing.expectEqualStrings(parent_uri, mock.requests.items[0].url);
+    const backfill_req = mock.requests.items[0];
+    try std.testing.expectEqualStrings("application/activity+json", headerValue(backfill_req.extra_headers, "accept").?);
+    try std.testing.expect(headerValue(backfill_req.extra_headers, "date") != null);
+    const digest = headerValue(backfill_req.extra_headers, "digest") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(std.mem.startsWith(u8, digest, "SHA-256="));
+    try std.testing.expect(headerValue(backfill_req.extra_headers, "signature") != null);
 }
 
 test "statuses: action endpoints update relationship booleans" {
@@ -3490,6 +3564,18 @@ test "statuses: GET /api/v1/statuses?ids[] hydrates statuses" {
     defer s2_json.deinit();
     const id2 = s2_json.value.object.get("id").?.string;
 
+    const s_priv = handle(&app_state, a, .{
+        .method = .POST,
+        .target = "/api/v1/statuses",
+        .content_type = "application/x-www-form-urlencoded",
+        .body = "status=secret&visibility=private",
+        .authorization = auth_header,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, s_priv.status);
+    var s_priv_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, s_priv.body, .{});
+    defer s_priv_json.deinit();
+    const id_priv = s_priv_json.value.object.get("id").?.string;
+
     const bulk_target = try std.fmt.allocPrint(a, "/api/v1/statuses?ids[]={s}&ids[]={s}", .{ id1, id2 });
     const bulk = handle(&app_state, a, .{
         .method = .GET,
@@ -3505,6 +3591,63 @@ test "statuses: GET /api/v1/statuses?ids[] hydrates statuses" {
     try std.testing.expectEqual(@as(usize, 2), parsed.value.array.items.len);
     try std.testing.expectEqualStrings(id1, parsed.value.array.items[0].object.get("id").?.string);
     try std.testing.expectEqualStrings(id2, parsed.value.array.items[1].object.get("id").?.string);
+
+    const bulk_unauth_target = try std.fmt.allocPrint(a, "/api/v1/statuses?ids[]={s}&ids[]={s}", .{ id1, id_priv });
+    const bulk_unauth = handle(&app_state, a, .{
+        .method = .GET,
+        .target = bulk_unauth_target,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, bulk_unauth.status);
+
+    var parsed_unauth = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bulk_unauth.body, .{});
+    defer parsed_unauth.deinit();
+    try std.testing.expect(parsed_unauth.value == .array);
+    try std.testing.expectEqual(@as(usize, 1), parsed_unauth.value.array.items.len);
+    try std.testing.expectEqualStrings(id1, parsed_unauth.value.array.items[0].object.get("id").?.string);
+}
+
+test "statuses: unauthenticated show/context return public statuses only" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const root = try statuses.create(&app_state.conn, a, user_id, "root", "public", null);
+    const reply = try statuses.create(&app_state.conn, a, user_id, "reply", "public", root.id);
+    const priv = try statuses.create(&app_state.conn, a, user_id, "secret", "private", null);
+
+    const root_target = try std.fmt.allocPrint(a, "/api/v1/statuses/{d}", .{root.id});
+    const root_resp = handle(&app_state, a, .{
+        .method = .GET,
+        .target = root_target,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, root_resp.status);
+
+    const priv_target = try std.fmt.allocPrint(a, "/api/v1/statuses/{d}", .{priv.id});
+    const priv_resp = handle(&app_state, a, .{
+        .method = .GET,
+        .target = priv_target,
+    });
+    try std.testing.expectEqual(std.http.Status.not_found, priv_resp.status);
+
+    const ctx_target = try std.fmt.allocPrint(a, "/api/v1/statuses/{d}/context", .{reply.id});
+    const ctx_resp = handle(&app_state, a, .{
+        .method = .GET,
+        .target = ctx_target,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, ctx_resp.status);
+
+    var ctx_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, ctx_resp.body, .{});
+    defer ctx_json.deinit();
+
+    const ancestors = ctx_json.value.object.get("ancestors").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), ancestors.len);
+    try std.testing.expectEqualStrings(try std.fmt.allocPrint(a, "{d}", .{root.id}), ancestors[0].object.get("id").?.string);
 }
 
 test "timelines: public timeline returns local statuses" {
@@ -5612,6 +5755,86 @@ test "GET /users/:name/outbox and /users/:name/statuses/:id return ActivityPub o
     try std.testing.expectEqualStrings(expected_note2_id, items[0].object.get("object").?.object.get("id").?.string);
 }
 
+test "ActivityPub outbox and note include inReplyTo, mention tags, and attachments" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const remote_actor_id = "https://remote.test/users/bob";
+    try remote_actors.upsert(&app_state.conn, .{
+        .id = remote_actor_id,
+        .inbox = "https://remote.test/users/bob/inbox",
+        .shared_inbox = null,
+        .preferred_username = "bob",
+        .domain = "remote.test",
+        .public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
+    });
+
+    const parent = try statuses.create(&app_state.conn, a, user_id, "parent", "public", null);
+    const child = try statuses.create(&app_state.conn, a, user_id, "child @bob@remote.test", "public", parent.id);
+    try status_recipients.add(&app_state.conn, child.id, remote_actor_id);
+
+    var m = try media.createWithToken(&app_state.conn, a, user_id, "tok-ap-note", "image/png", "PNGDATA", "alt text", 0);
+    defer m.deinit(a);
+    try std.testing.expect(try media.attachToStatus(&app_state.conn, child.id, m.id, 0));
+
+    const outbox_resp = handle(&app_state, a, .{
+        .method = .GET,
+        .target = "/users/alice/outbox?page=true",
+    });
+    try std.testing.expectEqual(std.http.Status.ok, outbox_resp.status);
+
+    var outbox_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, outbox_resp.body, .{});
+    defer outbox_json.deinit();
+    const items = outbox_json.value.object.get("orderedItems").?.array.items;
+    try std.testing.expect(items.len > 0);
+
+    const child_note_id = try std.fmt.allocPrint(a, "http://example.test/users/alice/statuses/{d}", .{child.id});
+    const parent_note_id = try std.fmt.allocPrint(a, "http://example.test/users/alice/statuses/{d}", .{parent.id});
+
+    var saw_child: bool = false;
+    for (items) |it| {
+        const obj = it.object.get("object").?.object;
+        const id_val = obj.get("id").?.string;
+        if (!std.mem.eql(u8, id_val, child_note_id)) continue;
+        saw_child = true;
+        try std.testing.expectEqualStrings(parent_note_id, obj.get("inReplyTo").?.string);
+        const tags = obj.get("tag").?.array.items;
+        try std.testing.expectEqual(@as(usize, 1), tags.len);
+        try std.testing.expectEqualStrings("Mention", tags[0].object.get("type").?.string);
+        try std.testing.expectEqualStrings(remote_actor_id, tags[0].object.get("href").?.string);
+        const attachments = obj.get("attachment").?.array.items;
+        try std.testing.expectEqual(@as(usize, 1), attachments.len);
+        try std.testing.expectEqualStrings("Image", attachments[0].object.get("type").?.string);
+        try std.testing.expectEqualStrings("image/png", attachments[0].object.get("mediaType").?.string);
+        try std.testing.expectEqualStrings("alt text", attachments[0].object.get("name").?.string);
+        try std.testing.expect(std.mem.endsWith(u8, attachments[0].object.get("url").?.string, "/media/tok-ap-note"));
+    }
+    try std.testing.expect(saw_child);
+
+    const note_resp = handle(&app_state, a, .{
+        .method = .GET,
+        .target = try std.fmt.allocPrint(a, "/users/alice/statuses/{d}", .{child.id}),
+    });
+    try std.testing.expectEqual(std.http.Status.ok, note_resp.status);
+
+    var note_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, note_resp.body, .{});
+    defer note_json.deinit();
+    try std.testing.expectEqualStrings(parent_note_id, note_json.value.object.get("inReplyTo").?.string);
+    const note_tags = note_json.value.object.get("tag").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), note_tags.len);
+    try std.testing.expectEqualStrings(remote_actor_id, note_tags[0].object.get("href").?.string);
+    const note_attachments = note_json.value.object.get("attachment").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), note_attachments.len);
+    try std.testing.expect(std.mem.endsWith(u8, note_attachments[0].object.get("url").?.string, "/media/tok-ap-note"));
+}
+
 test "ActivityPub visibility: outbox + note endpoints do not leak private/direct, and unlisted uses cc=Public" {
     var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
     defer app_state.deinit();
@@ -5698,6 +5921,54 @@ test "ActivityPub visibility: outbox + note endpoints do not leak private/direct
         .target = try std.fmt.allocPrint(a, "/users/alice/statuses/{d}", .{direct_st.id}),
     });
     try std.testing.expectEqual(std.http.Status.not_found, direct_note_resp.status);
+}
+
+test "ActivityPub outbox page exposes next cursor for older posts" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    const user_id = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    for (0..25) |i| {
+        const text = try std.fmt.allocPrint(a, "post-{d}", .{i});
+        _ = try statuses.create(&app_state.conn, a, user_id, text, "public", null);
+    }
+
+    const page1 = handle(&app_state, a, .{
+        .method = .GET,
+        .target = "/users/alice/outbox?page=true",
+    });
+    try std.testing.expectEqual(std.http.Status.ok, page1.status);
+
+    var page1_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, page1.body, .{});
+    defer page1_json.deinit();
+
+    const items1 = page1_json.value.object.get("orderedItems").?.array.items;
+    try std.testing.expectEqual(@as(usize, 20), items1.len);
+
+    const next_url = page1_json.value.object.get("next").?.string;
+    const next_target = blk: {
+        const i = std.mem.indexOf(u8, next_url, "/users/") orelse return error.TestUnexpectedResult;
+        break :blk next_url[i..];
+    };
+
+    const page2 = handle(&app_state, a, .{
+        .method = .GET,
+        .target = next_target,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, page2.status);
+
+    var page2_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, page2.body, .{});
+    defer page2_json.deinit();
+
+    const items2 = page2_json.value.object.get("orderedItems").?.array.items;
+    try std.testing.expectEqual(@as(usize, 5), items2.len);
+    try std.testing.expect(page2_json.value.object.get("next").? == .null);
 }
 
 test "POST /api/v1/statuses delivers Create to followers" {
@@ -6950,6 +7221,77 @@ test "POST /users/:name/inbox Update(Note) updates remote status content and pub
 
     // Ensure we updated the existing status (not creating a new one).
     try std.testing.expectEqual(created.id, updated.id);
+}
+
+test "POST /users/:name/inbox Update(Note) keeps followers-only visibility private" {
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    const params = app_state.cfg.password_params;
+    _ = try users.create(&app_state.conn, std.testing.allocator, "alice", "password", params);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const remote_kp = try @import("crypto_rsa.zig").generateRsaKeyPairPem(a, 512);
+    const remote_key_id = "https://remote.test/users/bob#main-key";
+    const remote_actor_id = "https://remote.test/users/bob";
+
+    try remote_actors.upsert(&app_state.conn, .{
+        .id = remote_actor_id,
+        .inbox = "https://remote.test/users/bob/inbox",
+        .shared_inbox = null,
+        .preferred_username = "bob",
+        .domain = "remote.test",
+        .public_key_pem = remote_kp.public_key_pem,
+    });
+
+    const remote_note_uri = "https://remote.test/notes/private-1";
+    const old_html = try @import("util/html.zig").safeHtmlFromRemoteHtmlAlloc(a, "<p>old private</p>");
+
+    _ = try remote_statuses.createIfNotExists(
+        &app_state.conn,
+        a,
+        remote_note_uri,
+        remote_actor_id,
+        null,
+        old_html,
+        null,
+        "private",
+        "2020-01-01T00:00:00.000Z",
+    );
+
+    const update_body = try std.json.Stringify.valueAlloc(
+        a,
+        .{
+            .@"@context" = "https://www.w3.org/ns/activitystreams",
+            .id = "https://remote.test/updates/private-1",
+            .type = "Update",
+            .actor = remote_actor_id,
+            .object = .{
+                .id = remote_note_uri,
+                .type = "Note",
+                .content = "<p>still private</p>",
+                .to = [_][]const u8{"https://remote.test/users/bob/followers"},
+            },
+        },
+        .{},
+    );
+
+    const inbox_req = try signedInboxRequest(
+        a,
+        "example.test",
+        "/users/alice/inbox",
+        update_body,
+        remote_key_id,
+        remote_kp.private_key_pem,
+    );
+    const inbox_resp = handle(&app_state, a, inbox_req);
+    try std.testing.expectEqual(std.http.Status.accepted, inbox_resp.status);
+
+    const updated = (try remote_statuses.lookupByUri(&app_state.conn, a, remote_note_uri)).?;
+    try std.testing.expectEqualStrings("private", updated.visibility);
 }
 
 test "POST /users/:name/inbox Like creates favourite notification" {

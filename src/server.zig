@@ -100,6 +100,10 @@ pub fn serveOnce(app_state: *app.App, listener: *net.Server) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
+    const req_remote_addr: []const u8 = blk: {
+        if (remote_override) |raw| break :blk raw;
+        break :blk std.fmt.allocPrint(alloc, "{f}", .{conn.address}) catch "unknown";
+    };
 
     if (isStreamingWebSocketRequest(method, path, upgrade_hdr, connection_hdr, sec_ws_key, sec_ws_version)) {
         const q = common.queryString(target);
@@ -193,7 +197,8 @@ pub fn serveOnce(app_state: *app.App, listener: *net.Server) !void {
     if (request.head.method.requestHasBody()) {
         const default_max_len: usize = 1024 * 1024;
         const media_max_len: usize = 10 * 1024 * 1024;
-        const max_len: usize = if (std.mem.eql(u8, path, "/api/v1/media")) media_max_len else default_max_len;
+        const is_media_upload = std.mem.eql(u8, path, "/api/v1/media") or std.mem.eql(u8, path, "/api/v2/media");
+        const max_len: usize = if (is_media_upload) media_max_len else default_max_len;
 
         request.head.expect = null;
         const body_reader = request.readerExpectNone(&body_read_buffer);
@@ -247,6 +252,7 @@ pub fn serveOnce(app_state: *app.App, listener: *net.Server) !void {
         .signature = signature_hdr,
         .cookie = cookie,
         .authorization = authorization,
+        .remote_addr = req_remote_addr,
     });
 
     try writeResponse(app_state, alloc, &request, resp);
@@ -779,6 +785,78 @@ test "serveOnce: reads chunked request bodies" {
             }
 
             c.ok = std.mem.startsWith(u8, buf[0..used], "HTTP/1.1 200");
+        }
+    };
+
+    var t = try std.Thread.spawn(.{}, Client.run, .{&ctx});
+
+    var app_state = try app.App.initMemory(std.testing.allocator, "example.test");
+    defer app_state.deinit();
+
+    try serveOnce(&app_state, &listener);
+    t.join();
+
+    try std.testing.expect(ctx.ok);
+}
+
+test "serveOnce: /api/v2/media allows request bodies larger than 1 MiB" {
+    const listen_address = try net.Address.parseIp("127.0.0.1", 0);
+    var listener = try listen_address.listen(.{ .reuse_address = true });
+    defer listener.deinit();
+
+    const addr = listener.listen_address;
+
+    var ctx: struct {
+        addr: net.Address,
+        ok: bool = false,
+    } = .{ .addr = addr };
+
+    const Client = struct {
+        fn run(c: *@TypeOf(ctx)) !void {
+            var stream = try net.tcpConnectToAddress(c.addr);
+            defer stream.close();
+
+            const body_len: usize = (1024 * 1024) + 1024;
+
+            var req_buf: [512]u8 = undefined;
+            const req_head = try std.fmt.bufPrint(
+                &req_buf,
+                "POST /api/v2/media HTTP/1.1\r\n" ++
+                    "Host: localhost\r\n" ++
+                    "Content-Type: application/octet-stream\r\n" ++
+                    "Content-Length: {d}\r\n" ++
+                    "Connection: close\r\n" ++
+                    "\r\n",
+                .{body_len},
+            );
+            try writeAll(stream.handle, req_head);
+
+            var chunk: [16 * 1024]u8 = undefined;
+            @memset(&chunk, 'a');
+
+            var sent: usize = 0;
+            while (sent < body_len) {
+                const n = @min(chunk.len, body_len - sent);
+                writeAll(stream.handle, chunk[0..n]) catch |err| switch (err) {
+                    error.BrokenPipe, error.ConnectionResetByPeer => break,
+                    else => return err,
+                };
+                sent += n;
+            }
+
+            var buf: [4096]u8 = undefined;
+            var used: usize = 0;
+            while (used < buf.len) {
+                const n = std.posix.read(stream.handle, buf[used..]) catch |err| switch (err) {
+                    error.ConnectionResetByPeer => break,
+                    else => return err,
+                };
+                if (n == 0) break;
+                used += n;
+            }
+
+            const resp = buf[0..used];
+            c.ok = std.mem.startsWith(u8, resp, "HTTP/1.1 401");
         }
     };
 

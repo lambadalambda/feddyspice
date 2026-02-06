@@ -23,6 +23,7 @@ const remote_note_ingest = @import("../remote_note_ingest.zig");
 const remote_statuses = @import("../remote_statuses.zig");
 const rate_limit = @import("../rate_limit.zig");
 const status_reactions = @import("../status_reactions.zig");
+const status_recipients = @import("../status_recipients.zig");
 const statuses = @import("../statuses.zig");
 const urls = @import("urls.zig");
 const users = @import("../users.zig");
@@ -48,6 +49,139 @@ fn remoteStatusResponse(
         .content_type = "application/json; charset=utf-8",
         .body = body,
     };
+}
+
+fn statusIndexById(list: []const statuses.Status, id: i64) ?usize {
+    for (list, 0..) |st, idx| {
+        if (st.id == id) return idx;
+    }
+    return null;
+}
+
+fn inClauseQueryAlloc(
+    allocator: std.mem.Allocator,
+    prefix: []const u8,
+    item_count: usize,
+    suffix: []const u8,
+) std.mem.Allocator.Error![]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(allocator);
+
+    try out.appendSlice(allocator, prefix);
+    for (0..item_count) |i| {
+        if (i > 0) try out.append(allocator, ',');
+        var idx_buf: [24]u8 = undefined;
+        const idx = std.fmt.bufPrint(&idx_buf, "?{}", .{i + 1}) catch unreachable;
+        try out.appendSlice(allocator, idx);
+    }
+    try out.appendSlice(allocator, suffix);
+
+    return out.toOwnedSlice(allocator);
+}
+
+fn prefetchOutboxRecipientActorIds(
+    conn: *db.Db,
+    allocator: std.mem.Allocator,
+    list: []const statuses.Status,
+    per_status_limit: usize,
+) (db.Error || std.mem.Allocator.Error)![]const []const []const u8 {
+    const out = try allocator.alloc([]const []const u8, list.len);
+    for (out) |*slot| slot.* = &.{};
+    if (list.len == 0) return out;
+
+    const sql = try inClauseQueryAlloc(
+        allocator,
+        "SELECT status_id, remote_actor_id FROM status_recipients WHERE status_id IN (",
+        list.len,
+        ") ORDER BY status_id ASC, rowid DESC;",
+    );
+    const sql_z = try allocator.dupeZ(u8, sql);
+    var stmt = try conn.prepareZ(sql_z);
+    defer stmt.finalize();
+
+    for (list, 0..) |st, i| {
+        try stmt.bindInt64(@intCast(i + 1), st.id);
+    }
+
+    const builders = try allocator.alloc(std.ArrayListUnmanaged([]const u8), list.len);
+    for (builders) |*b| b.* = .empty;
+    const counts = try allocator.alloc(usize, list.len);
+    @memset(counts, 0);
+
+    const lim = @min(per_status_limit, 200);
+
+    while (true) {
+        switch (try stmt.step()) {
+            .done => break,
+            .row => {
+                const status_id = stmt.columnInt64(0);
+                const idx = statusIndexById(list, status_id) orelse continue;
+                if (counts[idx] >= lim) continue;
+                try builders[idx].append(allocator, try allocator.dupe(u8, stmt.columnText(1)));
+                counts[idx] += 1;
+            },
+        }
+    }
+
+    for (builders, 0..) |*b, idx| {
+        out[idx] = try b.toOwnedSlice(allocator);
+    }
+    return out;
+}
+
+fn prefetchOutboxAttachments(
+    conn: *db.Db,
+    allocator: std.mem.Allocator,
+    base: []const u8,
+    list: []const statuses.Status,
+) (db.Error || std.mem.Allocator.Error)![]const []const federation.NoteAttachment {
+    const out = try allocator.alloc([]const federation.NoteAttachment, list.len);
+    for (out) |*slot| slot.* = &.{};
+    if (list.len == 0) return out;
+
+    const sql = try inClauseQueryAlloc(
+        allocator,
+        "SELECT sma.status_id, m.content_type, m.public_token, m.description\n" ++
+            "FROM status_media_attachments sma\n" ++
+            "JOIN media_attachments m ON m.id = sma.media_id\n" ++
+            "WHERE sma.status_id IN (",
+        list.len,
+        ") ORDER BY sma.status_id ASC, sma.position ASC;",
+    );
+    const sql_z = try allocator.dupeZ(u8, sql);
+    var stmt = try conn.prepareZ(sql_z);
+    defer stmt.finalize();
+
+    for (list, 0..) |st, i| {
+        try stmt.bindInt64(@intCast(i + 1), st.id);
+    }
+
+    const builders = try allocator.alloc(std.ArrayListUnmanaged(federation.NoteAttachment), list.len);
+    for (builders) |*b| b.* = .empty;
+
+    while (true) {
+        switch (try stmt.step()) {
+            .done => break,
+            .row => {
+                const status_id = stmt.columnInt64(0);
+                const idx = statusIndexById(list, status_id) orelse continue;
+                const media_type = try allocator.dupe(u8, stmt.columnText(1));
+                const media_url = try std.fmt.allocPrint(allocator, "{s}/media/{s}", .{ base, stmt.columnText(2) });
+                const description = if (stmt.columnType(3) == .null) null else try allocator.dupe(u8, stmt.columnText(3));
+                try builders[idx].append(allocator, .{
+                    .type = federation.noteAttachmentType(media_type),
+                    .mediaType = media_type,
+                    .url = media_url,
+                    .name = description,
+                });
+            },
+        }
+    }
+
+    for (builders, 0..) |*b, idx| {
+        out[idx] = try b.toOwnedSlice(allocator);
+    }
+    return out;
 }
 
 fn textToHtmlAlloc(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
@@ -296,6 +430,10 @@ pub fn outboxGet(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
     const q = common.queryString(req.target);
     var params = form.parse(allocator, q) catch form.Form{ .map = .empty };
     const is_page = params.get("page") != null;
+    const max_id: ?i64 = blk: {
+        const s = params.get("max_id") orelse break :blk null;
+        break :blk std.fmt.parseInt(i64, s, 10) catch null;
+    };
 
     if (!is_page) {
         var count_stmt = app_state.conn.prepareZ(
@@ -332,23 +470,13 @@ pub fn outboxGet(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
     }
 
     const limit: usize = 20;
-    const list = statuses.listByUser(&app_state.conn, allocator, user.?.id, limit, null) catch
+    const list = statuses.listByUser(&app_state.conn, allocator, user.?.id, limit, max_id) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
 
     const actor_id = std.fmt.allocPrint(allocator, "{s}/users/{s}", .{ base, username }) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
     const followers_url = std.fmt.allocPrint(allocator, "{s}/users/{s}/followers", .{ base, username }) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
-
-    const ApNote = struct {
-        id: []const u8,
-        type: []const u8 = "Note",
-        attributedTo: []const u8,
-        content: []const u8,
-        published: []const u8,
-        to: []const []const u8,
-        cc: []const []const u8,
-    };
 
     const ApCreate = struct {
         id: []const u8,
@@ -357,21 +485,33 @@ pub fn outboxGet(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
         published: []const u8,
         to: []const []const u8,
         cc: []const []const u8,
-        object: ApNote,
+        object: federation.LocalNote,
     };
+
+    var visible = std.ArrayListUnmanaged(statuses.Status).empty;
+    defer visible.deinit(allocator);
+    for (list) |st| {
+        if (!isPubliclyVisibleVisibility(st.visibility)) continue;
+        visible.append(allocator, st) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    }
+
+    const recipient_actor_ids_by_idx = prefetchOutboxRecipientActorIds(
+        &app_state.conn,
+        allocator,
+        visible.items,
+        50,
+    ) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    const attachments_by_idx = prefetchOutboxAttachments(
+        &app_state.conn,
+        allocator,
+        base,
+        visible.items,
+    ) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
 
     var items = std.ArrayListUnmanaged(ApCreate).empty;
     defer items.deinit(allocator);
 
-    for (list) |st| {
-        if (!isPubliclyVisibleVisibility(st.visibility)) continue;
-
-        const status_id_str = std.fmt.allocPrint(allocator, "{d}", .{st.id}) catch "0";
-        const status_url = std.fmt.allocPrint(allocator, "{s}/users/{s}/statuses/{s}", .{ base, username, status_id_str }) catch "";
-        const activity_id = std.fmt.allocPrint(allocator, "{s}#create", .{status_url}) catch "";
-
-        const html_content = textToHtmlAlloc(allocator, st.text) catch st.text;
-
+    for (visible.items, 0..) |st, idx| {
         const public_iri = "https://www.w3.org/ns/activitystreams#Public";
         const to = allocator.alloc([]const u8, 1) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
         const cc = allocator.alloc([]const u8, 1) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
@@ -384,31 +524,54 @@ pub fn outboxGet(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
             cc[0] = followers_url;
         }
 
+        const tags = federation.mentionTagsFromActorIdsAlloc(
+            app_state,
+            allocator,
+            recipient_actor_ids_by_idx[idx],
+        ) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        const in_reply_to_url = federation.localNoteInReplyToUrlAlloc(app_state, allocator, base, st);
+        const note = federation.localNoteFromStatusWithResolvedMetaAlloc(
+            app_state,
+            allocator,
+            user.?,
+            st,
+            to,
+            cc,
+            in_reply_to_url,
+            tags,
+            attachments_by_idx[idx],
+        ) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
+        const activity_id = std.fmt.allocPrint(allocator, "{s}#create", .{note.id}) catch
+            return .{ .status = .internal_server_error, .body = "internal server error\n" };
+
         items.append(allocator, .{
             .id = activity_id,
             .actor = actor_id,
-            .published = st.created_at,
+            .published = note.published,
             .to = to,
             .cc = cc,
-            .object = .{
-                .id = status_url,
-                .attributedTo = actor_id,
-                .content = html_content,
-                .published = st.created_at,
-                .to = to,
-                .cc = cc,
-            },
+            .object = note,
         }) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
     }
 
     const page_id = std.fmt.allocPrint(allocator, "{s}?page=true", .{outbox_id}) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    const next_page: ?[]const u8 = blk: {
+        if (list.len < limit) break :blk null;
+        break :blk std.fmt.allocPrint(
+            allocator,
+            "{s}?page=true&max_id={d}",
+            .{ outbox_id, list[list.len - 1].id },
+        ) catch null;
+    };
 
     const payload = .{
         .@"@context" = "https://www.w3.org/ns/activitystreams",
         .id = page_id,
         .type = "OrderedCollectionPage",
         .partOf = outbox_id,
+        .next = next_page,
         .orderedItems = items.items,
     };
 
@@ -450,8 +613,6 @@ pub fn userStatusGet(app_state: *app.App, allocator: std.mem.Allocator, path: []
     const base = util_url.baseUrlAlloc(app_state, allocator) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
 
-    const actor_id = std.fmt.allocPrint(allocator, "{s}/users/{s}", .{ base, username }) catch
-        return .{ .status = .internal_server_error, .body = "internal server error\n" };
     const followers_url = std.fmt.allocPrint(allocator, "{s}/users/{s}/followers", .{ base, username }) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
 
@@ -489,17 +650,30 @@ pub fn userStatusGet(app_state: *app.App, allocator: std.mem.Allocator, path: []
     const to = to_buf[0..];
     const cc = cc_buf[0..];
 
-    const html_content = textToHtmlAlloc(allocator, st.?.text) catch st.?.text;
+    const mention_actor_ids = status_recipients.listRemoteActorIds(&app_state.conn, allocator, st.?.id, 50) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    const note = federation.localNoteFromStatusAlloc(
+        app_state,
+        allocator,
+        user.?,
+        st.?,
+        to,
+        cc,
+        mention_actor_ids,
+    ) catch return .{ .status = .internal_server_error, .body = "internal server error\n" };
 
     const payload = .{
         .@"@context" = "https://www.w3.org/ns/activitystreams",
-        .id = note_id,
-        .type = "Note",
-        .attributedTo = actor_id,
-        .content = html_content,
-        .published = st.?.created_at,
-        .to = to[0..],
-        .cc = cc[0..],
+        .id = note.id,
+        .type = note.type,
+        .attributedTo = note.attributedTo,
+        .content = note.content,
+        .published = note.published,
+        .to = note.to,
+        .cc = note.cc,
+        .inReplyTo = note.inReplyTo,
+        .tag = note.tag,
+        .attachment = note.attachment,
     };
 
     const body = std.json.Stringify.valueAlloc(allocator, payload, .{}) catch
@@ -638,7 +812,9 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
         return .{ .status = .bad_request, .body = "json too many tokens\n" };
     }
 
-    const ok = rate_limit.allowNow(&app_state.conn, "ap_inbox", 60_000, 1200) catch
+    const rate_key = common.scopedRateLimitKeyAlloc(allocator, "ap_inbox", req) catch
+        return .{ .status = .internal_server_error, .body = "internal server error\n" };
+    const ok = rate_limit.allowNow(&app_state.conn, rate_key, 60_000, 1200) catch
         return .{ .status = .internal_server_error, .body = "internal server error\n" };
     if (!ok) return .{ .status = .too_many_requests, .body = "too many requests\n" };
 
@@ -878,20 +1054,7 @@ pub fn inboxPost(app_state: *app.App, allocator: std.mem.Allocator, req: http_ty
                     (obj_val.object.get("to") != null) or
                     (obj_val.object.get("cc") != null);
                 if (!has_recipients) break :blk remote_status.?.visibility;
-
-                const public_iri = "https://www.w3.org/ns/activitystreams#Public";
-
-                const public_in_to =
-                    activitypub_json.containsIri(parsed.value.object.get("to"), public_iri) or
-                    activitypub_json.containsIri(obj_val.object.get("to"), public_iri);
-                if (public_in_to) break :blk "public";
-
-                const public_in_cc =
-                    activitypub_json.containsIri(parsed.value.object.get("cc"), public_iri) or
-                    activitypub_json.containsIri(obj_val.object.get("cc"), public_iri);
-                if (public_in_cc) break :blk "unlisted";
-
-                break :blk "direct";
+                break :blk remote_note_ingest.noteVisibility(parsed.value.object, obj_val.object);
             };
 
             const updated = remote_statuses.updateByUri(
